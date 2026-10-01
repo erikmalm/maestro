@@ -1,9 +1,12 @@
 """Bounded hosted search and local tool calls with synthetic keys and mocked HTTP."""
+import asyncio
+from contextlib import contextmanager
 from datetime import timedelta
 from pathlib import Path
 import json
 import tempfile
 import threading
+import time
 import unittest
 from unittest.mock import patch
 
@@ -12,7 +15,7 @@ from fastapi.testclient import TestClient
 
 from backend import app as backend, credentials
 from backend.provider import DEFAULT as PROVIDER_DEFAULT, TITLE_INSTRUCTIONS
-from backend.web_search import DEFAULT, ENDPOINT, WebSearch
+from backend.web_search import DEFAULT, ENDPOINT, WebSearch, fit_sources, safe_url
 
 
 class WebSearchTests(unittest.TestCase):
@@ -119,10 +122,13 @@ class WebSearchTests(unittest.TestCase):
             return self.model_response({"role": "assistant", "content": "", "tool_calls": self.tool_calls})
         return self.model_response({"role": "assistant", "content": "Synthetic sourced answer [1]"}, 20)
 
+    @contextmanager
     def mock_http(self, handler=None):
-        real_client = httpx.Client
-        return patch("backend.provider.httpx.Client", side_effect=lambda **kwargs:
-                     real_client(transport=httpx.MockTransport(handler or self.provider_http), **kwargs))
+        real_client, real_async_client = httpx.Client, httpx.AsyncClient
+        transport = httpx.MockTransport(handler or self.provider_http)
+        with patch("backend.provider.httpx.Client", side_effect=lambda **kwargs: real_client(transport=transport, **kwargs)), \
+                patch("backend.web_search.httpx.AsyncClient", side_effect=lambda **kwargs: real_async_client(transport=transport, **kwargs)):
+            yield
 
     def search_requests(self):
         return [request for request in self.requests if request.url.host == "ollama.com"]
@@ -130,6 +136,14 @@ class WebSearchTests(unittest.TestCase):
     def model_requests(self):
         return [request for request in self.requests if request.url.path == "/api/chat"
                 and json.loads(request.content)["messages"][0]["content"] != TITLE_INSTRUCTIONS]
+
+    def ordinary_http(self, request):
+        self.requests.append(request)
+        self.assertEqual(request.url.host, "127.0.0.1")
+        if request.url.path == "/api/show":
+            return httpx.Response(200, json={"details": {"format": "gguf"}, "capabilities": ["completion", "tools"]})
+        self.assertNotIn("tools", json.loads(request.content))
+        return self.model_response({"role": "assistant", "content": "Synthetic ordinary reply"}, 20)
 
     def test_verified_key_enable_gates_and_deletion(self):
         self.assertEqual(self.configure(enabled=True).status_code, 409)
@@ -205,6 +219,38 @@ class WebSearchTests(unittest.TestCase):
         self.assertNotIn("web_search", response.json()["messages"][-1])
         self.assertEqual(self.service.status()["searches_today"], 1)
         self.assertEqual(response.json()["usage"]["calls"], 2)
+
+    def test_lost_readiness_quota_and_cooldown_allow_ordinary_local_replies(self):
+        self.enable()
+        for reason in ("missing key after restart", "failed retest", "daily cap", "cooldown"):
+            with self.subTest(reason=reason):
+                self.keys.clear()
+                if reason != "missing key after restart":
+                    self.keys[ENDPOINT] = self.key
+                with self.service.transaction() as state:
+                    state["tested_at"] = None if reason == "failed retest" else self.service.now().isoformat()
+                    state["config"]["daily_limit"] = 1 if reason == "daily cap" else 20
+                    state["paused_until"] = (self.service.now() + timedelta(seconds=60)).isoformat() if reason == "cooldown" else None
+                self.requests.clear()
+                with self.mock_http(self.ordinary_http):
+                    response = self.client.post("/api/chat", headers=self.headers, json={"text": reason})
+                self.assertEqual(response.status_code, 200, response.text)
+                self.assertEqual(self.search_requests(), [])
+                self.assertEqual(self.service.status()["searches_today"], 1)
+
+    def test_failed_retest_blocks_automatic_dispatch_without_blocking_local_reply(self):
+        self.enable()
+        with self.mock_http(lambda request: httpx.Response(500)):
+            rejected = self.client.post("/api/web-search/test", headers=self.headers)
+        self.assertEqual(rejected.status_code, 409, rejected.text)
+        self.assertTrue(self.service.status()["config"]["enabled"])
+        self.assertIsNone(self.service.status()["tested_at"])
+        with self.assertRaisesRegex(ValueError, "Test the Ollama search key"):
+            self.service.search(self.query)
+        with self.mock_http(self.ordinary_http):
+            response = self.client.post("/api/chat", headers=self.headers, json={"text": "Reply after a failed retest"})
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(self.search_requests(), [])
 
     def test_multiple_unknown_and_invalid_tool_requests_cannot_dispatch(self):
         self.enable()
@@ -293,6 +339,103 @@ class WebSearchTests(unittest.TestCase):
             self.assertEqual(self.service.status()["searches_today"], index)
             self.assertNotIn(secret.encode(), backend.DATABASE.read_bytes())
         self.assertIsNone(self.service.status()["tested_at"])
+
+    def test_source_urls_block_browser_private_host_aliases(self):
+        for host in ("127.1", "0x7f.0.0.1", "0177.0.0.1", "2130706433", "%31%32%37.0.0.1",
+                     "１２７.0.0.1", "localhost。", "10.1", "[::1]", "example.local"):
+            with self.subTest(host=host):
+                self.assertFalse(safe_url("https://" + host + "/"))
+        for url in ("https://docs.ollama.com/", "https://8.8.8.8/", "https://[2606:4700:4700::1111]/", "https://例え.テスト/"):
+            with self.subTest(url=url):
+                self.assertTrue(safe_url(url))
+
+    def test_escaped_source_excerpts_fit_the_byte_allowance(self):
+        for content in ('"' * 1200, "\\" * 1200, "\x00" * 1200, "\u00e9" * 1200):
+            with self.subTest(content=content[:1]):
+                source = {"title": "Synthetic source", "url": "https://docs.ollama.com/", "content": content}
+                fitted = fit_sources([source], 256)
+                self.assertTrue(fitted[0]["content"])
+                self.assertTrue(content.startswith(fitted[0]["content"]))
+                self.assertLessEqual(len(json.dumps(fitted, ensure_ascii=False).encode("utf-8")), 256)
+
+    def test_invalid_stored_search_key_never_dispatches_or_reserves(self):
+        for key in ("synthetic-\u2603-key", "synthetic-\n-key"):
+            with self.subTest(key=repr(key)), self.mock_http():
+                self.keys[ENDPOINT] = key
+                result = self.client.post("/api/web-search/test", headers=self.headers)
+                self.assertEqual(result.status_code, 409)
+                self.assertIn("valid API key", result.json()["detail"])
+                self.assertEqual(self.service.read_state()["ledger"], [])
+        self.assertEqual(self.requests, [])
+
+    def test_total_deadline_cancels_dns_headers_and_continuously_trickling_body(self):
+        self.assertEqual(self.configure(key=self.key).status_code, 200)
+        for stage in ("dns", "headers", "body"):
+            with self.subTest(stage=stage):
+                self.age_attempts()
+                calls, closed = [], []
+                release = threading.Event()
+
+                class Trickle(httpx.AsyncByteStream):
+                    async def __aiter__(self):
+                        for _ in range(100):
+                            await asyncio.sleep(0.01)
+                            yield b" "
+
+                    async def aclose(self):
+                        closed.append(True)
+
+                async def handler(request):
+                    calls.append(request)
+                    if stage != "body":
+                        try:
+                            if stage == "dns":
+                                await asyncio.get_running_loop().run_in_executor(None, release.wait, 1)
+                            else:
+                                await asyncio.sleep(1)
+                        finally:
+                            closed.append(True)
+                    return httpx.Response(200, stream=Trickle())
+
+                started = time.monotonic()
+                try:
+                    with patch("backend.web_search.SEARCH_TIMEOUT", 0.05), self.mock_http(handler):
+                        rejected = self.client.post("/api/web-search/test", headers=self.headers)
+                    self.assertEqual(rejected.status_code, 409, rejected.text)
+                    self.assertLess(time.monotonic() - started, 0.5)
+                finally:
+                    release.set()
+                self.assertEqual(len(calls), 1)
+                self.assertTrue(closed)
+                self.assertEqual(self.service.read_state()["ledger"][-1]["status"], "failed")
+                self.assertIsNone(self.service.status()["tested_at"])
+        self.assertEqual(self.service.status()["searches_today"], 3)
+
+    def test_old_credential_result_does_not_change_replacement_readiness(self):
+        self.enable()
+        for status in (200, 401, 500):
+            with self.subTest(status=status):
+                self.age_attempts()
+                self.keys[ENDPOINT] = self.key
+                replacement_tested_at = self.service.now().isoformat()
+
+                def handler(request):
+                    self.assertEqual(request.headers["authorization"], "Bearer " + self.key)
+                    self.service.configure(DEFAULT.copy(), "synthetic-replacement-key", False)
+                    with self.service.transaction() as state:
+                        state["config"]["enabled"] = True
+                        state["tested_at"] = replacement_tested_at
+                    return self.search_response() if status == 200 else httpx.Response(status)
+
+                with self.mock_http(handler):
+                    if status == 200:
+                        self.service.search(self.query, test=True)
+                    else:
+                        with self.assertRaises(ValueError):
+                            self.service.search(self.query, test=True)
+                state = self.service.read_state()
+                self.assertEqual(state["tested_at"], replacement_tested_at)
+                self.assertTrue(state["config"]["enabled"])
 
     def test_credential_echo_and_snippets_are_sanitized_before_local_generation(self):
         self.enable()
@@ -383,15 +526,7 @@ class WebSearchTests(unittest.TestCase):
         self.assertIsNone(self.service.status()["tested_at"])
         self.requests.clear()
 
-        def ordinary_after_rejection(request):
-            self.requests.append(request)
-            self.assertEqual(request.url.host, "127.0.0.1")
-            if request.url.path == "/api/show":
-                return httpx.Response(200, json={"details": {"format": "gguf"}, "capabilities": ["completion", "tools"]})
-            self.assertNotIn("tools", json.loads(request.content))
-            return self.model_response({"role": "assistant", "content": "Synthetic ordinary reply after rejection"}, 20)
-
-        with self.mock_http(ordinary_after_rejection):
+        with self.mock_http(self.ordinary_http):
             ordinary = self.client.post("/api/chat", headers=self.headers, json={"text": "A normal follow-up"})
         self.assertEqual(ordinary.status_code, 200, ordinary.text)
         self.assertEqual(self.search_requests(), [])

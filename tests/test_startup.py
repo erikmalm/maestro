@@ -27,31 +27,69 @@ $startup = $ast.Find({ param($node)
 }, $true)
 if (-not $startup) { throw 'Launch cleanup block was not found.' }
 $launch = [scriptblock]::Create($startup.Extent.Text)
-function Start-Process { return $fakeProcess }
+$preflight = $ast.Find({ param($node)
+    $node -is [System.Management.Automation.Language.IfStatementAst] -and
+    $node.Extent.Text.Contains("'scripts/stop.ps1'")
+}, $true)
+if (-not $preflight) { throw 'Recorded process check was not found.' }
+$preflight = [scriptblock]::Create($preflight.Extent.Text)
+$healthStatements = $ast.EndBlock.Statements | Where-Object {
+    $_.Extent.StartOffset -ge ($ast.EndBlock.Statements | Where-Object { $_.Extent.Text.Contains('-TimeoutSec 2') }).Extent.StartOffset -and
+    $_.Extent.StartOffset -lt ($ast.EndBlock.Statements | Where-Object { $_.Extent.Text.StartsWith('$pidPath =') }).Extent.StartOffset
+}
+$healthProbe = [scriptblock]::Create(($healthStatements.Extent.Text -join "`n"))
+function Start-Process {
+    if ($mode -eq 'browser-failure') { throw 'Synthetic browser failure' }
+    $script:launches++
+    if ($mode -like 'retry-*') { $fakeProcess.Id = 54321; $fakeProcess.HasExited = $false }
+    if ($mode -eq 'success-changed-pid') { Set-Content -LiteralPath $pidPath -Value 99999 }
+    return $fakeProcess
+}
 function Start-Sleep { }
 function Invoke-RestMethod {
     $script:polls++
     if ($mode -eq 'health-exit') { $fakeProcess.HasExited = $true }
-    if ($mode -in @('success', 'health-exit')) { return @{ application = 'maestro'; mode = 'local' } }
+    if ($mode -in @('success', 'success-changed-pid', 'health-exit', 'retry-success', 'retry-stale', 'browser-failure')) { return @{ application = 'maestro'; mode = 'local' } }
     throw 'Synthetic health timeout'
+}
+function Get-CimInstance {
+    if (-not $fakeProcess.HasExited) {
+        return [pscustomobject]@{ ExecutablePath = $pythonPath; CommandLine = $(if ($mode -eq 'retry-unrelated') { 'python worker.py' } else { 'uvicorn backend.app:app' }) }
+    }
 }
 function taskkill.exe {
     if (($args -join ' ') -ne '/PID 43210 /T /F') { throw 'Cleanup targeted an unexpected process.' }
     if ($mode -like 'cleanup-*') { $global:LASTEXITCODE = $(if ($mode -eq 'cleanup-live') { 0 } else { 1 }); return }
-    $script:stopped = $true
+    $global:stopped = $true
     $fakeProcess.HasExited = $true
     if ($mode -eq 'stop-changed-pid') { Set-Content -LiteralPath $pidPath -Value 99999 }
     $global:LASTEXITCODE = 0
 }
 function Write-Warning { $script:cleanupWarnings++ }
-foreach ($mode in @('exit', 'health-exit', 'timeout', 'cleanup-failure', 'cleanup-untracked', 'cleanup-changed-pid', 'cleanup-live', 'changed-pid', 'success')) {
+$mode = 'browser-failure'; $NoBrowser = $false; $continued = $false; $failure = $null
+try { . $healthProbe; $continued = $true } catch { $failure = $_.Exception.Message }
+if ($continued -or $failure -ne 'Synthetic browser failure') { throw 'Browser failure retried an already-running server.' }
+foreach ($mode in @('retry-success', 'retry-stale', 'retry-unrelated', 'cleanup-failure', 'cleanup-live')) {
+    $fakeProcess = [pscustomobject]@{ Id = 43210; HasExited = ($mode -eq 'retry-stale') }
+    $serverProcess = $null; $launches = 0; $stopped = $false; $failure = $null
+    Set-Content -LiteralPath $pidPath -Value 43210
+    try { . $preflight; . $launch } catch { $failure = $_.Exception.Message }
+    if ($mode -in @('retry-success', 'retry-stale')) {
+        if ($failure -or $launches -ne 1 -or $fakeProcess.HasExited -or (Get-Content -LiteralPath $pidPath) -ne '54321') { throw 'Retry did not resolve the recorded process before launching.' }
+        if (($mode -eq 'retry-success') -ne $stopped) { throw 'Retry stopped an unexpected process.' }
+    } elseif (-not $failure -or $launches -or $stopped -or (Get-Content -LiteralPath $pidPath) -ne '43210') { throw 'Retry replaced an unresolved process record.' }
+}
+foreach ($mode in @('exit', 'health-exit', 'timeout', 'cleanup-failure', 'cleanup-untracked', 'cleanup-changed-pid', 'cleanup-live', 'changed-pid', 'success-changed-pid', 'success')) {
     $fakeProcess = [pscustomobject]@{ Id = 43210; HasExited = ($mode -eq 'exit') }
+    $serverProcess = $null
     $stopped = $false; $polls = 0; $failure = $null; $cleanupWarnings = 0
     Remove-Item -LiteralPath $pidPath -ErrorAction SilentlyContinue
-    if ($mode -notin @('success', 'cleanup-untracked', 'cleanup-live')) { Set-Content -LiteralPath $pidPath -Value $(if ($mode -in @('changed-pid', 'cleanup-changed-pid')) { 99999 } else { 43210 }) }
+    if ($mode -notin @('success', 'success-changed-pid', 'cleanup-untracked', 'cleanup-live')) { Set-Content -LiteralPath $pidPath -Value $(if ($mode -in @('changed-pid', 'cleanup-changed-pid')) { 99999 } else { 43210 }) }
     try { . $launch } catch { $failure = $_.Exception.Message }
     if ($mode -eq 'success') {
         if ($failure -or $stopped -or $fakeProcess.HasExited -or (Get-Content -LiteralPath $pidPath) -ne '43210') { throw 'Success did not preserve its running server and PID.' }
+    } elseif ($mode -eq 'success-changed-pid') {
+        if (-not $failure -or -not $stopped -or -not $fakeProcess.HasExited -or (Get-Content -LiteralPath $pidPath) -ne '99999') { throw 'Success replaced a concurrent launch PID.' }
     } else {
         $expected = if ($mode -in @('exit', 'health-exit')) { "Maestro could not start. Check $dataDirectory\server.stderr.log" } else { "Maestro did not become ready. Check $dataDirectory\server.stderr.log" }
         if ($failure -ne $expected) { throw "Original startup failure was lost: $failure" }
@@ -65,7 +103,6 @@ foreach ($mode in @('exit', 'health-exit', 'timeout', 'cleanup-failure', 'cleanu
     }
 }
 # Normal stop must also include the verified venv child process tree.
-function Get-CimInstance { if (-not $fakeProcess.HasExited) { return [pscustomobject]@{ ExecutablePath = $pythonPath; CommandLine = 'uvicorn backend.app:app' } } }
 foreach ($mode in @('cleanup-failure', 'cleanup-live', 'stop-changed-pid', 'success')) {
     $fakeProcess.HasExited = $false; $failure = $null
     Set-Content -LiteralPath $pidPath -Value 43210

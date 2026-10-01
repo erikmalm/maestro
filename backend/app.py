@@ -251,10 +251,10 @@ async def protect_local_workspace(request: Request, call_next):
         origin = request.headers.get("origin")
         if origin and origin not in ORIGINS:
             return JSONResponse({"detail": "Only your local Maestro interface can access this workspace."}, status_code=403)
-        if request.url.path != "/api/session" and not hmac.compare_digest(request.cookies.get("maestro_session", ""), SESSION):
+        if request.url.path != "/api/session" and not hmac.compare_digest(request.cookies.get("maestro_session", "").encode(), SESSION.encode()):
             return JSONResponse({"detail": "Open Maestro again to start a local session."}, status_code=401)
         if request.method not in ("GET", "HEAD"):
-            if not hmac.compare_digest(request.headers.get("x-maestro-csrf", ""), CSRF):
+            if not hmac.compare_digest(request.headers.get("x-maestro-csrf", "").encode(), CSRF.encode()):
                 return JSONResponse({"detail": "Refresh Maestro before saving changes."}, status_code=403)
             try:
                 size = int(request.headers.get("content-length", "0"))
@@ -360,7 +360,9 @@ def test_provider():
 def remove_provider_key():
     with conflict_errors():
         service = provider()
-        credentials.delete(service.read_state()["config"]["base_url"])
+        with service.transaction() as state:
+            credentials.delete(state["config"]["base_url"])
+            state.update(models=[], tested_at=None)
         return service.status()
 
 

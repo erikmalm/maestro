@@ -52,6 +52,8 @@ def read(base_url):
 
 
 def save(base_url, key, persist):
+    if not key.isascii() or not key.isprintable():
+        raise ValueError("Enter a valid API key without control or non-ASCII characters.")
     if not persist:
         session_keys[base_url] = key
         return

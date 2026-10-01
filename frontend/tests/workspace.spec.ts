@@ -43,6 +43,9 @@ test("empty workspace, manual tasks and budgets persist without model calls", as
   await expect(
     page.getByRole("button", { name: "Send message" }),
   ).toBeDisabled();
+  await page.getByLabel("Message Maestro").fill("No model configured");
+  await page.getByLabel("Message Maestro").press("Enter");
+  await page.getByLabel("Message Maestro").fill("");
   await page
     .getByRole("button", { name: "View usage and manage budgets" })
     .click();
@@ -103,6 +106,8 @@ test("empty workspace, manual tasks and budgets persist without model calls", as
   ).not.toBeVisible();
   const after = await (await page.request.get("/api/workspace")).json();
   expect(after.tasks).toEqual([]);
+  expect(after.chats).toEqual([]);
+  expect(after.messages).toEqual([]);
   expect(after.usage).toEqual(initial.usage);
 });
 
@@ -415,7 +420,7 @@ test("OpenAI model choice loads prices without a paid request", async ({
     page.getByLabel("Use these prices for cost estimates"),
   ).toBeChecked();
   await expect(
-    page.getByText(/Standard OpenAI rates filled automatically/),
+    page.getByText(/Standard OpenAI short-context rates filled automatically/),
   ).toBeVisible();
   await page
     .getByLabel("Available models", { exact: true })

@@ -109,7 +109,7 @@ export default function OllamaSearchSetup({
       <div className="reflection-title">
         <div>
           <h2>Optional web search</h2>
-          <p>Your model stays local. Search queries go to Ollama.com.</p>
+          <p>Search for local Ollama models. Queries go to Ollama.com.</p>
         </div>
         <span className="badge neutral">
           {status?.config.enabled ? "Enabled" : "Disabled"}

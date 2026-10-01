@@ -58,6 +58,13 @@ class WorkspaceTests(unittest.TestCase):
         self.assertTrue(backend.DATABASE.is_file())
         self.assertNotIn(backend.ROOT, backend.DATABASE.parents)
 
+    def test_non_ascii_session_and_csrf_tokens_are_rejected(self):
+        result = self.client.get("/api/workspace", headers=[(b"cookie", b"maestro_session=caf\xe9")])
+        self.assertEqual(result.status_code, 401)
+        result = self.client.post("/api/tasks", json={"title": "Synthetic task"},
+                                  headers=[(b"x-maestro-csrf", b"caf\xe9")])
+        self.assertEqual(result.status_code, 403)
+
     def test_fresh_workspace_is_empty_and_exposes_only_current_capabilities(self):
         result = self.workspace()
         self.assertEqual(result["tasks"], [])

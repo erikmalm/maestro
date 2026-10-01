@@ -3,7 +3,7 @@ import { Check, LoaderCircle, ShieldCheck } from "lucide-react";
 import * as api from "./api";
 import type { ProviderConfig, ProviderStatus } from "./api";
 
-// Standard text rates, checked against https://developers.openai.com/api/docs/pricing.
+// Standard short-context text rates, checked against https://developers.openai.com/api/docs/pricing.
 // Expired or unlisted rates require manual confirmation; never infer model prices from an ID.
 const OPENAI_PRICES_CHECKED = "2026-10-01";
 const OPENAI_PRICES: Record<
@@ -360,15 +360,16 @@ export default function ProviderSetup({
             <p className="reflection-note">
               Costs use provider-reported token counts and your saved prices.
               They are estimates; provider billing may include discounts or
-              other charges.
+              other charges. Saved prices do not adjust for longer contexts;
+              update them manually when needed.
               {preset &&
                 pricesCurrent &&
                 config.input_usd_per_million === preset.input &&
                 config.output_usd_per_million === preset.output && (
                   <>
                     {" "}
-                    Standard OpenAI rates filled automatically; checked{" "}
-                    {OPENAI_PRICES_CHECKED}.
+                    Standard OpenAI short-context rates filled automatically;
+                    checked {OPENAI_PRICES_CHECKED}.
                   </>
                 )}
               {isOpenAI && (

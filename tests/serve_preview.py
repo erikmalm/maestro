@@ -106,9 +106,9 @@ with tempfile.TemporaryDirectory(prefix="maestro-browser-") as directory:
     credentials.save = lambda url, key, persist: credentials.session_keys.update({url: key})
     credentials.delete = lambda url: credentials.session_keys.pop(url, None)
 
-    original_client = httpx.Client
+    original_client, original_async_client = httpx.Client, httpx.AsyncClient
 
-    class SearchFixtureTransport(httpx.BaseTransport):
+    class SearchFixtureTransport(httpx.BaseTransport, httpx.AsyncBaseTransport):
         def __init__(self):
             self.local = httpx.HTTPTransport(trust_env=False)
 
@@ -131,7 +131,16 @@ with tempfile.TemporaryDirectory(prefix="maestro-browser-") as directory:
         def close(self):
             self.local.close()
 
+        async def handle_async_request(self, request):
+            if str(request.url) != ENDPOINT:
+                raise httpx.ConnectError("Browser fixture blocks all real provider traffic", request=request)
+            return self.handle_request(request)
+
+        async def aclose(self):
+            self.close()
+
     httpx.Client = lambda **kwargs: original_client(transport=SearchFixtureTransport(), **kwargs)
+    httpx.AsyncClient = lambda **kwargs: original_async_client(transport=SearchFixtureTransport(), **kwargs)
 
     @backend.app.get("/api/provider-fixture")
     def fixture_url():

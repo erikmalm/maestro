@@ -61,6 +61,8 @@ def network(config, key, method, path, payload=None):
     local = config["protocol"] == "ollama"
     if local:
         validate_ollama_url(config["base_url"])
+    elif not key.isascii() or not key.isprintable():
+        raise ProviderFailure("Enter a valid API key without control or non-ASCII characters.", False)
     try:
         timeout = httpx.Timeout(180, connect=5) if local else 60
         with httpx.Client(timeout=timeout, follow_redirects=False, trust_env=False) as client:
@@ -175,16 +177,16 @@ class Provider:
         return self.status()
 
     def test(self):
-        status = self.status()
-        config = status["config"]
-        if config["protocol"] == "ollama":
+        config = self.read_state()["config"]
+        local = config["protocol"] == "ollama"
+        key = None if local else credentials.read(config["base_url"])[0]
+        if local:
             data = network(config, None, "GET", "/api/tags")
             if not isinstance(data.get("models"), list):
                 raise ValueError("Ollama did not return an installed model list.")
             models = sorted({item["name"] for item in data["models"] if isinstance(item, dict)
                              and isinstance(item.get("name"), str) and is_local_model(item)})
         else:
-            key, _ = credentials.read(config["base_url"])
             if not key:
                 raise ValueError("Add an API key in Settings first.")
             data = network(config, key, "GET", "/models")
@@ -192,7 +194,7 @@ class Provider:
                 raise ValueError("Provider does not expose an OpenAI-compatible model list. Enter a model ID manually.")
             models = sorted({item["id"] for item in data["data"] if isinstance(item, dict) and isinstance(item.get("id"), str)})
         with self.transaction() as state:
-            if state["config"] != config:
+            if state["config"] != config or (not local and credentials.read(config["base_url"])[0] != key):
                 raise ValueError("Connection settings changed. Test the new connection again.")
             state.update({"models": models, "tested_at": self.stamp()})
         return self.status()
@@ -236,14 +238,21 @@ class Provider:
         # Reserve before dispatch under the same SQLite lock used for tasks and limits.
         with self.transaction(with_db=True) as (state, db):
             config = title_for["config"] if title else state["config"].copy()
-            if title and state["config"] != config:
-                raise ValueError("Model settings changed; the first-message title was skipped.")
             local = config["protocol"] == "ollama"
-            auto_search = not title and local and WebSearch(self.database, self.timezone).read_state()["config"]["enabled"]
+            key = None if local else credentials.read(config["base_url"])[0]
+            if title and (state["config"] != config or key != title_for["key"]):
+                raise ValueError("Connection settings changed; the first-message title was skipped.")
+            search = None
+            if not title and local:
+                service = WebSearch(self.database, self.timezone)
+                search_state = service.read_state()
+                if search_state["config"]["enabled"]:
+                    search = service.status(search_state)
+            auto_search = bool(search and search["credentials_present"]
+                               and search["tested_at"] and search["remaining_today"] and not search["paused_until"])
             instructions = TITLE_INSTRUCTIONS if title else INSTRUCTIONS + (SEARCH_INSTRUCTIONS if auto_search else "")
             if auto_search and config["ollama_context_tokens"] < 8192:
                 raise ValueError("Automatic web search needs at least 8192 context tokens. Update Local worker settings or disable search.")
-            key = title_for["key"] if title else (None if local else credentials.read(config["base_url"])[0])
             if not config["model"]:
                 raise ValueError("Choose a chat model in Settings before chatting.")
             if not local and not key:
@@ -271,12 +280,10 @@ class Provider:
             if local and input_bound + output_bound > config["ollama_context_tokens"]:
                 raise ValueError("This conversation exceeds the local worker's conservative context allowance. Start a new chat, lower the output limit or increase context size in Settings.")
             reserve = (input_bound * config["input_usd_per_million"] + output_bound * config["output_usd_per_million"]) / 1000000
-            now = datetime.now(self.timezone)
-            daily = sum(x["cost"] for x in state["ledger"] if datetime.fromisoformat(x["at"]).astimezone(self.timezone).date() == now.date())
-            monthly = sum(x["cost"] for x in state["ledger"] if datetime.fromisoformat(x["at"]).astimezone(self.timezone).strftime("%Y-%m") == now.strftime("%Y-%m"))
+            usage = self.usage(state)
             limits = workspace["limits"]
             used_cost = title_for["cost"] if title else 0
-            if not local and (limits["run_usd"] <= 0 or limits["daily_usd"] <= 0 or limits["monthly_usd"] <= 0 or used_cost + reserve > limits["run_usd"] or daily + reserve > limits["daily_usd"] or monthly + reserve > limits["monthly_usd"]):
+            if not local and (limits["run_usd"] <= 0 or limits["daily_usd"] <= 0 or limits["monthly_usd"] <= 0 or used_cost + reserve > limits["run_usd"] or usage["today_usd"] + reserve > limits["daily_usd"] or usage["month_usd"] + reserve > limits["monthly_usd"]):
                 raise ValueError("This request would exceed your spending limit. Adjust limits in Settings.")
             request_id = uuid.uuid4().hex
             state["ledger"].append({"id": request_id, "at": self.stamp(), "model": config["model"], "protocol": config["protocol"],
@@ -327,6 +334,9 @@ class Provider:
             with self.transaction(with_db=True) as (state, db):
                 entry = next(x for x in state["ledger"] if x["id"] == request_id)
                 entry.update({"status": "settled", "cost": cost, "input_tokens": input_tokens, "output_tokens": output_tokens})
+                if (not local and state["config"] == config
+                        and (input_tokens > input_bound or output_tokens > output_bound or cost > reserve)):
+                    state["config"]["pricing_verified"] = False
                 if local:
                     message = data.get("message")
                     reply = message.get("content", "") if isinstance(message, dict) else ""
@@ -372,9 +382,6 @@ class Provider:
                     db.execute("UPDATE workspace SET value=? WHERE id=1", (json.dumps(workspace),))
             if not reply:
                 raise ValueError("Provider returned no text. Usage was recorded; try a larger output limit or another chat model.")
-            if not local and (input_tokens > input_bound or output_tokens > output_bound or cost > reserve):
-                with self.transaction() as state:
-                    state["config"]["pricing_verified"] = False
             return {"reply": reply, "text": text, "config": config, "key": key, "request_id": request_id,
                     "cost": cost, "input_tokens": input_tokens, "output_tokens": output_tokens, "title_ready": title_ready}
         except Exception as error:

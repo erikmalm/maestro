@@ -2,6 +2,7 @@
 from pathlib import Path
 import json
 import os
+import sqlite3
 import tempfile
 import threading
 import unittest
@@ -119,6 +120,57 @@ class ProviderTests(unittest.TestCase):
         self.assertEqual(usage["reserved_usd"], 0)
         self.assertEqual(usage["today_usd"], 0)
 
+    def test_model_test_cannot_verify_a_replaced_or_removed_key(self):
+        for replace in (True, False):
+            with self.subTest(replace=replace):
+                self.setup_provider()
+                def handler(request):
+                    response = self.provider_http(request)
+                    if replace:
+                        updated = self.client.put("/api/provider", headers=self.headers, json={
+                            "config": self.config, "api_key": "synthetic-replacement-key", "persist": False})
+                    else:
+                        updated = self.client.delete("/api/provider/key", headers=self.headers)
+                    self.assertEqual(updated.status_code, 200)
+                    return response
+                with self.mock_http(handler):
+                    result = self.client.post("/api/provider/test", headers=self.headers)
+                self.assertEqual(result.status_code, 409)
+                status = self.client.get("/api/provider").json()
+                self.assertEqual(status["models"], [])
+                self.assertIsNone(status["tested_at"])
+                self.assertNotIn("synthetic-replacement-key", result.text)
+
+    def test_overrun_settles_reply_without_invalidating_another_configuration(self):
+        for change_model in (False, True):
+            with self.subTest(change_model=change_model):
+                self.setup_provider()
+                def handler(request):
+                    if change_model:
+                        self.setup_provider({**self.config, "model": "new-chat-model"})
+                    return httpx.Response(200, json={
+                        "output": [{"type": "message", "content": [{"type": "output_text", "text": "Completed reply"}]}],
+                        "usage": {"input_tokens": 100, "output_tokens": 2000}})
+                original = Provider.transaction
+                calls = 0
+                def fail_after_settlement(service, with_db=False):
+                    nonlocal calls
+                    calls += 1
+                    if calls > 2:
+                        raise sqlite3.OperationalError("Synthetic subsequent write failure")
+                    return original(service, with_db)
+                with self.mock_http(handler):
+                    # A post-settlement failure must never replace the completed reply.
+                    if change_model:
+                        result = self.client.post("/api/chat", headers=self.headers, json={"text": "Check configuration change"})
+                    else:
+                        with patch.object(Provider, "transaction", fail_after_settlement):
+                            result = self.client.post("/api/chat", headers=self.headers, json={"text": "Check overrun"})
+                self.assertEqual(result.status_code, 200, result.text)
+                self.assertEqual(result.json()["messages"][-1]["text"], "Completed reply")
+                self.assertEqual(result.json()["provider"]["config"]["pricing_verified"], change_model)
+                self.assertEqual(result.json()["usage"]["reserved_usd"], 0)
+
     def test_unknown_charge_blocks_retry_and_survives_recovery(self):
         with self.mock_http(lambda request: httpx.Response(200, json={"output": []})):
             self.assertEqual(self.client.post("/api/chat", headers=self.headers, json={"text": "Synthetic test"}).status_code, 409)
@@ -162,6 +214,20 @@ class ProviderTests(unittest.TestCase):
         for url in ("http://remote.example/v1", "https://secret@remote.example/v1", "https://remote.example/v1?key=secret", "https://remote.example:bad/v1", "https://remote.example:99999/v1"):
             response = self.client.put("/api/provider", headers=self.headers, json={"config": {**self.config, "base_url": url}, "persist": False})
             self.assertEqual(response.status_code, 409)
+
+    def test_invalid_keys_never_dispatch_or_create_uncertain_charges(self):
+        for key in ("synthetic-\u2603-key", "synthetic-\n-key", "synthetic-\x7f-key"):
+            with self.subTest(key=repr(key)):
+                with self.assertRaises(ValueError):
+                    credentials.save(self.base, key, False)
+                # Also reject invalid credentials read from an existing vault/environment.
+                credentials.session_keys[self.base] = key
+                with self.mock_http():
+                    for path, body in (("/api/provider/test", {}), ("/api/chat", {"text": "Synthetic check"})):
+                        response = self.client.post(path, headers=self.headers, json=body)
+                        self.assertEqual(response.status_code, 409)
+                self.assertEqual(self.client.get("/api/workspace").json()["usage"]["uncertain"], [])
+        self.assertEqual(self.requests, [])
 
     def test_chat_completion_protocol_reports_actual_usage(self):
         self.setup_provider({**self.config, "protocol": "chat_completions"})

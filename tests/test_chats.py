@@ -369,7 +369,7 @@ class ChatTests(unittest.TestCase):
         self.assertFalse(any(self.is_title(payload) for _, payload in self.requests))
         self.assertEqual(self.workspace(second)["messages"][-1]["model"], "synthetic-chat")
 
-    def test_title_uses_original_key_and_bounded_first_message(self):
+    def test_title_uses_bounded_first_message(self):
         self.configure({**DEFAULT, "base_url": "https://synthetic.example/v1", "model": "synthetic-paid",
                         "input_usd_per_million": 1, "output_usd_per_million": 2, "pricing_verified": True})
         chat_id = self.create_chat()
@@ -380,8 +380,6 @@ class ChatTests(unittest.TestCase):
             payload = json.loads(request.content)
             self.requests.append((request.url.path, payload))
             title = self.is_title(payload)
-            if not title:
-                self.read_key.return_value = ("synthetic-replacement-key", "session")
             return self.response(title=title, local=False)
         with self.mock_http(handler):
             response = self.send(chat_id, first_message)
@@ -391,6 +389,24 @@ class ChatTests(unittest.TestCase):
         self.assertNotIn("tools", title_payload)
         self.assertNotIn(original_key, response.text)
         self.assertNotIn(original_key.encode(), backend.DATABASE.read_bytes())
+
+    def test_title_skips_replaced_or_removed_credentials(self):
+        for replacement in (None, "synthetic-replacement-key"):
+            with self.subTest(replacement=replacement):
+                self.read_key.return_value = ("synthetic-original-key", "session")
+                self.configure({**DEFAULT, "base_url": "https://synthetic.example/v1", "model": "synthetic-paid",
+                                "input_usd_per_million": 1, "output_usd_per_million": 2, "pricing_verified": True})
+                chat_id = self.create_chat()
+                self.requests.clear()
+                def handler(request):
+                    self.requests.append((request.url.path, json.loads(request.content)))
+                    self.read_key.return_value = (replacement, "session")
+                    return self.response(local=False)
+                with self.mock_http(handler):
+                    result = self.send(chat_id)
+                self.assertEqual(result.status_code, 200, result.text)
+                self.assertEqual(len(self.requests), 1)
+                self.assertEqual(result.json()["messages"][-1]["text"], "Synthetic useful reply")
 
 
 if __name__ == "__main__":

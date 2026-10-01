@@ -405,7 +405,7 @@ export default function App() {
   }
   async function submitChat(event: { preventDefault(): void }) {
     event.preventDefault();
-    if (!chat.trim() || busy) return;
+    if (!chat.trim() || busy || !ready) return;
     const submitted = chat;
     if (
       await perform("chat", async () => {
