@@ -33,6 +33,8 @@ import {
 } from "lucide-react";
 import * as api from "./api";
 import type { Limits, Run, Task, Workspace } from "./api";
+import Reflection from "./Reflection";
+import type { ReflectionStatus } from "./api";
 
 type Page =
   | "workspace"
@@ -40,6 +42,7 @@ type Page =
   | "runs"
   | "agents"
   | "memory"
+  | "reflection"
   | "integrations"
   | "settings";
 type Panel = "task" | "usage" | "memory" | null;
@@ -52,6 +55,7 @@ const navigation = [
   { id: "runs", name: "Runs", icon: Workflow },
   { id: "agents", name: "Agents", icon: Users },
   { id: "memory", name: "Memory", icon: BookOpen },
+  { id: "reflection", name: "Reflection", icon: Sparkles },
   { id: "integrations", name: "Integrations", icon: Plug },
 ] as const;
 
@@ -382,6 +386,7 @@ function RunDetail({ run }: { run: Run }) {
 
 export default function App() {
   const [workspace, setWorkspace] = useState<Workspace | null>(null);
+  const [reflection, setReflection] = useState<ReflectionStatus | null>(null);
   const [page, setPage] = useState<Page>("workspace");
   const [panel, setPanel] = useState<Panel>(null);
   const [busy, setBusy] = useState("");
@@ -397,10 +402,30 @@ export default function App() {
   const chatEnd = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
+    let cancelled = false;
+    let timer: number | undefined;
+    const poll = async () => {
+      try {
+        const next = await api.loadReflection();
+        if (!cancelled) setReflection(next);
+      } catch {
+        /* Initial load owns connection errors. Polling never dispatches provider calls. */
+      }
+      if (!cancelled) timer = window.setTimeout(poll, 5000);
+    };
     api
       .loadWorkspace()
-      .then(setWorkspace)
+      .then((next) => {
+        if (!cancelled) {
+          setWorkspace(next);
+          void poll();
+        }
+      })
       .catch((reason: Error) => setError(reason.message));
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
   }, []);
   useEffect(() => {
     if (toast) {
@@ -620,6 +645,22 @@ export default function App() {
             <strong>{pageLabel}</strong>
           </div>
           <div className="topbar-right">
+            <button
+              className="reflection-usage"
+              title="Estimated USD from entered model prices and provider-reported tokens; includes reservations"
+              onClick={() => navigate("reflection")}
+              aria-label="View real reflection cost and tokens"
+            >
+              <Sparkles size={14} />
+              <span>
+                <strong>
+                  ${(reflection?.usage.today_usd ?? 0).toFixed(4)}
+                </strong>{" "}
+                <small>
+                  reflection · {reflection?.usage.tokens ?? 0} tokens
+                </small>
+              </span>
+            </button>
             <span className="preview-badge">
               <i /> Local preview
             </span>
@@ -891,6 +932,8 @@ export default function App() {
                           "The right perspective for each part of the work.",
                         memory:
                           "Useful context, kept close and under your control.",
+                        reflection:
+                          "Learn from feedback, with visible limits and your review.",
                         integrations:
                           "Connect the places your work already lives.",
                         settings: "Make Maestro work at your pace.",
@@ -917,6 +960,9 @@ export default function App() {
               )}
             </div>
 
+            {page === "reflection" && (
+              <Reflection status={reflection} onChange={setReflection} />
+            )}
             {page === "tasks" && (
               <>
                 <div className="section-tabs">

@@ -1,6 +1,6 @@
 # Maestro architecture draft
 
-Status: first implementation draft. The local UI preview is runnable; provider calls, the durable agent runner, automatic memory recall, and GitHub/MarketPulse connectors are still planned.
+Status: first implementation draft. The local UI and bounded background reflection worker are runnable. Reflection has a real OpenAI adapter tested against mocked responses. Live chat/task agents, the durable agent runner, automatic memory recall and GitHub/MarketPulse connectors remain planned.
 
 ## Interface and usage visibility
 
@@ -51,13 +51,24 @@ The built frontend is served by the backend on one loopback origin. Credentials 
 | UI | React/TypeScript, responsive CSS, task/chat flow, run timelines, memory list, budget dialogs | Live streaming/status and per-agent usage drilldown |
 | API | FastAPI, local session cookie, CSRF checks, origin/host validation | Modular routers, provider configuration, event stream |
 | Storage | Private SQLite snapshot updated in an immediate transaction | Normalized records, migrations, job leases, granular events |
-| Usage | Synthetic ledger; atomic demo spending/token checks | Provider usage, conservative reservations, fee reconciliation |
+| Usage | Separate demo and reflection ledgers; provider tokens, entered-price cost estimates, conservative reservations and manual uncertain-charge reconciliation | Unified live-agent dispatch gate, tool fees, invoice import |
 | Execution | Persisted tasks and explicitly simulated chat/run steps | Durable planning, delegation, retries, cancellation |
-| Memory | Manually saved and removable records | Provenance, scoped recall, correction and inference review |
-| Credentials | Key entry disabled | OS credential storage and session-only fallback |
+| Memory | Manual records and user-reviewed reflection guidance | Scoped chat/task recall, baseline evaluations, promotion/rollback |
+| Reflection | Persisted opt-in worker; explicit feedback sharing; reflect/review/revise; stop and recovery controls | Real task evidence, durable job leases, measured regression checks |
+| Credentials | UI key entry disabled; reflection reads backend process environment | OS credential storage |
 | Integrations | Descriptive GitHub/MarketPulse cards | Scoped, authorized tool execution |
 
-The snapshot schema keeps this first preview small. It is not the final agent database design. Refinement/time settings are saved for inspection; the finite simulation does not implement a live iterative runner. The full runtime checks must be complete before automatic paid work is enabled.
+The snapshot schema keeps this first preview small. It is not the final agent database design. The task simulation is finite; reflection separately enforces spend/token/pass/time dispatch gates. The full runtime checks must be complete before automatic paid task-agent work is enabled.
+
+### Implemented reflection path
+
+`backend/reflection.py` owns a private SQLite reflection-state record, feedback/job history and cost ledger. FastAPI's lifespan starts one background worker. The browser polls local status every five seconds; the worker checks its persisted eligibility/schedule every ten seconds. Neither polling nor idle checks call a model. A configured interval controls scheduled cycles, and evidence consumed by a cycle is excluded from future automatic cycles.
+
+Before each provider call, an immediate transaction reserves a conservative byte-based input estimate plus 1,024 output tokens, checking reflection and workspace limit settings. The network request runs outside the database lock. Response usage settles the reservation; missing usage/failed requests retain uncertain charges and pause dispatch. The two-minute limit blocks later dispatches rather than undoing an already issued call. Pricing is user-entered and cannot guarantee provider invoice amounts.
+
+The OpenAI Responses request uses `store: false`, strict JSON output and no tool execution. Only explicitly provider-approved feedback and previously accepted reflection guidance enter its prompt. Reflector/reviewer are separate calls using the configured model; they are not independent objective evaluations. Six calls maximum, reviewer acceptance, unchanged-lesson detection, elapsed-time and resource checks bound the cycle. Drafts need user acceptance. Accepted guidance affects reflection only until scoped live-agent recall and regression-tested prompt promotion exist.
+
+Restart marks running jobs interrupted and unresolved reservations uncertain, with no automatic replay of dispatched calls. Undispatched manually queued work remains eligible; pause blocks its first/next call. History clearing removes feedback/proposals/guidance while retaining accounting. The current launcher enforces a single local server; leases, normalized migrations and a production scheduler remain future work.
 
 ## Initial API contract
 
@@ -72,8 +83,13 @@ The snapshot schema keeps this first preview small. It is not the final agent da
 | `POST /api/chat` | Save a message and an identified canned preview response. |
 | `PUT /api/limits` | Validate and save local budget/execution limits. |
 | `POST /api/memory` / `DELETE /api/memory/{id}` | Manually remember or forget private preview records. |
+| `GET /api/reflection` / `PUT /api/reflection/config` | Status, private settings, limits, credential-presence flag and real usage. |
+| `POST /api/reflection/feedback` / `POST /api/reflection/run` | Save feedback with explicit sharing consent; queue a bounded cycle. |
+| `POST /api/reflection/jobs/{id}/review` | Keep or decline a proposed private lesson. |
+| `DELETE /api/reflection/history` | Clear personal reflection content while retaining usage accounting. |
+| `POST /api/reflection/charges/{id}/reconcile` | Confirm a provider-verified charge while paused. |
 
-Responses expose capabilities explicitly: `mode=preview`, `live_ai=false`, `github_pr=false`, and `secure_credentials=false`. The UI must not imply an integration works before its capability is enabled.
+Workspace responses expose demo capabilities explicitly: `mode=preview`, `live_ai=false` for chat/task execution, `github_pr=false`, and `secure_credentials=false`. Reflection's separate status reports credential presence and worker configuration. The UI must not imply a task integration works before its capability is enabled.
 
 Planned routes cover secure provider setup/status, task run/cancel/resume, per-run usage, replayable `GET /api/events`, integration configuration, and PR preparation/submission. Credentials are never returned through read endpoints.
 

@@ -142,8 +142,14 @@ test("mobile navigation, usage, and layout remain usable", async ({ page }) => {
   await expect(
     page.getByRole("heading", { name: "Tasks", exact: true }),
   ).toBeVisible();
-  await expect(page.getByRole("button", { name: "Close navigation" })).not.toBeInViewport();
-  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  await expect(
+    page.getByRole("button", { name: "Close navigation" }),
+  ).not.toBeInViewport();
+  expect(
+    await page.evaluate(
+      () => document.documentElement.scrollWidth <= window.innerWidth,
+    ),
+  ).toBe(true);
   const artifacts = join(
     process.env.LOCALAPPDATA || join(homedir(), ".local", "share"),
     "Maestro",
@@ -159,4 +165,81 @@ test("mobile navigation, usage, and layout remain usable", async ({ page }) => {
     .click();
   await expect(page.getByRole("dialog")).toBeVisible();
   await page.getByRole("button", { name: "Close dialog" }).click();
+});
+
+test("reflection persists controls and feedback without keys or simulated charges", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await page.getByRole("button", { name: "Reflection", exact: true }).click();
+  await expect(
+    page.getByRole("heading", { name: "Learn from the work" }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: "Run one cycle" }),
+  ).toBeDisabled();
+  await page
+    .getByLabel("Feedback", { exact: true })
+    .fill("Synthetic reflection correction: always include evidence.");
+  await page
+    .getByRole("button", { name: "Save feedback", exact: true })
+    .click();
+  await expect(
+    page.getByText(
+      "Synthetic reflection correction: always include evidence.",
+      { exact: true },
+    ),
+  ).toBeVisible();
+  await expect(page.getByText("Local only", { exact: true })).toBeVisible();
+  await page.getByLabel("USD per cycle", { exact: true }).fill("0.05");
+  await page
+    .getByLabel("Enable background reflection on new approved feedback.")
+    .check();
+  await page.getByRole("button", { name: "Save reflection settings" }).click();
+  await expect(
+    page.getByText("missing credentials", { exact: true }),
+  ).toBeVisible();
+  await page.reload();
+  await page.getByRole("button", { name: "Reflection", exact: true }).click();
+  await expect(page.getByLabel("USD per cycle", { exact: true })).toHaveValue(
+    "0.05",
+  );
+  await expect(
+    page.getByRole("button", { name: "View real reflection cost and tokens" }),
+  ).toContainText("$0.0000");
+  await page.getByRole("button", { name: "Pause background" }).click();
+  await expect(page.getByText("paused", { exact: true })).toBeVisible();
+  const artifacts = join(
+    process.env.LOCALAPPDATA || join(homedir(), ".local", "share"),
+    "Maestro",
+    "preview",
+    "artifacts",
+  );
+  await page.screenshot({
+    path: join(artifacts, "maestro-reflection.png"),
+    fullPage: true,
+  });
+  await page.setViewportSize({ width: 390, height: 844 });
+  expect(
+    await page.evaluate(
+      () => document.documentElement.scrollWidth <= window.innerWidth,
+    ),
+  ).toBe(true);
+  await page.screenshot({
+    path: join(artifacts, "maestro-reflection-mobile.png"),
+    fullPage: true,
+    animations: "disabled",
+  });
+  await page
+    .getByText("Clear private reflection history", { exact: true })
+    .click();
+  await page
+    .getByRole("button", { name: "Clear feedback and lessons" })
+    .click();
+  await expect(
+    page.getByText(
+      "Synthetic reflection correction: always include evidence.",
+      { exact: true },
+    ),
+  ).not.toBeVisible();
 });

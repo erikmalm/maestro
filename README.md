@@ -2,7 +2,7 @@
 
 Maestro is a planned local AI assistant and agent coordinator with a web interface. It will help you discuss ideas, organize to-dos, delegate work to specialist agents, inspect their progress, and improve results through bounded review and refinement.
 
-**Status: local UI preview.** Run and inspect the interface, save tasks and manual memories, try simulated chat/agent runs, and change budget limits locally. Usage figures are labelled demo data. Live AI, secure key setup, automatic recall, and integrations remain planned. See the [architecture draft](docs/ARCHITECTURE.md) and [development plan](DEVELOPMENT_PLAN.md).
+**Status: local preview with a first working background reflection loop.** Tasks, manual memories and settings persist locally. Chat and task-agent runs still use explicitly simulated responses. The Reflection page has a real, opt-in OpenAI adapter, bounded background worker, reviewable lessons and separate provider token/cost tracking. Secure key entry, live chat, task delegation, automatic memory recall and integrations remain planned. The adapter is tested with mocked responses; no paid end-to-end run has been verified. See the [architecture draft](docs/ARCHITECTURE.md) and [development plan](DEVELOPMENT_PLAN.md).
 
 ## Run the local preview
 
@@ -20,7 +20,17 @@ The launcher installs missing dependencies, builds the interface, starts a hidde
 
 If PowerShell blocks local scripts, use `powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\start.ps1` for this invocation; no permanent policy change is needed.
 
-Preview state is saved under `%LOCALAPPDATA%\Maestro\preview`. Initial examples and usage are synthetic. Entered tasks, conversations, manual memories, and limits persist across restart. No API key is needed, and the preview makes no paid calls or GitHub submissions.
+Preview state is saved under `%LOCALAPPDATA%\Maestro\preview`. Initial examples and demo usage are synthetic. Entered tasks, conversations, manual memories, reflection history and limits persist across restart. No key is needed to inspect the app. Reflection is paused by default and cannot make paid calls until backend credentials, model prices and provider-approved feedback are configured. Maestro itself has no GitHub submission connector yet.
+
+## Background reflection: what works now
+
+Open **Reflection** at [the local UI](http://127.0.0.1:8765). Save feedback from an observed outcome, explicitly allow that feedback to be sent to OpenAI, configure an exact model and its verified input/output prices, then run one cycle or enable background checks. Unshared feedback stays local; existing chats, documents and manual memories are not harvested automatically.
+
+The worker proposes a lesson, makes a separate critique call, and revises when needed. It stops on acceptance, repeated unchanged proposals, pause, budget exhaustion or the pass/time limit. A model's acceptance is only a draft: **Keep lesson** is your approval. Kept lessons guide later reflection cycles, but do not yet influence demo chat or task agents. Regression evaluations and promotion into live task prompts are the next step. This is private guidance, not model retraining or automatic code changes.
+
+Defaults: paused, check eligible feedback every 30 minutes, USD 0.10 per cycle, USD 0.25 per day, up to three passes/two calls per pass, 1,024 output tokens per call, a conservative 16,000 token allowance per cycle, and a two-minute dispatch window. Lower workspace spend/token/refinement/time limits also apply. Checks cost nothing without new eligible feedback; consumed evidence is not automatically processed again. Work runs only while the local server is running. Pause prevents further calls; an in-flight request may finish and be billed.
+
+The persistent header shows reflection cost/tokens separately from demo usage. Tokens come from provider responses; USD is calculated using your entered rates, including conservative reservations, rather than downloaded invoices. Failed/uncertain calls pause the worker and block further dispatch until you confirm their actual billed charge in the UI. Restart does not erase usage or replay interrupted requests. Clearing feedback/lessons keeps accounting metadata; deletion cannot erase provider copies or backups. The single-installation worker is an early implementation, not the full durable multi-agent scheduler.
 
 ## What Maestro will do
 
@@ -69,11 +79,22 @@ Local hosting means the interface and workspace run on your computer. When a clo
 
 ## API keys and providers
 
-The preview Settings screen saves budget controls locally. API key entry is disabled until secure credential storage is implemented. Upcoming provider settings will let you add, replace, test, and remove a key. The backend will save credentials in the OS credential store and return only configured/missing status. Keys must stay out of frontend bundles, browser storage, URLs, prompts, and logs, in line with [OpenAI authentication guidance](https://developers.openai.com/api/reference/overview#authentication).
+The Settings API-key field is disabled until OS credential storage is implemented. For the first reflection worker, provide `OPENAI_API_KEY` only through the backend process environment. The UI receives configured/missing status, never the key. This example prompts without putting the key literal in your shell history:
 
-[.env.example](.env.example) contains blank fields for proposed development configuration. The preview reads selected server environment variables; it does not load `.env` files or use provider keys. Real keys must never be entered in that tracked file. Settings and the OS credential store are the intended everyday setup.
+```powershell
+.\scripts\stop.ps1
+$maestroKey = Read-Host "OpenAI API key" -AsSecureString
+$env:OPENAI_API_KEY = [System.Net.NetworkCredential]::new("", $maestroKey).Password
+.\scripts\start.ps1 -NoBrowser
+Remove-Item Env:\OPENAI_API_KEY
+Remove-Variable maestroKey
+```
 
-OpenAI is the first planned provider. Provider adapters will keep the task and memory system independent of a specific vendor. Additional cloud providers and a local model adapter can follow. Models will be selected explicitly in Settings rather than fixed to a changing "latest" alias.
+The started server retains its inherited environment until it stops. Repeat this setup after a server restart; the app does not persist the key. Never enter credentials as chat, memory or feedback. Upcoming provider settings will use the OS credential store. Keys must stay out of frontend bundles, browser storage, URLs, prompts and logs, in line with [OpenAI authentication guidance](https://developers.openai.com/api/reference/overview#authentication).
+
+[.env.example](.env.example) contains blank fields for proposed development configuration. The backend reads selected environment variables, including `OPENAI_API_KEY` for reflection; it does not load `.env` files. Real keys must never be entered in that tracked file. Model, pricing and reflection limits are saved through the local Reflection page outside Git.
+
+OpenAI is the first provider adapter, currently used only for reflection. Provider adapters will keep the task and memory system independent of a specific vendor. Additional cloud providers and a local model adapter can follow. Models are selected explicitly rather than fixed to a changing "latest" alias.
 
 ## Controlled iteration and improvement
 

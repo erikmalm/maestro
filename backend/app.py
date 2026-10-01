@@ -1,6 +1,6 @@
-"""Local UI preview. All model work and usage entries are explicitly simulated."""
+"""Local workspace: demo chat/tasks, plus an opt-in live reflection worker."""
 
-from contextlib import closing, contextmanager
+from contextlib import closing, contextmanager, asynccontextmanager
 from datetime import datetime
 import hmac
 import json
@@ -17,6 +17,7 @@ from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field
 from starlette.middleware.trustedhost import TrustedHostMiddleware
+from backend.reflection import ReflectionEngine
 
 ROOT = Path(__file__).resolve().parent.parent
 DATA_DIR = Path(os.environ.get("MAESTRO_DATA_DIR") or Path(os.environ.get("LOCALAPPDATA", Path.home() / ".local" / "share")) / "Maestro" / "preview").expanduser().resolve()
@@ -135,7 +136,46 @@ class LimitsInput(StrictModel):
     max_minutes: int = Field(ge=1, le=120)
 
 
-app = FastAPI(title="Maestro local preview", docs_url=None, redoc_url=None, openapi_url=None)
+class ReflectionConfig(StrictModel):
+    enabled: bool = False
+    interval_minutes: int = Field(default=30, ge=5, le=1440)
+    cycle_usd: float = Field(default=0.1, ge=0, le=10, allow_inf_nan=False)
+    daily_usd: float = Field(default=0.25, ge=0, le=100, allow_inf_nan=False)
+    max_passes: int = Field(default=3, ge=1, le=3)
+    model: str = Field(default="", max_length=100, pattern=r"^[A-Za-z0-9_.:-]*$")
+    input_usd_per_million: float = Field(default=0, ge=0, le=10000, allow_inf_nan=False)
+    output_usd_per_million: float = Field(default=0, ge=0, le=10000, allow_inf_nan=False)
+    pricing_verified: bool = False
+
+
+class ReflectionFeedback(StrictModel):
+    text: str = Field(min_length=1, max_length=2000)
+    share: bool = False
+
+
+class ReflectionReview(StrictModel):
+    accept: bool
+
+
+class ReflectionCharge(StrictModel):
+    billed_usd: float = Field(ge=0, le=100000, allow_inf_nan=False)
+
+
+def reflection_engine():
+    return ReflectionEngine(DATABASE, TIMEZONE)
+
+
+@asynccontextmanager
+async def lifespan(application):
+    engine = reflection_engine()
+    engine.start()
+    try:
+        yield
+    finally:
+        engine.close()
+
+
+app = FastAPI(title="Maestro local preview", docs_url=None, redoc_url=None, openapi_url=None, lifespan=lifespan)
 app.add_middleware(TrustedHostMiddleware, allowed_hosts=["127.0.0.1", "localhost", "testserver"])
 
 
@@ -186,6 +226,62 @@ def session(response: Response):
 def get_workspace():
     with workspace_transaction() as state:
         return snapshot(state)
+
+
+@app.get("/api/reflection")
+def get_reflection():
+    return reflection_engine().status()
+
+
+@app.put("/api/reflection/config")
+def configure_reflection(entry: ReflectionConfig):
+    reflection_engine().configure(entry.model_dump())
+    return reflection_engine().status()
+
+
+@app.post("/api/reflection/feedback")
+def reflection_feedback(entry: ReflectionFeedback):
+    try:
+        reflection_engine().evidence(entry.text, entry.share)
+    except ValueError as error:
+        raise HTTPException(409, str(error))
+    return reflection_engine().status()
+
+
+@app.post("/api/reflection/run")
+def run_reflection():
+    try:
+        reflection_engine().enqueue(manual=True)
+    except ValueError as error:
+        raise HTTPException(409, str(error))
+    return reflection_engine().status()
+
+
+@app.post("/api/reflection/jobs/{job_id}/review")
+def review_reflection(job_id: str, entry: ReflectionReview):
+    try:
+        reflection_engine().review(job_id, entry.accept)
+    except ValueError as error:
+        raise HTTPException(409, str(error)) from None
+    return reflection_engine().status()
+
+
+@app.delete("/api/reflection/history")
+def clear_reflection_history():
+    try:
+        reflection_engine().clear_history()
+    except ValueError as error:
+        raise HTTPException(409, str(error)) from None
+    return reflection_engine().status()
+
+
+@app.post("/api/reflection/charges/{entry_id}/reconcile")
+def reconcile_reflection_charge(entry_id: str, entry: ReflectionCharge):
+    try:
+        reflection_engine().reconcile(entry_id, entry.billed_usd)
+    except ValueError as error:
+        raise HTTPException(409, str(error)) from None
+    return reflection_engine().status()
 
 
 @app.post("/api/tasks")

@@ -98,3 +98,62 @@ export const addMemory = (text: string) =>
   request<Workspace>("/memory", "POST", { text });
 export const deleteMemory = (id: string) =>
   request<Workspace>(`/memory/${id}`, "DELETE");
+
+export type ReflectionConfig = {
+  enabled: boolean;
+  interval_minutes: number;
+  cycle_usd: number;
+  daily_usd: number;
+  max_passes: number;
+  model: string;
+  input_usd_per_million: number;
+  output_usd_per_million: number;
+  pricing_verified: boolean;
+};
+export type ReflectionStatus = {
+  config: ReflectionConfig;
+  credentials_present: boolean;
+  state: string;
+  next_due: string | null;
+  uncertain_charges: { id: string; at: string; reserved_usd: number }[];
+  usage: {
+    today_usd: number;
+    month_usd: number;
+    tokens: number;
+    reserved_usd: number;
+    unresolved: boolean;
+  };
+  evidence: { id: string; text: string; share: boolean; at: string }[];
+  jobs: {
+    id: string;
+    status: string;
+    reason: string;
+    cost: number;
+    tokens: number;
+    at: string;
+    events: { role: string; pass: number; cost: number }[];
+    draft: {
+      summary: string;
+      lesson: string;
+      critique: string;
+      approved: boolean;
+    } | null;
+  }[];
+};
+export const loadReflection = () => request<ReflectionStatus>("/reflection");
+export const saveReflection = (config: ReflectionConfig) =>
+  request<ReflectionStatus>("/reflection/config", "PUT", config);
+export const addFeedback = (text: string, share: boolean) =>
+  request<ReflectionStatus>("/reflection/feedback", "POST", { text, share });
+export const runReflection = () =>
+  request<ReflectionStatus>("/reflection/run", "POST", {});
+export const reviewReflection = (id: string, accept: boolean) =>
+  request<ReflectionStatus>(`/reflection/jobs/${id}/review`, "POST", {
+    accept,
+  });
+export const clearReflection = () =>
+  request<ReflectionStatus>("/reflection/history", "DELETE");
+export const reconcileCharge = (id: string, billed_usd: number) =>
+  request<ReflectionStatus>(`/reflection/charges/${id}/reconcile`, "POST", {
+    billed_usd,
+  });

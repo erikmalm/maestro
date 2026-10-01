@@ -219,9 +219,25 @@ GitHub PR submission is an authorized capability for user-assigned coding tasks 
 
 This milestone enables early visual inspection without credentials or paid calls. It does not complete the live provider or agent milestones below.
 
+### M0b - First background reflection slice
+
+- [x] Persist feedback, bounded queued cycles, proposals, review decisions and real usage accounting privately.
+- [x] Add opt-in scheduling, pause, manual cycles, UI budgets and separate real usage visibility.
+- [x] Implement an OpenAI structured-output adapter with process-environment credentials and explicit source-sharing approval.
+- [x] Critique and revise with six-call maximum, no-progress stop, conservative reservations and no automatic evidence replay.
+- [x] Keep uncertain charges reserved across restart, block further calls, and support manual verified reconciliation.
+- [x] Require user review before storing guidance; keep it scoped to later reflection cycles.
+- [x] Verify backend boundaries with mock providers and desktop/mobile controls without paid calls.
+- [ ] Verify a deliberately budgeted live provider cycle with the user's credentials.
+- [ ] Feed real task outcomes into reflection under explicit sharing policies.
+- [ ] Compare proposed guidance against baseline/regression cases before promoting it into live agent prompts.
+- [ ] Implement versioned promotion/rollback and scoped chat/task recall.
+
+The worker runs while the local server is alive. It waits for new approved feedback rather than repeatedly asking a model to improve itself without evidence. User acceptance records guidance; it is not proof of improvement. Background reflection defaults to USD 0.10/cycle and USD 0.25/day and also observes the workspace limit settings. Demo usage and real reflection usage remain separate; the eventual live-agent runner must unify all real costs through one dispatch gate. Failed calls require verified reconciliation rather than free retries.
+
 ### M1 - Bootable local chat and configuration
 
-The local UI preview precedes M1. It implements responsive navigation, persistent demo cost/token visibility, local tasks/chat/manual memory, budget settings, and simulated run inspection. It has no paid API calls, accepted credentials, or live integration actions. M1 remains incomplete until the secure provider setup and live chat checks below pass.
+The local UI preview and reflection slice precede M1. Chat and task runs remain simulated. Only the opt-in reflection adapter can make paid calls, using backend environment credentials. OS credential storage and live integrations remain absent. M1 remains incomplete until the secure provider setup and live chat checks below pass.
 
 Build the web shell, local backend, Windows startup/shutdown scripts, private storage migrations, session protection, Settings, mock provider, and OpenAI adapter. Include the call gate and spend ledger for chat from the start.
 

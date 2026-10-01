@@ -57,6 +57,6 @@ try {
     }
     if (-not $ready) { throw "Maestro did not become ready. Check $dataDirectory\server.stderr.log" }
     Write-Output "Maestro is running at $previewUrl"
-    Write-Output 'This is a local UI preview. Usage and AI responses are simulated.'
+    Write-Output 'Chat/task runs are simulated. Opt-in background reflection can use paid API calls when configured.'
     if (-not $NoBrowser) { Start-Process $previewUrl }
 } finally { Pop-Location }
