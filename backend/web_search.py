@@ -203,8 +203,8 @@ class WebSearch:
                     continue
                 if len(item["url"]) > 2048 or key in item["url"] or not safe_url(item["url"]):
                     continue
-                results.append({"title": item["title"].replace(key, "[redacted]")[:200], "url": item["url"],
-                                "content": item["content"].replace(key, "[redacted]")[:1200]})
+                results.append({"title": credentials.redact(item["title"], key)[:200], "url": item["url"],
+                                "content": credentials.redact(item["content"], key)[:1200]})
             if not results:
                 raise ValueError("Ollama search returned no usable public sources. No answer was generated from search.")
             with self.transaction() as state:

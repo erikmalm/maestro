@@ -20,6 +20,14 @@ def target(base_url):
     return "Maestro/provider/" + hashlib.sha256(base_url.encode()).hexdigest()
 
 
+def redact(text, key):
+    """Remove the dispatched key without reproducing it in the marker."""
+    if not key:
+        return text
+    redacted = text.replace(key, "[redacted]")
+    return text.replace(key, "\u2588") if key in redacted else redacted
+
+
 def vault():
     if os.name != "nt":
         raise ValueError("Persistent key storage requires Windows. Choose session-only storage.")

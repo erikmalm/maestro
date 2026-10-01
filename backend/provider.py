@@ -167,6 +167,9 @@ class Provider:
                 raise ValueError("Local Ollama does not use an API key. Leave the key empty.")
             config.update(input_usd_per_million=0, output_usd_per_million=0, pricing_verified=True)
         with self.transaction() as state:
+            effective_key = None if local else key or credentials.read(config["base_url"])[0]
+            if effective_key and effective_key in config["model"]:
+                raise ValueError("Enter a model ID without the API key.")
             # Model-list access depends on the endpoint/key, not the chat model or API format.
             connection_changed = bool(key) or config["base_url"] != state["config"]["base_url"] or ((config["protocol"] == "ollama") != (state["config"]["protocol"] == "ollama"))
             if key:
@@ -356,15 +359,14 @@ class Provider:
                     message = data.get("message") if local else first.get("message")
                     reply = message.get("content", "") if isinstance(message, dict) else ""
                 reply = reply if isinstance(reply, str) else ""
-                if key:
-                    reply = reply.replace(key, "\u2588" if key in "[redacted]" else "[redacted]")
+                reply = credentials.redact(reply, key)
                 # Persist the actual exchange and accounting atomically.
                 workspace = json.loads(db.execute("SELECT value FROM workspace WHERE id=1").fetchone()[0])
                 chat = next((item for item in workspace["chats"] if item["id"] == chat_id), None)
                 if reply:
                     if title:
                         if chat and chat["title_source"] != "manual":
-                            generated = " ".join(reply.strip().strip('"\'').split())[:80]
+                            generated = credentials.redact(" ".join(reply.strip().strip('"\'').split())[:80], key)
                             if generated:
                                 chat.update(title=generated, title_source="generated")
                     elif chat:

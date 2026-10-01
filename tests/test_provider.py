@@ -152,6 +152,40 @@ class ProviderTests(unittest.TestCase):
         self.assertEqual(self.client.get("/api/provider").json(), before)
         self.assertNotIn(self.key.encode(), backend.DATABASE.read_bytes())
 
+    def test_manual_model_rejects_effective_key_before_changing_configuration_or_credentials(self):
+        with self.mock_http():
+            before = self.client.post("/api/provider/test", headers=self.headers).json()
+        for submitted, effective in (("", self.key), ("synthetic-replacement-key", "synthetic-replacement-key")):
+            with self.subTest(submitted=bool(submitted)), patch.object(credentials, "save", wraps=credentials.save) as save:
+                response = self.client.put("/api/provider", headers=self.headers, json={
+                    "config": {**self.config, "model": "model-" + effective + "-suffix"},
+                    "api_key": submitted, "persist": False})
+                self.assertEqual(response.status_code, 409)
+                self.assertNotIn(effective, response.text)
+                save.assert_not_called()
+                self.assertEqual(credentials.read(self.base)[0], self.key)
+                self.assertEqual(self.client.get("/api/provider").json(), before)
+                self.assertNotIn(effective.encode(), backend.DATABASE.read_bytes())
+
+    def test_manual_model_uses_target_endpoint_and_replacement_key_scope(self):
+        target = "https://different.example/v1"
+        target_key = "synthetic-target-key"
+        credentials.session_keys[target] = target_key
+        try:
+            for submitted, model, expected in (("", "model-" + target_key, 409),
+                                               ("", "safe-target-model", 200),
+                                               ("synthetic-new-key", "safe-replacement-model", 200)):
+                with self.subTest(submitted=bool(submitted), model=model):
+                    response = self.client.put("/api/provider", headers=self.headers, json={
+                        "config": {**self.config, "base_url": target, "model": model},
+                        "api_key": submitted, "persist": False})
+                    self.assertEqual(response.status_code, expected, response.text)
+            self.assertEqual(credentials.read(target)[0], "synthetic-new-key")
+            self.assertEqual(credentials.read(self.base)[0], self.key)
+            self.assertNotIn(target_key.encode(), backend.DATABASE.read_bytes())
+        finally:
+            credentials.session_keys.pop(target, None)
+
     def test_successful_reply_refusal_and_title_redact_dispatched_credentials(self):
         for protocol, kind in (("responses", "output_text"), ("responses", "refusal"), ("chat_completions", "content")):
             with self.subTest(protocol=protocol, kind=kind):
@@ -185,20 +219,36 @@ class ProviderTests(unittest.TestCase):
                 self.assertNotIn(self.key.encode(), backend.DATABASE.read_bytes())
 
     def test_redaction_marker_cannot_contain_the_dispatched_key(self):
-        for key in ("redacted", "[redacted]"):
+        for key, prefix, suffix in (("redacted", "", ""), ("[redacted]", "", ""),
+                                    ("x[redacted]", "x", ""), ("[redacted]x", "", "x")):
             with self.subTest(key=key):
                 self.key = key
                 self.setup_provider()
                 def handler(request):
                     data = self.provider_http(request).json()
-                    data["output"][0]["content"][0]["text"] = "Provider echo " + self.key
+                    data["output"][0]["content"][0]["text"] = "Provider echo " + prefix + self.key + suffix
                     return httpx.Response(200, json=data)
                 with self.mock_http(handler):
                     response = self.client.post("/api/chat", headers=self.headers, json={"text": "Synthetic marker check"})
                 self.assertEqual(response.status_code, 200, response.text)
-                self.assertEqual(response.json()["messages"][-1]["text"], "Provider echo \u2588")
+                self.assertEqual(response.json()["messages"][-1]["text"], "Provider echo " + prefix + "\u2588" + suffix)
                 self.assertNotIn(self.key, response.text)
                 self.assertNotIn(self.key.encode(), backend.DATABASE.read_bytes())
+
+    def test_title_normalization_cannot_recreate_the_dispatched_key(self):
+        self.key = "synthetic title key"
+        self.setup_provider()
+        def handler(request):
+            data = self.provider_http(request).json()
+            if json.loads(request.content).get("instructions") == TITLE_INSTRUCTIONS:
+                data["output"][0]["content"][0]["text"] = "synthetic  title  key"
+            return httpx.Response(200, json=data)
+        with self.mock_http(handler):
+            response = self.client.post("/api/chat", headers=self.headers, json={"text": "Synthetic title check"})
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()["chats"][0]["title"], "[redacted]")
+        self.assertNotIn(self.key, response.text)
+        self.assertNotIn(self.key.encode(), backend.DATABASE.read_bytes())
 
     def test_overrun_settles_reply_without_invalidating_another_configuration(self):
         for change_model in (False, True):
