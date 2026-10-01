@@ -46,6 +46,12 @@ flowchart LR
 
 The built frontend is served by the backend on one loopback origin. Ollama requests use loopback-only native endpoints, no credentials, local-model metadata checks and no cloud fallback. Optional API credentials are handled only by the backend and stored in Windows Credential Manager or server memory. User content and private configuration stay outside the public checkout. The coordinator and tool branches in this broader diagram remain planned.
 
+### Background task process (planned)
+
+Use a separate Maestro task process for queue consumption, coordination and eventual bounded review/revision. The browser and FastAPI process configure work and display persisted progress; closing the browser does not stop this task process. Ollama remains the shared inference server, with no second model daemon. Current local worker settings control context, CPU threads and model idle lifetime per chat request; they do not yet configure autonomous task execution.
+
+Start with one explicitly queued text-only to-do, its own private task context and a saved result. Extract accounted generation from `Provider.chat()` so tasks and chat share one dispatch gate and ledger without sharing conversation history. Keep a single generation slot initially, giving chat priority between task steps. Persist queue claims, attempt ownership and worker leases, plus pause and cumulative token/call/time limits. Replace unconditional startup reservation recovery before another process can dispatch: an API restart must not release a live task worker's reservation, and late results from interrupted attempts must not overwrite a newer attempt. The first worker uses local Ollama only and has no integration or coding tools. Prove completion with the browser closed, pause, limit enforcement and recovery before adding iterative improvement.
+
 ## Current preview versus full runtime
 
 | Layer | Implemented preview | Next extension |

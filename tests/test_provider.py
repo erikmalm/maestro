@@ -67,6 +67,8 @@ class ProviderTests(unittest.TestCase):
             second = self.client.post("/api/chat", headers=self.headers, json={"text": "What was it?"})
             self.assertEqual(second.status_code, 200)
         sent = json.loads(self.requests[-1].content)
+        self.assertNotIn("options", sent)
+        self.assertNotIn("keep_alive", sent)
         self.assertFalse(sent["store"])
         self.assertEqual(sent["model"], self.config["model"])
         self.assertEqual(sent["input"][0]["content"], "Remember the synthetic codeword.")
@@ -163,6 +165,8 @@ class ProviderTests(unittest.TestCase):
             payload = json.loads(request.content)
             self.assertEqual(request.url.path, "/v1/chat/completions")
             self.assertEqual(payload["max_tokens"], 1024)
+            self.assertNotIn("options", payload)
+            self.assertNotIn("keep_alive", payload)
             self.assertNotIn("service_tier", payload)  # Compatible providers need not implement OpenAI tiers.
             return httpx.Response(200, json={"choices": [{"message": {"content": "Compatible model reply"}}], "usage": {"prompt_tokens": 80, "completion_tokens": 20}})
         with self.mock_http(handler):

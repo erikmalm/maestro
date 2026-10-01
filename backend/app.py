@@ -178,6 +178,9 @@ class ProviderConfig(StrictModel):
     output_usd_per_million: float = Field(default=0, ge=0, le=10000, allow_inf_nan=False)
     pricing_verified: bool = False
     max_output_tokens: int = Field(default=1024, ge=64, le=32768)
+    ollama_context_tokens: int = Field(default=4096, ge=1024, le=131072)
+    ollama_threads: int = Field(default=0, ge=0, le=256)
+    ollama_keep_alive_minutes: int = Field(default=5, ge=0, le=120)
 
 
 class ProviderSetup(StrictModel):

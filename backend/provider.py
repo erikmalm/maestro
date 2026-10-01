@@ -12,7 +12,8 @@ from backend import credentials
 
 DEFAULT = {"base_url": "https://api.openai.com/v1", "protocol": "responses", "model": "",
            "input_usd_per_million": 0.0, "output_usd_per_million": 0.0,
-           "pricing_verified": False, "max_output_tokens": 1024}
+           "pricing_verified": False, "max_output_tokens": 1024,
+           "ollama_context_tokens": 4096, "ollama_threads": 0, "ollama_keep_alive_minutes": 5}
 INSTRUCTIONS = "You are Maestro, a helpful personal assistant. Be clear and concise. Do not claim to have performed actions or accessed tools that are not available."
 
 
@@ -121,6 +122,7 @@ class Provider:
             db.execute("BEGIN IMMEDIATE")
             row = db.execute("SELECT value FROM provider_state WHERE id=1").fetchone()
             state = json.loads(row[0]) if row else {"config": DEFAULT.copy(), "models": [], "tested_at": None, "ledger": []}
+            state["config"] = {**DEFAULT, **state["config"]}
             yield (state, db) if with_db else state
             db.execute("INSERT INTO provider_state VALUES(1,?) ON CONFLICT(id) DO UPDATE SET value=excluded.value", (json.dumps(state),))
 
@@ -136,7 +138,9 @@ class Provider:
             try:
                 row = db.execute("SELECT value FROM provider_state WHERE id=1").fetchone()
                 if row:
-                    return json.loads(row[0])
+                    state = json.loads(row[0])
+                    state["config"] = {**DEFAULT, **state["config"]}
+                    return state
             except sqlite3.OperationalError:
                 pass
         return {"config": DEFAULT.copy(), "models": [], "tested_at": None, "ledger": []}
@@ -225,6 +229,8 @@ class Provider:
             output_bound = config["max_output_tokens"]
             if input_bound + output_bound > workspace["limits"]["max_tokens"]:
                 raise ValueError("This conversation exceeds your token limit. Start a new chat or adjust the limit.")
+            if local and input_bound + output_bound > config["ollama_context_tokens"]:
+                raise ValueError("This conversation exceeds the local worker's conservative context allowance. Start a new chat, lower the output limit or increase context size in Settings.")
             reserve = (input_bound * config["input_usd_per_million"] + output_bound * config["output_usd_per_million"]) / 1000000
             now = datetime.now(self.timezone)
             daily = sum(x["cost"] for x in state["ledger"] if datetime.fromisoformat(x["at"]).astimezone(self.timezone).date() == now.date())
@@ -238,8 +244,11 @@ class Provider:
         if config["base_url"] == "https://api.openai.com/v1":
             payload["service_tier"] = "default"  # Match the standard price estimates, independent of project defaults.
         if local:
+            options = {"num_predict": output_bound, "num_ctx": config["ollama_context_tokens"],
+                       "num_thread": config["ollama_threads"]}
+            keep_alive = config["ollama_keep_alive_minutes"]
             payload = {"model": config["model"], "messages": [{"role": "system", "content": INSTRUCTIONS}, *history],
-                       "stream": False, "options": {"num_predict": output_bound}}
+                       "stream": False, "options": options, "keep_alive": f"{keep_alive}m" if keep_alive else 0}
             path = "/api/chat"
         elif config["protocol"] == "responses":
             payload.update({"instructions": INSTRUCTIONS, "input": history, "max_output_tokens": output_bound})

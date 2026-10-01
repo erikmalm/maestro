@@ -442,6 +442,53 @@ export default function ProviderSetup({
               }
             />
           </label>
+          {isOllama && (
+            <details className="reflection-cleanup">
+              <summary>Local worker settings</summary>
+              <p className="reflection-note">
+                Larger contexts use more memory. Leave CPU threads at 0 for
+                Ollama to choose automatically.
+              </p>
+              <div className="reflection-fields">
+                {(
+                  [
+                    [
+                      "ollama_context_tokens",
+                      "Context size (tokens)",
+                      1024,
+                      131072,
+                    ],
+                    ["ollama_threads", "CPU threads (0 = automatic)", 0, 256],
+                    [
+                      "ollama_keep_alive_minutes",
+                      "Keep model loaded (minutes)",
+                      0,
+                      120,
+                    ],
+                  ] as const
+                ).map(([key, label, min, max]) => (
+                  <label key={key}>
+                    {label}
+                    <input
+                      required
+                      type="number"
+                      min={min}
+                      max={max}
+                      step="1"
+                      value={config[key]}
+                      onChange={(event) =>
+                        field(key, Number(event.target.value))
+                      }
+                    />
+                  </label>
+                ))}
+              </div>
+              <p className="reflection-note">
+                Set keep-loaded minutes to 0 to unload the model after each
+                reply.
+              </p>
+            </details>
+          )}
           <div className="reflection-actions">
             <button
               type="submit"

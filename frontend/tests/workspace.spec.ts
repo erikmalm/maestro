@@ -311,6 +311,13 @@ test("local Ollama chat needs no key or USD budget and records native tokens", a
   await page
     .getByLabel("Available models", { exact: true })
     .selectOption("synthetic-ollama:latest");
+  await page.getByText("Local worker settings", { exact: true }).click();
+  await expect(page.getByLabel("Context size (tokens)")).toHaveValue("4096");
+  await expect(page.getByLabel("CPU threads (0 = automatic)")).toHaveValue("0");
+  await expect(page.getByLabel("Keep model loaded (minutes)")).toHaveValue("5");
+  await page.getByLabel("Context size (tokens)").fill("8192");
+  await page.getByLabel("CPU threads (0 = automatic)").fill("2");
+  await page.getByLabel("Keep model loaded (minutes)").fill("0");
   await expect(
     page.getByRole("button", { name: "Save connection", exact: true }),
   ).toBeEnabled();
@@ -322,6 +329,15 @@ test("local Ollama chat needs no key or USD budget and records native tokens", a
       "Chat model settings saved. Return to Workspace to send a message.",
     ),
   ).toBeVisible();
+  await page.reload();
+  await page.getByRole("button", { name: "Settings", exact: true }).click();
+  await expect(
+    page.getByLabel("Available models", { exact: true }),
+  ).toHaveValue("synthetic-ollama:latest");
+  await page.getByText("Local worker settings", { exact: true }).click();
+  await expect(page.getByLabel("Context size (tokens)")).toHaveValue("8192");
+  await expect(page.getByLabel("CPU threads (0 = automatic)")).toHaveValue("2");
+  await expect(page.getByLabel("Keep model loaded (minutes)")).toHaveValue("0");
   await mkdir(artifacts, { recursive: true });
   await page.screenshot({
     path: join(artifacts, "maestro-ollama-settings.png"),

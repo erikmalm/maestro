@@ -57,6 +57,6 @@ try {
     }
     if (-not $ready) { throw "Maestro did not become ready. Check $dataDirectory\server.stderr.log" }
     Write-Output "Maestro is running at $previewUrl"
-    Write-Output 'Configure your API key and model in Settings to use live chat. Background orchestration is paused.'
+    Write-Output 'Choose Ollama or an API provider and a model in Settings to use live chat. Background orchestration is paused.'
     if (-not $NoBrowser) { Start-Process $previewUrl }
 } finally { Pop-Location }

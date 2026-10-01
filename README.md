@@ -23,6 +23,8 @@ For local Ollama:
 
 Ollama mode uses the native local API without a key or price entry. Only loopback endpoints and installed local chat models are accepted; cloud models are excluded and there is no cloud fallback. Output and conversation token limits still apply, including when dollar budgets are zero. Models and Ollama's own configuration stay outside this repository. See [Ollama's local API](https://docs.ollama.com/api/authentication).
 
+Expand **Local worker settings** to control context size (default 4,096 tokens), CPU threads (0 lets Ollama choose), and idle keep-loaded time (default 5 minutes; 0 unloads after each reply). Save changes before the next message. Larger contexts use more memory; these settings do not limit GPU utilization. Maestro conservatively checks conversation size plus the reply allowance before dispatch and asks for a new chat or a larger context when it would not fit. Ollama runs inference on demand; these settings do not start a background task runner. See [Ollama's context and keep-alive settings](https://docs.ollama.com/faq).
+
 For OpenAI or another API provider:
 
 1. Open **Settings** and choose **Model provider → OpenAI** or **Custom API**. For a custom provider, enter its compatible HTTPS endpoint/local loopback server and API protocol.
@@ -34,6 +36,8 @@ For OpenAI or another API provider:
 OpenAI uses the Responses API. The Chat Completions option supports compatible providers; compatibility and model access depend on that provider. Chat uses actual provider responses and has no canned fallback. Missing settings, unsupported models, exhausted limits and provider errors produce explicit errors. The first version waits for a complete response rather than streaming it.
 
 Conversation history is sent with later messages. **New chat** clears history while keeping usage accounting. Existing demo messages are labelled and excluded from model context. To-dos can be added, completed/reopened and deleted without model calls; automatic agent execution is paused.
+
+The next proposed increment is a separate Maestro background task process using the same Ollama server. It should prove one queued text-only to-do completing with the browser closed, with persistent progress, pause and shared generation limits, before enabling iterative review or integrations. See the [process boundaries](docs/ARCHITECTURE.md#background-task-process-planned).
 
 ## Usage and limits
 

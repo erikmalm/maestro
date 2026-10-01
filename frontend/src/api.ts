@@ -119,6 +119,9 @@ export type ProviderConfig = {
   output_usd_per_million: number;
   pricing_verified: boolean;
   max_output_tokens: number;
+  ollama_context_tokens: number;
+  ollama_threads: number;
+  ollama_keep_alive_minutes: number;
 };
 export type ProviderStatus = {
   config: ProviderConfig;

@@ -63,10 +63,10 @@ flowchart TD
 | Component | Proposed choice | Purpose |
 | --- | --- | --- |
 | Web interface | React, TypeScript, Vite | Chat, task board, and run inspection. |
-| Local API and runner | Python, FastAPI, asynchronous workers | Keep permissions, provider calls, and execution limits in one controlled backend. |
+| Local API and runner | Python, FastAPI and a separate task process | Keep the UI API responsive while persisted background tasks use shared permissions, provider calls and limits. |
 | Storage | SQLite with migrations and FTS5 | Persist tasks, chat, runs, memory, and local text search. |
 | Live updates | Server-Sent Events plus normal HTTP requests | Stream chat and task events; replay persisted events after reconnect. |
-| Queue | SQLite jobs, leases, and bounded in-process workers | Avoid a separate message broker for a single-user installation. |
+| Queue | SQLite jobs, leases and a bounded task process | Avoid a separate message broker for a single-user installation. |
 | Providers | Local Ollama native API; optional OpenAI Responses/Chat Completions; synthetic test providers | Capture real usage and isolate provider behavior; streaming and typed tool execution are future increments. |
 | Credentials | OS credential store; session environment fallback | Keep keys separate from the workspace database and source tree. |
 | Tool interfaces | Typed internal adapters initially | Add optional MCP support later where a connector benefits from it. |
@@ -276,13 +276,15 @@ The worker runs while the local server is alive. It waits for new approved feedb
 
 ### M1 - Bootable local chat and configuration
 
-The local UI preview and reflection slice precede M1. Chat and task runs remain simulated. Only the opt-in reflection adapter can make paid calls, using backend environment credentials. OS credential storage and live integrations remain absent. M1 remains incomplete until the secure provider setup and live chat checks below pass.
+The current slice provides secure provider setup, Windows credential storage, real Ollama/API chat, persistent history and usage accounting. Real two-turn local chat has passed; API setup/accounting have synthetic integration coverage. Local worker resource controls persist context size, CPU threads and idle model lifetime. Task-agent runs and the retained reflection prototype remain paused. These checks prove the current chat slice; the broader milestone acceptance below must still be tracked individually.
 
 Build the web shell, local backend, Windows startup/shutdown scripts, private storage migrations, session protection, Settings, mock provider, and OpenAI adapter. Include the call gate and spend ledger for chat from the start.
 
 Acceptance: a clean checkout can be installed and started using documented commands; the browser opens on loopback; storage is outside the checkout; chat/history survives restart; keys can be added/removed without leaking to browser storage, API reads, logs, or Git; a mock conversation requires no key or network; missing credentials/pricing block paid requests; local-only context cannot be sent to a cloud provider.
 
 ### M2 - To-dos, execution, and run browser
+
+Deliver a small first increment with a separate local task process: one queued text-only to-do generates a result using the configured Ollama model, even with the browser closed. Share the chat dispatch gate and ledger, keep task context separate, and persist pause, cumulative token/call/time allowances and worker-owned attempt leases. Replace unconditional API startup recovery before enabling cross-process dispatch. Prove API restart does not interrupt a live worker, and worker restart cannot commit duplicate results. Add bounded review/revision after this first run works.
 
 Build task CRUD, priorities/projects, criteria, persisted queue, run events, results, and start/cancel/pause controls. Default to manual execution and support explicitly enabled execution-on-entry policies. Finish all run-level and global budgets before enabling auto execution.
 
@@ -320,7 +322,7 @@ Acceptance: a synthetic connector test retrieves and cites scoped documents; out
 
 ### M6 - Optional automation and provider expansion
 
-Add opt-in schedules, provider capability negotiation, a local-model adapter, and more scoped integrations. Add any remote-access mode only with a separately reviewed authentication design.
+Add opt-in schedules, expanded provider capability negotiation and more scoped integrations. Native local Ollama chat already exists. Add any remote-access mode only with a separately reviewed authentication design.
 
 Acceptance: idle automation has a fixed allowance, survives restart without duplicate scheduling, and stops at limits; changing providers preserves private local history; local-model operation can run without cloud API requests; emergency stop covers every scheduled and interactive execution path.
 
@@ -332,4 +334,4 @@ Use mock providers and synthetic content in automated checks. Cover lifecycle tr
 
 Keep any live provider smoke tests opt-in with an explicit small budget and local credentials. Record dependency versions and setup instructions at M1; update milestone status only when its acceptance checks pass.
 
-Next step: verify a real chat response and its usage from the user's chosen, locally configured model. Keep this change independently reviewable and finish M1 before adding more demo functionality. Then connect to-dos, scoped memory recall/curation and the bounded sub-agent runner. Resume background improvement and code/instruction proposals only after those foundations work; use isolated coding tasks and draft PRs for application changes.
+Real local chat and usage are verified. Next, prove one background text-only to-do through the separate task process described in M2, with visible progress, pause and restart recovery. Keep each increment independently reviewable. Then add bounded review/revision, scoped memory recall/curation and sub-agent delegation. Resume autonomous improvement and code/instruction proposals only after those foundations work; use isolated coding tasks and draft PRs for application changes.

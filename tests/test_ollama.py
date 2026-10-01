@@ -191,6 +191,81 @@ class OllamaTests(unittest.TestCase):
         self.assertEqual(tested.status_code, 200, tested.text)
         self.assertEqual(tested.json()["models"], ["synthetic-local-alias:latest", self.model])
 
+    def test_worker_settings_persist_keep_models_and_control_native_request(self):
+        self.configure()
+        with self.mock_http():
+            self.client.post("/api/provider/test", headers=self.headers)
+        config = {**self.config, "ollama_context_tokens": 8192,
+                  "ollama_threads": 2, "ollama_keep_alive_minutes": 0}
+        status = self.configure(config)
+        self.assertEqual(status["models"], [self.model])
+        restored = Provider(backend.DATABASE, backend.TIMEZONE).status()
+        self.assertEqual(restored["config"], status["config"])
+        with self.mock_http():
+            reply = self.client.post("/api/chat", headers=self.headers,
+                                     json={"text": "Check saved local worker settings"})
+        self.assertEqual(reply.status_code, 200, reply.text)
+        payload = json.loads(self.requests[-1].content)
+        self.assertEqual(payload["options"], {"num_ctx": 8192, "num_thread": 2, "num_predict": 256})
+        self.assertEqual(payload["keep_alive"], 0)
+        self.assertEqual(reply.json()["usage"]["today_usd"], 0)
+
+    def test_existing_settings_gain_worker_defaults_without_losing_state(self):
+        self.configure()
+        service = Provider(backend.DATABASE, backend.TIMEZONE)
+        with service.transaction() as state:
+            for key in ("ollama_context_tokens", "ollama_threads", "ollama_keep_alive_minutes"):
+                del state["config"][key]
+            state["models"] = [self.model]
+            state["tested_at"] = "synthetic-previous-test"
+        status = self.client.get("/api/provider").json()
+        self.assertEqual(status["config"]["ollama_context_tokens"], 4096)
+        self.assertEqual(status["config"]["ollama_threads"], 0)
+        self.assertEqual(status["config"]["ollama_keep_alive_minutes"], 5)
+        self.assertEqual(status["config"]["model"], self.model)
+        self.assertEqual(status["models"], [self.model])
+        self.assertEqual(status["tested_at"], "synthetic-previous-test")
+        with self.mock_http():
+            reply = self.client.post("/api/chat", headers=self.headers,
+                                     json={"text": "Check old settings still generate"})
+        self.assertEqual(reply.status_code, 200, reply.text)
+        payload = json.loads(self.requests[-1].content)
+        self.assertEqual(payload["options"], {"num_ctx": 4096, "num_thread": 0, "num_predict": 256})
+        self.assertEqual(payload["keep_alive"], "5m")
+        self.assertEqual(service.read_state()["config"], status["config"])
+
+    def test_local_context_guard_stops_before_dispatch_and_preserves_chat(self):
+        self.configure()
+        before = self.client.get("/api/workspace").json()
+        with self.mock_http():
+            rejected = self.client.post("/api/chat", headers=self.headers,
+                                        json={"text": "Synthetic oversized context " * 100})
+        self.assertEqual(rejected.status_code, 409, rejected.text)
+        self.assertIn("context allowance", rejected.json()["detail"])
+        self.assertEqual(self.requests, [])
+        after = self.client.get("/api/workspace").json()
+        self.assertEqual(after["messages"], before["messages"])
+        self.assertEqual(after["usage"], before["usage"])
+        self.configure({**self.config, "ollama_context_tokens": 16384})
+        with self.mock_http():
+            allowed = self.client.post("/api/chat", headers=self.headers,
+                                       json={"text": "Synthetic oversized context " * 100})
+        self.assertEqual(allowed.status_code, 200, allowed.text)
+
+    def test_worker_resource_values_reject_invalid_input_without_overwriting_settings(self):
+        saved = self.configure()["config"]
+        for key, values in (
+            ("ollama_context_tokens", (1023, 131073, 4096.5)),
+            ("ollama_threads", (-1, 257, 1.5)),
+            ("ollama_keep_alive_minutes", (-1, 121, 0.5)),
+        ):
+            for value in values:
+                with self.subTest(key=key, value=value):
+                    rejected = self.client.put("/api/provider", headers=self.headers,
+                                               json={"config": {**self.config, key: value}})
+                    self.assertEqual(rejected.status_code, 422, rejected.text)
+                    self.assertEqual(self.client.get("/api/provider").json()["config"], saved)
+
     def test_zero_dollar_limits_allow_local_generation_and_token_limits_still_block(self):
         self.configure()
         limits = self.client.get("/api/workspace").json()["limits"]
