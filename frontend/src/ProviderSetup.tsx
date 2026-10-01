@@ -88,16 +88,52 @@ export default function ProviderSetup({
     !!status &&
     (JSON.stringify(config) !== JSON.stringify(status.config) ||
       apiKey.length > 0);
+  const isOllama = config?.protocol === "ollama";
   const isOpenAI =
+    !isOllama &&
     config?.base_url.replace(/\/+$/, "") === "https://api.openai.com/v1";
+  const sameConnection =
+    !!config &&
+    !!status &&
+    config.base_url.replace(/\/+$/, "") === status.config.base_url &&
+    isOllama === (status.config.protocol === "ollama");
+  const credentialsRequired = sameConnection
+    ? status.credentials_required !== false
+    : !isOllama;
+  const models = sameConnection ? status.models : [];
   const pricesCurrent = pricesAreCurrent();
   const preset = isOpenAI && config ? openAIPrices(config.model) : undefined;
   const canSave =
     !!config?.model.trim() &&
     !!config.pricing_verified &&
-    (!!apiKey.trim() ||
-      (!!status?.credentials_present &&
-        config.base_url.replace(/\/+$/, "") === status.config.base_url));
+    (!credentialsRequired ||
+      !!apiKey.trim() ||
+      (!!status?.credentials_present && sameConnection));
+  function selectProvider(provider: string) {
+    if (!config) return;
+    setApiKey("");
+    setError("");
+    setNotice("");
+    setConfig({
+      ...config,
+      base_url:
+        provider === "ollama"
+          ? "http://127.0.0.1:11434"
+          : provider === "openai"
+            ? "https://api.openai.com/v1"
+            : "",
+      protocol:
+        provider === "ollama"
+          ? "ollama"
+          : provider === "openai"
+            ? "responses"
+            : "chat_completions",
+      model: "",
+      input_usd_per_million: 0,
+      output_usd_per_million: 0,
+      pricing_verified: provider === "ollama",
+    });
+  }
   function selectModel(model: string) {
     if (!config) return;
     const prices =
@@ -108,7 +144,7 @@ export default function ProviderSetup({
       ...(prices ? { protocol: "responses" as const } : {}),
       input_usd_per_million: prices?.input ?? 0,
       output_usd_per_million: prices?.output ?? 0,
-      pricing_verified: !!prices,
+      pricing_verified: isOllama || !!prices,
     });
     setNotice("");
   }
@@ -127,7 +163,7 @@ export default function ProviderSetup({
           "input_usd_per_million",
           "output_usd_per_million",
         ].includes(key)
-          ? { pricing_verified: false }
+          ? { pricing_verified: isOllama }
           : {}),
       });
     setNotice("");
@@ -138,12 +174,14 @@ export default function ProviderSetup({
       <div className="reflection-title">
         <div>
           <h2>Model connection</h2>
-          <p>
-            Your API key gives access. Your model choice determines who replies.
-          </p>
+          <p>Choose a local model or connect to a model provider.</p>
         </div>
         <span className="badge neutral">
-          {status?.credentials_present ? "API key configured" : "No API key"}
+          {isOllama
+            ? "Local · no API key"
+            : sameConnection && status?.credentials_present
+              ? "API key configured"
+              : "No API key"}
         </span>
       </div>
       {error && (
@@ -172,10 +210,26 @@ export default function ProviderSetup({
             );
           }}
         >
+          <label>
+            Model provider
+            <select
+              aria-label="Model provider"
+              value={isOllama ? "ollama" : isOpenAI ? "openai" : "custom"}
+              disabled={!!busy}
+              onChange={(event) => selectProvider(event.target.value)}
+            >
+              <option value="ollama">Ollama · local</option>
+              <option value="openai">OpenAI</option>
+              <option value="custom">Custom API</option>
+            </select>
+          </label>
           <p className="reflection-note">
-            An OpenAI key can access multiple models; it is not attached to one.
-            Connect to load your model list, choose a chat model, then save.
-            {status.credentials_present &&
+            {isOllama
+              ? "Start Ollama locally, connect to load installed models, choose one, then save. No API key is needed."
+              : "An API key can access multiple models; it is not attached to one. Connect to load your model list, choose a chat model, then save."}
+            {!isOllama &&
+              sameConnection &&
+              status.credentials_present &&
               !config.model &&
               " Your key is saved, but no chat model is selected yet."}
           </p>
@@ -187,13 +241,17 @@ export default function ProviderSetup({
               maxLength={2048}
               value={config.base_url}
               onChange={(event) => field("base_url", event.target.value)}
-              placeholder="https://api.openai.com/v1"
+              placeholder={
+                isOllama
+                  ? "http://127.0.0.1:11434"
+                  : "https://api.openai.com/v1"
+              }
             />
           </label>
           <p className="reflection-note">
-            OpenAI or a compatible HTTPS endpoint. A local server can use HTTP
-            on a loopback address. Chat and the API key are sent to this
-            endpoint.
+            {isOllama
+              ? "Use the local Ollama server address without /v1. Chat stays on this computer; remote Ollama addresses are blocked."
+              : "OpenAI or a compatible HTTPS endpoint. A local server can use HTTP on a loopback address. Chat and the API key are sent to this endpoint."}
           </p>
           <div className="reflection-fields">
             <label>
@@ -201,6 +259,7 @@ export default function ProviderSetup({
               <select
                 aria-label="API protocol"
                 value={config.protocol}
+                disabled={isOllama}
                 onChange={(event) =>
                   field(
                     "protocol",
@@ -210,6 +269,7 @@ export default function ProviderSetup({
               >
                 <option value="responses">Responses</option>
                 <option value="chat_completions">Chat Completions</option>
+                {isOllama && <option value="ollama">Ollama native API</option>}
               </select>
             </label>
             <label>
@@ -222,22 +282,22 @@ export default function ProviderSetup({
                 placeholder="Enter a model ID"
               />
               <datalist id="provider-models">
-                {status.models.map((model) => (
+                {models.map((model) => (
                   <option value={model} key={model} />
                 ))}
               </datalist>
             </label>
           </div>
-          {status.models.length > 0 && (
+          {models.length > 0 && (
             <label>
               Available models
               <select
                 aria-label="Available models"
-                value={status.models.includes(config.model) ? config.model : ""}
+                value={models.includes(config.model) ? config.model : ""}
                 onChange={(event) => selectModel(event.target.value)}
               >
                 <option value="">Choose a model from this connection</option>
-                {[...status.models]
+                {[...models]
                   .sort(
                     (a, b) =>
                       Number(!!(isOpenAI && openAIPrices(b))) -
@@ -252,100 +312,122 @@ export default function ProviderSetup({
               </select>
             </label>
           )}
-          <label>
-            API key
-            <input
-              type="password"
-              autoComplete="new-password"
-              spellCheck={false}
-              maxLength={4096}
-              value={apiKey}
-              onChange={(event) => {
-                setApiKey(event.target.value);
-                setNotice("");
-              }}
-              placeholder={
-                status.credentials_present
-                  ? "Leave blank to keep the current key"
-                  : "Enter your provider API key"
-              }
-            />
-          </label>
-          <label className="reflection-check">
-            <input
-              type="checkbox"
-              checked={persist}
-              onChange={(event) => setPersist(event.target.checked)}
-            />
-            Save a new key in Windows Credential Manager
-          </label>
-          <p className="reflection-note">
-            <ShieldCheck size={15} />
-            {persist
-              ? "Keys are kept outside the repository and never returned by the API."
-              : "A new key stays in server memory and is lost when Maestro stops."}
-            {status.credentials_present &&
-              ` Current source: ${status.credential_source.replaceAll("_", " ")}.`}
-          </p>
-          <div className="form-section-label">COST ESTIMATES · USD</div>
-          <div className="reflection-fields">
-            {(
-              [
-                ["input_usd_per_million", "Input USD / 1M tokens"],
-                ["output_usd_per_million", "Output USD / 1M tokens"],
-              ] as const
-            ).map(([key, label]) => (
-              <label key={key}>
-                {label}
+          {isOllama &&
+            sameConnection &&
+            status.tested_at &&
+            models.length === 0 && (
+              <p className="reflection-note">
+                No installed models found. Install a model in Ollama, then
+                connect again.
+              </p>
+            )}
+          {!isOllama && (
+            <>
+              <label>
+                API key
                 <input
-                  required
-                  type="number"
-                  min="0"
-                  max="10000"
-                  step="any"
-                  value={config[key]}
-                  onChange={(event) => field(key, Number(event.target.value))}
+                  type="password"
+                  autoComplete="new-password"
+                  spellCheck={false}
+                  maxLength={4096}
+                  value={apiKey}
+                  onChange={(event) => {
+                    setApiKey(event.target.value);
+                    setNotice("");
+                  }}
+                  placeholder={
+                    sameConnection && status.credentials_present
+                      ? "Leave blank to keep the current key"
+                      : "Enter your provider API key"
+                  }
                 />
               </label>
-            ))}
-          </div>
-          <label className="reflection-check">
-            <input
-              type="checkbox"
-              checked={config.pricing_verified}
-              onChange={(event) =>
-                field("pricing_verified", event.target.checked)
-              }
-            />
-            Use these prices for cost estimates
-          </label>
-          <p className="reflection-note">
-            Costs use provider-reported token counts and your saved prices. They
-            are estimates; provider billing may include discounts or other
-            charges.
-            {preset &&
-              pricesCurrent &&
-              config.input_usd_per_million === preset.input &&
-              config.output_usd_per_million === preset.output && (
-                <>
-                  {" "}
-                  Standard OpenAI rates filled automatically; checked{" "}
-                  {OPENAI_PRICES_CHECKED}.
-                </>
-              )}
-            {isOpenAI && (
-              <>
-                {" "}
-                <a
-                  href="https://developers.openai.com/api/docs/pricing"
-                  target="_blank"
-                  rel="noreferrer"
-                >
-                  OpenAI model prices
-                </a>
-              </>
-            )}
-          </p>
+              <label className="reflection-check">
+                <input
+                  type="checkbox"
+                  checked={persist}
+                  onChange={(event) => setPersist(event.target.checked)}
+                />
+                Save a new key in Windows Credential Manager
+              </label>
+              <p className="reflection-note">
+                <ShieldCheck size={15} />
+                {persist
+                  ? "Keys are kept outside the repository and never returned by the API."
+                  : "A new key stays in server memory and is lost when Maestro stops."}
+                {sameConnection &&
+                  status.credentials_present &&
+                  ` Current source: ${status.credential_source.replaceAll("_", " ")}.`}
+              </p>
+              <div className="form-section-label">COST ESTIMATES · USD</div>
+              <div className="reflection-fields">
+                {(
+                  [
+                    ["input_usd_per_million", "Input USD / 1M tokens"],
+                    ["output_usd_per_million", "Output USD / 1M tokens"],
+                  ] as const
+                ).map(([key, label]) => (
+                  <label key={key}>
+                    {label}
+                    <input
+                      required
+                      type="number"
+                      min="0"
+                      max="10000"
+                      step="any"
+                      value={config[key]}
+                      onChange={(event) =>
+                        field(key, Number(event.target.value))
+                      }
+                    />
+                  </label>
+                ))}
+              </div>
+              <label className="reflection-check">
+                <input
+                  type="checkbox"
+                  checked={config.pricing_verified}
+                  onChange={(event) =>
+                    field("pricing_verified", event.target.checked)
+                  }
+                />
+                Use these prices for cost estimates
+              </label>
+              <p className="reflection-note">
+                Costs use provider-reported token counts and your saved prices.
+                They are estimates; provider billing may include discounts or
+                other charges.
+                {preset &&
+                  pricesCurrent &&
+                  config.input_usd_per_million === preset.input &&
+                  config.output_usd_per_million === preset.output && (
+                    <>
+                      {" "}
+                      Standard OpenAI rates filled automatically; checked{" "}
+                      {OPENAI_PRICES_CHECKED}.
+                    </>
+                  )}
+                {isOpenAI && (
+                  <>
+                    {" "}
+                    <a
+                      href="https://developers.openai.com/api/docs/pricing"
+                      target="_blank"
+                      rel="noreferrer"
+                    >
+                      OpenAI model prices
+                    </a>
+                  </>
+                )}
+              </p>
+            </>
+          )}
+          {isOllama && (
+            <p className="reflection-note">
+              Local inference has $0 provider API charges. Hardware and
+              electricity costs are excluded. Token usage is still tracked.
+            </p>
+          )}
           <label>
             Maximum output tokens per reply
             <input
@@ -389,33 +471,39 @@ export default function ProviderSetup({
                       );
                     return api.testProvider();
                   },
-                  "API key accepted. Choose a chat model and save; sending a message verifies generation.",
+                  isOllama
+                    ? "Local model list loaded. Choose an installed model and save; sending a message verifies generation."
+                    : "API key accepted. Choose a chat model and save; sending a message verifies generation.",
                 );
               }}
             >
               {busy === "test" && <LoaderCircle size={15} className="spin" />}
               Connect and load models
             </button>
-            <button
-              type="button"
-              className="button subtle"
-              disabled={!!busy || !status.credentials_present}
-              onClick={() => {
-                setApiKey("");
-                void act(
-                  "remove",
-                  api.deleteProviderKey,
-                  "Saved API key removed.",
-                );
-              }}
-            >
-              Remove API key
-            </button>
+            {!isOllama && (
+              <button
+                type="button"
+                className="button subtle"
+                disabled={
+                  !!busy || !sameConnection || !status.credentials_present
+                }
+                onClick={() => {
+                  setApiKey("");
+                  void act(
+                    "remove",
+                    api.deleteProviderKey,
+                    "Saved API key removed.",
+                  );
+                }}
+              >
+                Remove API key
+              </button>
+            )}
           </div>
           <p className="reflection-note">
             {!config.model.trim()
               ? "Choose a model before saving the chat connection. "
-              : !config.pricing_verified
+              : !isOllama && !config.pricing_verified
                 ? "Confirm this model's prices before saving the chat connection. "
                 : !canSave
                   ? "Connect an API key for this endpoint before saving. "

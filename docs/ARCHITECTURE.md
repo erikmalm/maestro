@@ -1,12 +1,12 @@
 # Maestro architecture draft
 
-Status: first implementation draft. The local UI and bounded background reflection worker are runnable. Reflection has a real OpenAI adapter tested against mocked responses. Live chat/task agents, the durable agent runner, automatic memory recall and GitHub/MarketPulse connectors remain planned.
+Status: local chat is implemented with Ollama's native API and optional OpenAI-compatible providers. Real local generation, two-turn context, token accounting and persistent history are verified. Background reflection and agent execution are paused. The durable agent runner, automatic memory recall and GitHub/MarketPulse connectors remain planned.
 
 ## Interface and usage visibility
 
 Keep the main screen focused on conversation and a short task list. A compact usage control stays in the header on every page and opens detailed usage plus budget settings without leaving the current work. The desktop sidebar offers Workspace, Tasks, Runs, Agents, Memory, Integrations, and Settings; mobile uses collapsible navigation.
 
-The header shows estimated spend and tokens for today, separating demo usage from real reflection usage. Its detail view will separate input/output tokens, reserved spend, settled estimates, daily/monthly totals, and per-run/agent usage. Users change spending, token, refinement, and time limits locally. No sample demo amount represents a provider bill. A planned Improvements view will show explanations and decisions for code-change proposals.
+The header shows real chat tokens and estimated API spend for today. Local Ollama reports tokens with zero provider API charges; hardware/electricity costs are excluded. The usage view shows input/output tokens, reservations and day/month totals. Users change spending and token limits locally. Per-agent usage and refinement/time controls remain planned. A planned Improvements view will show explanations and decisions for code-change proposals.
 
 ## System boundaries
 
@@ -15,6 +15,7 @@ flowchart LR
     subgraph Computer[Your computer]
         UI[React web interface]
         API[FastAPI local API]
+        LocalModel[Ollama local chat model]
         Queue[Persisted task queue]
         Coordinator[Coordinator]
         Gate[Budget and permission gate]
@@ -25,6 +26,7 @@ flowchart LR
         Tools[Scoped tool adapters]
         Worktree[Isolated coding worktree]
         UI --> API
+        API --> LocalModel
         API --> DB
         API --> Queue
         Queue --> Coordinator
@@ -42,27 +44,27 @@ flowchart LR
     Ledger -. Usage events .-> UI
 ```
 
-The built frontend is served by the backend on one loopback origin. Credentials are handled only by the backend and provider/tool adapters. User content and private configuration stay outside the public checkout. Derived content inherits its sources' provider-sharing restrictions.
+The built frontend is served by the backend on one loopback origin. Ollama requests use loopback-only native endpoints, no credentials, local-model metadata checks and no cloud fallback. Optional API credentials are handled only by the backend and stored in Windows Credential Manager or server memory. User content and private configuration stay outside the public checkout. The coordinator and tool branches in this broader diagram remain planned.
 
 ## Current preview versus full runtime
 
 | Layer | Implemented preview | Next extension |
 | --- | --- | --- |
 | UI | React/TypeScript, responsive CSS, task/chat flow, run timelines, memory list, budget dialogs | Live streaming/status and per-agent usage drilldown |
-| API | FastAPI, local session cookie, CSRF checks, origin/host validation | Modular routers, provider configuration, event stream |
+| API | FastAPI, provider configuration, local session cookie, CSRF checks, origin/host validation | Modular routers and event stream |
 | Storage | Private SQLite snapshot updated in an immediate transaction | Normalized records, migrations, job leases, granular events |
-| Usage | Separate demo and reflection ledgers; provider tokens, entered-price cost estimates, conservative reservations and manual uncertain-charge reconciliation | Unified live-agent dispatch gate, tool fees, invoice import |
-| Execution | Persisted tasks and explicitly simulated chat/run steps | Durable planning, delegation, retries, cancellation |
+| Usage | Real chat tokens, zero-cost local calls, API price estimates, reservations and uncertain-charge reconciliation; demo data separate | Unified live-agent dispatch gate, tool fees, invoice import |
+| Execution | Real chat; persistent to-do CRUD; agent execution paused | Durable planning, delegation, retries, cancellation |
 | Memory | Manual records and user-reviewed reflection guidance | Scoped chat/task recall, baseline evaluations, promotion/rollback |
-| Reflection | Persisted opt-in worker; explicit feedback sharing; reflect/review/revise; stop and recovery controls | Real task evidence, durable job leases, measured regression checks |
-| Credentials | UI key entry disabled; reflection reads backend process environment | OS credential storage |
+| Reflection | Retained prototype; worker and UI paused | Real task evidence, durable job leases, measured regression checks |
+| Credentials | Native Windows storage or server memory for API keys; none used by local Ollama | Additional OS credential stores |
 | Integrations | Descriptive GitHub/MarketPulse cards | Scoped, authorized tool execution |
 
-The snapshot schema keeps this first preview small. It is not the final agent database design. The task simulation is finite; reflection separately enforces spend/token/pass/time dispatch gates. The full runtime checks must be complete before automatic paid task-agent work is enabled.
+The snapshot schema keeps this implementation small. The full runtime checks must be complete before automatic task-agent work is enabled.
 
-### Implemented reflection path
+### Retained reflection prototype (paused)
 
-`backend/reflection.py` owns a private SQLite reflection-state record, feedback/job history and cost ledger. FastAPI's lifespan starts one background worker. The browser polls local status every five seconds; the worker checks its persisted eligibility/schedule every ten seconds. Neither polling nor idle checks call a model. A configured interval controls scheduled cycles, and evidence consumed by a cycle is excluded from future automatic cycles.
+`backend/reflection.py` retains a private reflection-state record, feedback/job history and cost ledger. The current FastAPI lifespan disables reflection and starts no worker; the UI does not show its controls. The following describes retained prototype behavior, which is not active during local chat work.
 
 Before each provider call, an immediate transaction reserves a conservative byte-based input estimate plus 1,024 output tokens, checking reflection and workspace limit settings. The network request runs outside the database lock. Response usage settles the reservation; missing usage/failed requests retain uncertain charges and pause dispatch. The two-minute limit blocks later dispatches rather than undoing an already issued call. Pricing is user-entered and cannot guarantee provider invoice amounts.
 
@@ -80,7 +82,10 @@ Restart marks running jobs interrupted and unresolved reservations uncertain, wi
 | `POST /api/tasks` | Save a task without calling a provider. |
 | `PATCH /api/tasks/{id}` / `DELETE /api/tasks/{id}` | Complete/reopen or remove a task. |
 | `POST /api/tasks/{id}/preview` | Create a simulated run; leave the real task open. |
-| `POST /api/chat` | Save a message and an identified canned preview response. |
+| `POST /api/chat` / `DELETE /api/chat` | Real provider reply with usage/history; clear history while retaining accounting. |
+| `GET /api/provider` / `PUT /api/provider` | Read/change private provider settings; key presence only, never key contents. |
+| `POST /api/provider/test` | Fetch local installed models or an API model list without generation. |
+| `DELETE /api/provider/key` | Remove the current API provider's saved credential. |
 | `PUT /api/limits` | Validate and save local budget/execution limits. |
 | `POST /api/memory` / `DELETE /api/memory/{id}` | Manually remember or forget private preview records. |
 | `GET /api/reflection` / `PUT /api/reflection/config` | Status, private settings, limits, credential-presence flag and real usage. |
@@ -89,9 +94,9 @@ Restart marks running jobs interrupted and unresolved reservations uncertain, wi
 | `DELETE /api/reflection/history` | Clear personal reflection content while retaining usage accounting. |
 | `POST /api/reflection/charges/{id}/reconcile` | Confirm a provider-verified charge while paused. |
 
-Workspace responses expose demo capabilities explicitly: `mode=preview`, `live_ai=false` for chat/task execution, `github_pr=false`, and `secure_credentials=false`. Reflection's separate status reports credential presence and worker configuration. The UI must not imply a task integration works before its capability is enabled.
+Workspace responses identify live chat separately from demo tasks/runs. Provider status exposes `credentials_required=false` for Ollama. GitHub execution remains disabled, and reflection's separate status is paused. The UI must not imply a task integration works before its capability is enabled.
 
-Planned routes cover secure provider setup/status, task run/cancel/resume, per-run usage, replayable `GET /api/events`, integration configuration, and PR preparation/submission. Credentials are never returned through read endpoints.
+Planned routes cover task run/cancel/resume, per-run usage, replayable `GET /api/events`, integration configuration, and PR preparation/submission. Credentials are never returned through read endpoints.
 
 ## Task and cost flow
 

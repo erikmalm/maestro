@@ -1,6 +1,6 @@
 # Maestro
 
-A local web interface for chat with your chosen model, usage tracking and persistent to-dos. The UI and broader architecture are retained; orchestration, background reflection and code self-improvement are paused until the basic flow is verified.
+A local web interface for chat with your chosen model, usage tracking and persistent to-dos. Local Ollama chat is verified with real generation and conversation context. Orchestration, background reflection and code self-improvement remain paused.
 
 ## Run locally
 
@@ -14,7 +14,18 @@ Open [http://127.0.0.1:8765](http://127.0.0.1:8765). Stop with `.\scripts\stop.p
 
 ## Connect and chat
 
-1. Open **Settings**. Keep the OpenAI base URL, or enter a compatible HTTPS endpoint/local loopback server and choose its API protocol.
+For local Ollama:
+
+1. Start Ollama and install a chat model using its app or `ollama pull <model>`.
+2. In Maestro **Settings**, choose **Model provider → Ollama · local**. The default server is `http://127.0.0.1:11434`.
+3. Click **Connect and load models**, select an installed model, then **Save connection**.
+4. Return to **Workspace** and send a message. Tokens are reported by Ollama and provider API charges are $0; hardware and electricity costs are not estimated.
+
+Ollama mode uses the native local API without a key or price entry. Only loopback endpoints and installed local chat models are accepted; cloud models are excluded and there is no cloud fallback. Output and conversation token limits still apply, including when dollar budgets are zero. Models and Ollama's own configuration stay outside this repository. See [Ollama's local API](https://docs.ollama.com/api/authentication).
+
+For OpenAI or another API provider:
+
+1. Open **Settings** and choose **Model provider → OpenAI** or **Custom API**. For a custom provider, enter its compatible HTTPS endpoint/local loopback server and API protocol.
 2. Enter the API key and **Connect and load models**. This saves the key and fetches the model list without generating a response. Default storage is Windows Credential Manager. Uncheck persistence to keep a new key only in server memory.
 3. Select/type the desired model ID. The key authorizes your account/project; the model is chosen separately for each chat request. Models listed by an API are not necessarily chat-capable.
 4. Selecting the exact `gpt-6-luna`, `gpt-6.1-sol` or `gpt-6-astra` ID fills standard OpenAI prices when the dated snapshot is at most 30 days old. For other models/providers or an older snapshot, enter verified input/output prices in USD per million tokens and enable **Use these prices for cost estimates**. Save the connection. Saved prices remain in effect until updated; zero prices are valid only for genuinely free inference.
@@ -30,7 +41,7 @@ The header shows today's tokens and estimated USD. Each answer shows its model, 
 
 Tokens come from provider responses. USD uses your configured prices and excludes cache discounts; it is not an invoice or a billing feed. Changing prices does not recalculate earlier requests. Spend and conservative token reservations are checked before dispatch. One chat request runs at a time, with a configured output cap and no automatic retries.
 
-Failed requests with unknown usage retain a reservation and block further chat until their billed amount is verified in Settings. Known access/quota rejections release the reservation. Restart preserves accounting and marks interrupted requests uncertain.
+Paid API requests with unknown usage retain a reservation and block further chat until their billed amount is verified in Settings. Known access/quota rejections release the reservation. Local Ollama failures release their zero-cost reservation. Restart preserves accounting and marks interrupted paid requests uncertain.
 
 ## Private credentials and data
 
@@ -38,7 +49,7 @@ Keys never go into Git, the workspace database, browser storage, prompts, read A
 
 Tasks, conversations, model settings and accounting live in `%LOCALAPPDATA%\Maestro\preview`, outside the checkout. An alternative `MAESTRO_DATA_DIR` must also resolve outside it. A public repository contains only reusable source, documentation and synthetic fixtures.
 
-When you send chat, its history and your key go to the configured provider. Provider retention rules still apply. OpenAI requests use `store: false`; see [OpenAI data controls](https://developers.openai.com/api/docs/guides/your-data). The backend binds to loopback and requires local session/CSRF protection.
+When you send API chat, its history and your key go to the configured provider. In Ollama mode, history goes to your local server without any saved provider key. Provider retention rules still apply. OpenAI requests use `store: false`; see [OpenAI data controls](https://developers.openai.com/api/docs/guides/your-data). The backend binds to loopback and requires local session/CSRF protection.
 
 ## Validation
 
@@ -50,6 +61,6 @@ npm run build
 npm run test:ui
 ```
 
-Browser tests exercise the complete setup/chat/history/usage flow against a synthetic HTTP provider in a temporary workspace. Windows credential tests use a synthetic key and remove it afterward. Automated checks require no personal credentials or paid calls. A real LLM check requires a locally configured user key, model and prices.
+Browser tests exercise setup/chat/history/usage against synthetic API and Ollama servers in a temporary workspace. Windows credential tests use a synthetic key and remove it afterward. Automated checks require no personal credentials or paid calls. A real LLM check requires either a running local Ollama model or a configured provider key, model and prices.
 
 The broader [development plan](DEVELOPMENT_PLAN.md) and [architecture](docs/ARCHITECTURE.md) describe planned capabilities. They are not acceptance evidence for the current chat milestone.

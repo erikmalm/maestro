@@ -113,7 +113,7 @@ export const deleteMemory = (id: string) =>
 
 export type ProviderConfig = {
   base_url: string;
-  protocol: "responses" | "chat_completions";
+  protocol: "responses" | "chat_completions" | "ollama";
   model: string;
   input_usd_per_million: number;
   output_usd_per_million: number;
@@ -122,6 +122,7 @@ export type ProviderConfig = {
 };
 export type ProviderStatus = {
   config: ProviderConfig;
+  credentials_required: boolean;
   credentials_present: boolean;
   credential_source: string;
   models: string[];

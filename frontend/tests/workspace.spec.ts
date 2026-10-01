@@ -271,3 +271,123 @@ test("mobile chat, settings and navigation fit the viewport", async ({
     animations: "disabled",
   });
 });
+
+test("local Ollama chat needs no key or USD budget and records native tokens", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await page.getByRole("button", { name: "Settings", exact: true }).click();
+  await page
+    .getByLabel("Model provider", { exact: true })
+    .selectOption("ollama");
+  await expect(page.getByLabel("API key", { exact: true })).toHaveCount(0);
+  await expect(
+    page.getByLabel("Save a new key in Windows Credential Manager"),
+  ).toHaveCount(0);
+  await expect(
+    page.getByLabel("Input USD / 1M tokens", { exact: true }),
+  ).toHaveCount(0);
+  await expect(
+    page.getByLabel("Output USD / 1M tokens", { exact: true }),
+  ).toHaveCount(0);
+  await expect(
+    page.getByText(/Local inference has \$0 provider API charges/),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: "Save connection", exact: true }),
+  ).toBeDisabled();
+  const fixture = await (
+    await page.request.get("/api/provider-fixture")
+  ).json();
+  await page
+    .getByLabel("API base URL", { exact: true })
+    .fill(fixture.ollama_url);
+  await page
+    .getByRole("button", { name: "Connect and load models", exact: true })
+    .click();
+  await expect(
+    page.getByLabel("Available models", { exact: true }),
+  ).toBeVisible();
+  await page
+    .getByLabel("Available models", { exact: true })
+    .selectOption("synthetic-ollama:latest");
+  await expect(
+    page.getByRole("button", { name: "Save connection", exact: true }),
+  ).toBeEnabled();
+  await page
+    .getByRole("button", { name: "Save connection", exact: true })
+    .click();
+  await expect(
+    page.getByText(
+      "Chat model settings saved. Return to Workspace to send a message.",
+    ),
+  ).toBeVisible();
+  await mkdir(artifacts, { recursive: true });
+  await page.screenshot({
+    path: join(artifacts, "maestro-ollama-settings.png"),
+    fullPage: true,
+    animations: "disabled",
+  });
+
+  await page.getByRole("button", { name: "Workspace", exact: true }).click();
+  await Promise.all([
+    page.waitForResponse(
+      (response) =>
+        response.url().endsWith("/api/chat") &&
+        response.request().method() === "DELETE" &&
+        response.ok(),
+    ),
+    page.getByRole("button", { name: "New chat", exact: true }).click(),
+  ]);
+  const usageButton = page.getByRole("button", {
+    name: "View usage and manage budgets",
+  });
+  await usageButton.click();
+  for (const label of ["Per run", "Per day", "Per month"]) {
+    await page.getByLabel(label, { exact: true }).fill("0");
+  }
+  await page.getByRole("button", { name: "Save limits" }).click();
+  await expect(
+    page.getByRole("button", { name: "Close dialog" }),
+  ).not.toBeVisible();
+  const before = (await (await page.request.get("/api/workspace")).json())
+    .usage;
+  const previousCostLabel = (await usageButton.innerText()).match(
+    /\$\d+(?:\.\d+)?/,
+  )![0];
+  await page.getByLabel("Message Maestro").fill("Remember codeword CEDAR");
+  await page.getByRole("button", { name: "Send message" }).click();
+  await expect(
+    page.getByText(/^Synthetic Ollama received: Remember codeword CEDAR/),
+  ).toBeVisible();
+  await page.getByLabel("Message Maestro").fill("What was the codeword?");
+  await page.getByRole("button", { name: "Send message" }).click();
+  await expect(
+    page.getByText(/Earlier message: Remember codeword CEDAR/),
+  ).toBeVisible();
+  await expect(
+    page.getByText("100 input · 20 output tokens · $0.00 estimated", {
+      exact: true,
+    }),
+  ).toHaveCount(2);
+  await expect(usageButton).toContainText(previousCostLabel);
+  const after = (await (await page.request.get("/api/workspace")).json()).usage;
+  expect(after.today_usd).toBe(before.today_usd);
+  expect(after.month_usd).toBe(before.month_usd);
+  expect(after.input_tokens).toBe(before.input_tokens + 200);
+  expect(after.output_tokens).toBe(before.output_tokens + 40);
+  expect(after.calls).toBe(before.calls + 2);
+  await page.reload();
+  await expect(
+    page.getByText(/Earlier message: Remember codeword CEDAR/),
+  ).toBeVisible();
+  await expect(usageButton).toContainText(previousCostLabel);
+  await page.getByRole("button", { name: "Settings", exact: true }).click();
+  await expect(page.getByLabel("Model provider", { exact: true })).toHaveValue(
+    "ollama",
+  );
+  await expect(page.getByLabel("Model ID", { exact: true })).toHaveValue(
+    "synthetic-ollama:latest",
+  );
+  await expect(page.getByLabel("API key", { exact: true })).toHaveCount(0);
+});

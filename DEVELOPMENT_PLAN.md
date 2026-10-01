@@ -1,6 +1,6 @@
 # Maestro development plan
 
-Plan date: 2026-10-01. Current priority: finish the working API/model setup and chat milestone before expanding orchestration. Live-chat routes, credential setup and usage accounting are implemented and tested with synthetic providers; actual LLM generation awaits the user's model/pricing configuration. Background reflection and agent execution are paused. The [architecture draft](docs/ARCHITECTURE.md) describes the broader proposed system.
+Plan date: 2026-10-01. Local Ollama setup, real two-turn chat, token accounting and persistent history are verified. Local inference requires no API key or model pricing. Optional paid API setup and accounting also have synthetic integration coverage. Background reflection and agent execution remain paused while delivery proceeds in small functional increments. The [architecture draft](docs/ARCHITECTURE.md) describes the broader proposed system.
 
 ## 1. Product goal
 
@@ -67,7 +67,7 @@ flowchart TD
 | Storage | SQLite with migrations and FTS5 | Persist tasks, chat, runs, memory, and local text search. |
 | Live updates | Server-Sent Events plus normal HTTP requests | Stream chat and task events; replay persisted events after reconnect. |
 | Queue | SQLite jobs, leases, and bounded in-process workers | Avoid a separate message broker for a single-user installation. |
-| Providers | OpenAI Responses adapter first, mock adapter for tests | Stream output, execute typed tool requests, capture usage, and isolate provider-specific behavior. |
+| Providers | Local Ollama native API; optional OpenAI Responses/Chat Completions; synthetic test providers | Capture real usage and isolate provider behavior; streaming and typed tool execution are future increments. |
 | Credentials | OS credential store; session environment fallback | Keep keys separate from the workspace database and source tree. |
 | Tool interfaces | Typed internal adapters initially | Add optional MCP support later where a connector benefits from it. |
 | Development setup | uv for Python; a pinned Node package manager and lockfile | Reproducible dependency installation. |

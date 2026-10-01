@@ -660,7 +660,8 @@ export default function App() {
                 <p>
                   Chat with your chosen model. Keep your next steps in view.
                 </p>
-                {!workspace.provider.credentials_present ||
+                {(workspace.provider.credentials_required !== false &&
+                  !workspace.provider.credentials_present) ||
                 !workspace.provider.config.model ||
                 !workspace.provider.config.pricing_verified ? (
                   <button
@@ -784,7 +785,8 @@ export default function App() {
                       disabled={
                         !chat.trim() ||
                         !!busy ||
-                        !workspace.provider.credentials_present ||
+                        (workspace.provider.credentials_required !== false &&
+                          !workspace.provider.credentials_present) ||
                         !workspace.provider.config.model ||
                         !workspace.provider.config.pricing_verified
                       }

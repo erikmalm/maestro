@@ -36,10 +36,27 @@ with tempfile.TemporaryDirectory(prefix="maestro-browser-") as directory:
             return True
 
         def do_GET(self):
+            if self.path == "/api/tags":
+                if self.headers.get("Authorization"):
+                    return self.reply(400, {"error": "Unexpected local credential"})
+                return self.reply(200, {"models": [{"name": "synthetic-ollama:latest",
+                    "details": {"format": "gguf"}, "capabilities": ["completion"]}]})
             if self.authorized():
                 self.reply(200, {"data": [{"id": "synthetic-browser-model"}]})
 
         def do_POST(self):
+            if self.path in ("/api/show", "/api/chat"):
+                if self.headers.get("Authorization"):
+                    return self.reply(400, {"error": "Unexpected local credential"})
+                request = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+                if self.path == "/api/show":
+                    return self.reply(200, {"details": {"format": "gguf"}, "capabilities": ["completion"]})
+                history = [message for message in request["messages"] if message["role"] != "system"]
+                reply = "Synthetic Ollama received: " + history[-1]["content"]
+                if len(history) > 1:
+                    reply += ". Earlier message: " + history[0]["content"]
+                return self.reply(200, {"done": True, "message": {"role": "assistant", "content": reply},
+                    "prompt_eval_count": 100, "eval_count": 20})
             if not self.authorized():
                 return
             request = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
@@ -58,7 +75,7 @@ with tempfile.TemporaryDirectory(prefix="maestro-browser-") as directory:
 
     @backend.app.get("/api/provider-fixture")
     def fixture_url():
-        return {"base_url": f"http://127.0.0.1:{fake.server_port}/v1"}
+        return {"base_url": f"http://127.0.0.1:{fake.server_port}/v1", "ollama_url": f"http://127.0.0.1:{fake.server_port}"}
     # Keep the test-only fixture route before the production static-file catch-all.
     backend.app.router.routes.insert(0, backend.app.router.routes.pop())
 
