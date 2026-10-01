@@ -1,12 +1,24 @@
 # Maestro development plan
 
-Plan date: 2026-10-01. Status: documentation, the local UI and an opt-in background reflection adapter are implemented. Provider calls are tested with mocks; live chat, the full agent runtime and code-improvement proposals remain planned. The [architecture draft](docs/ARCHITECTURE.md) separates the current implementation from the proposed system.
+Plan date: 2026-10-01. Current priority: finish the working API/model setup and chat milestone before expanding orchestration. Live-chat routes, credential setup and usage accounting are implemented and tested with synthetic providers; actual LLM generation awaits the user's model/pricing configuration. Background reflection and agent execution are paused. The [architecture draft](docs/ARCHITECTURE.md) describes the broader proposed system.
 
 ## 1. Product goal
 
 Build a locally bootable personal AI coordinator with a web interface for conversation, to-dos, agent orchestration, and a persistent private memory bank. A task should be able to progress through planning, delegation, review, and refinement with visible progress and enforced resource limits.
 
 The repository will be public. Credentials and all personal workspace data must remain local, outside its checkout. MarketPulse is an intended documentation source; its API, authentication, and document format have not been inspected or assumed.
+
+The full product scope remains:
+
+- A persistent to-do list connected to assigned work and its results.
+- Recursive improvement of task results and workflows, with shared spending, iteration and time limits.
+- Maestro coordinating planning, delegation, review and completion.
+- Explained proposals to upgrade its own code or instructions, with validation and reviewable changes.
+- Private memory outside GitHub, recalled across tasks and sessions.
+- Configurable sub-agents whose prompts, models, tools, permissions and budgets are regulated by Maestro; descendants cannot expand their own authority or allowance.
+- Memory curation by Maestro, including attributed notes/comments, consolidation, corrections and removal of stale information, alongside user edits.
+
+Deliver this scope through small functional increments. The immediate acceptance gate is UI configuration of a chosen provider/model, a real chat response, visible token/cost accounting and preserved local history. Then connect the existing to-do CRUD, private memory recall/curation and bounded sub-agent execution; add ongoing reflection and code/instruction improvement on that working foundation. A demo view or a plan does not satisfy a capability's acceptance criteria.
 
 The first version supports one user on one computer, with Windows as the first supported operating system. Remote hosting, multiple users, unrestricted shell agents, autonomous financial transactions, and automatic application-code rewriting are outside the initial scope.
 
@@ -173,6 +185,8 @@ These controls must be implemented in application code before autonomous executi
 
 Memory serves future chats and tasks while remaining inspectable and reversible. Categories include user-approved preferences, project context, decisions, task lessons, and workflow guidance. Credentials are never memory entries.
 
+Maestro can add its own concise task observations, notes and comments under the configured memory policy. Record author, timestamp, source task/evidence, scope and whether an entry is an observation or inference. Curation can consolidate duplicates, summarize older material and flag conflicts/stale entries while preserving provenance and correction history. Agent-written notes must not silently replace user corrections. Curation and recall remain private and consume the configured allowance when they use a model.
+
 Start with SQLite text search and a bounded recall context. Keep each memory's provenance, scope, confidence, review state, and optional expiry. Prefer explicit user corrections over prior inferred memories; surface conflicts rather than silently treating an inference as fact. Retrieved documents and recalled content are untrusted input and cannot override permissions or system rules.
 
 The initial policy saves explicitly requested memories and presents inferred entries for review. A later opt-in policy can automatically save selected low-risk categories with an audit history. Provide edit, forget, project isolation, recall disable, and private export controls. Deletion removes live records, FTS entries, derived summaries, and cached embeddings if introduced; disclose that previously exported files and backups need separate removal.
@@ -318,4 +332,4 @@ Use mock providers and synthetic content in automated checks. Cover lifecycle tr
 
 Keep any live provider smoke tests opt-in with an explicit small budget and local credentials. Record dependency versions and setup instructions at M1; update milestone status only when its acceptance checks pass.
 
-Next step: add the private code-improvement proposal inbox and decisions as the first M3b slice, while completing M1's secure provider setup and live chat. Build the durable task runner, specialist orchestration and GitHub PR connector before enabling automatic code preparation. Connect proposals to that runner, then add baseline evaluation and tracked activation outcomes.
+Next step: verify a real chat response and its usage from the user's chosen, locally configured model. Keep this change independently reviewable and finish M1 before adding more demo functionality. Then connect to-dos, scoped memory recall/curation and the bounded sub-agent runner. Resume background improvement and code/instruction proposals only after those foundations work; use isolated coding tasks and draft PRs for application changes.
