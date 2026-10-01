@@ -18,7 +18,16 @@ export type Run = {
   created_at: string;
   steps: { title: string; detail: string }[];
 };
-export type Message = { id: string; role: "user" | "assistant"; text: string };
+export type Message = {
+  id: string;
+  role: "user" | "assistant";
+  text: string;
+  demo?: boolean;
+  model?: string;
+  cost?: number;
+  input_tokens?: number;
+  output_tokens?: number;
+};
 export type Limits = {
   run_usd: number;
   daily_usd: number;
@@ -40,12 +49,14 @@ export type Workspace = {
     output_tokens: number;
     calls: number;
     reserved_usd: number;
+    uncertain: { id: string; at: string; reserved_usd: number }[];
   };
+  provider: ProviderStatus;
   capabilities: {
-    mode: "preview";
-    live_ai: false;
+    mode: "local";
+    live_ai: boolean;
     github_pr: false;
-    secure_credentials: false;
+    secure_credentials: boolean;
   };
 };
 
@@ -92,12 +103,44 @@ export const previewRun = (id: string) =>
   request<Workspace>(`/tasks/${id}/preview`, "POST", {});
 export const sendMessage = (text: string) =>
   request<Workspace>("/chat", "POST", { text });
+export const clearChat = () => request<Workspace>("/chat", "DELETE");
 export const saveLimits = (limits: Limits) =>
   request<Workspace>("/limits", "PUT", limits);
 export const addMemory = (text: string) =>
   request<Workspace>("/memory", "POST", { text });
 export const deleteMemory = (id: string) =>
   request<Workspace>(`/memory/${id}`, "DELETE");
+
+export type ProviderConfig = {
+  base_url: string;
+  protocol: "responses" | "chat_completions";
+  model: string;
+  input_usd_per_million: number;
+  output_usd_per_million: number;
+  pricing_verified: boolean;
+  max_output_tokens: number;
+};
+export type ProviderStatus = {
+  config: ProviderConfig;
+  credentials_present: boolean;
+  credential_source: string;
+  models: string[];
+  tested_at: string | null;
+};
+export const loadProvider = () => request<ProviderStatus>("/provider");
+export const saveProvider = (
+  config: ProviderConfig,
+  api_key: string,
+  persist: boolean,
+) => request<ProviderStatus>("/provider", "PUT", { config, api_key, persist });
+export const testProvider = () =>
+  request<ProviderStatus>("/provider/test", "POST", {});
+export const deleteProviderKey = () =>
+  request<ProviderStatus>("/provider/key", "DELETE");
+export const reconcileProviderCharge = (id: string, billed_usd: number) =>
+  request<Workspace>(`/provider/charges/${id}/reconcile`, "POST", {
+    billed_usd,
+  });
 
 export type ReflectionConfig = {
   enabled: boolean;

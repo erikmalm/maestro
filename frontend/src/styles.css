@@ -2644,3 +2644,28 @@ button svg {
     gap: 8px;
   }
 }
+.provider-setup select {
+  width: 100%;
+  border: 1px solid #e3e1e9;
+  background: #fcfcfe;
+  border-radius: 9px;
+  padding: 11px;
+  font: inherit;
+  color: inherit;
+  margin-top: 7px;
+}
+.message-usage {
+  font-size: 11px;
+  color: #77717f;
+}
+.settings-layout {
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+}
+.provider-setup .reflection-title {
+  flex-wrap: wrap;
+}
+@media (max-width: 970px) {
+  .settings-layout {
+    grid-template-columns: 1fr;
+  }
+}

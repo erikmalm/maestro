@@ -2,6 +2,7 @@
 
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+import os
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -78,15 +79,16 @@ class WorkspaceTests(unittest.TestCase):
         with ThreadPoolExecutor(max_workers=2) as executor:
             results = list(executor.map(lambda _: run(), range(2)))
         self.assertEqual(sorted(results), [200, 409])
-        self.assertAlmostEqual(self.workspace()["usage"]["today_usd"], 0.44)
+        self.assertAlmostEqual(self.workspace()["demo_usage"]["today_usd"], 0.44)
+        self.assertEqual(self.workspace()["usage"]["today_usd"], 0)
 
     def test_demo_run_leaves_real_task_open_and_reports_false_capabilities(self):
         result = self.client.post("/api/tasks/sample-documents/preview", headers=self.headers, json={}).json()
         task = next(task for task in result["tasks"] if task["id"] == "sample-documents")
         self.assertFalse(task["done"])
-        self.assertFalse(result["capabilities"]["live_ai"])
+        self.assertTrue(result["capabilities"]["live_ai"])
         self.assertFalse(result["capabilities"]["github_pr"])
-        self.assertFalse(result["capabilities"]["secure_credentials"])
+        self.assertEqual(result["capabilities"]["secure_credentials"], os.name == "nt")
 
     def test_limits_reject_invalid_values_and_do_not_expose_credentials(self):
         original = self.workspace()

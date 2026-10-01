@@ -1,129 +1,46 @@
 # Maestro
 
-Maestro is a planned local AI assistant and agent coordinator with a web interface. It will help you discuss ideas, organize to-dos, delegate work to specialist agents, inspect their progress, and improve results through bounded review and refinement.
+A local web interface for chat with your chosen model, usage tracking and persistent to-dos. The UI and broader architecture are retained; orchestration, background reflection and code self-improvement are paused until the basic flow is verified.
 
-**Status: local preview with a first working background reflection loop.** Tasks, manual memories and settings persist locally. Chat and task-agent runs still use explicitly simulated responses. The Reflection page has a real, opt-in OpenAI adapter, bounded background worker, reviewable lessons and separate provider token/cost tracking. Secure key entry, live chat, task delegation, automatic memory recall and integrations remain planned. The adapter is tested with mocked responses; no paid end-to-end run has been verified. See the [architecture draft](docs/ARCHITECTURE.md) and [development plan](DEVELOPMENT_PLAN.md).
+## Run locally
 
-## Run the local preview
-
-Prerequisites: Windows, Python 3.11+, and Node.js 20.19+ or 22.12+. From this repository:
+Windows, Python 3.11+, and Node.js 20.19+ or 22.12+:
 
 ```powershell
-.\scripts\start.ps1
-```
-
-The launcher installs missing dependencies, builds the interface, starts a hidden local server, and opens `http://127.0.0.1:8765`. Use `-NoBrowser` to start without opening a browser. Stop with:
-
-```powershell
-.\scripts\stop.ps1
-```
-
-If PowerShell blocks local scripts, use `powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\start.ps1` for this invocation; no permanent policy change is needed.
-
-Preview state is saved under `%LOCALAPPDATA%\Maestro\preview`. Initial examples and demo usage are synthetic. Entered tasks, conversations, manual memories, reflection history and limits persist across restart. No key is needed to inspect the app. Reflection is paused by default and cannot make paid calls until backend credentials, model prices and provider-approved feedback are configured. Maestro itself has no GitHub submission connector yet.
-
-## Background reflection: what works now
-
-Open **Reflection** at [the local UI](http://127.0.0.1:8765). Save feedback from an observed outcome, explicitly allow that feedback to be sent to OpenAI, configure an exact model and its verified input/output prices, then run one cycle or enable background checks. Unshared feedback stays local; existing chats, documents and manual memories are not harvested automatically.
-
-The worker proposes a lesson, makes a separate critique call, and revises when needed. It stops on acceptance, repeated unchanged proposals, pause, budget exhaustion or the pass/time limit. A model's acceptance is only a draft: **Keep lesson** is your approval. Kept lessons guide later reflection cycles, but do not yet influence demo chat or task agents. Regression evaluations and promotion into live task prompts are the next step. This is private guidance, not model retraining or automatic code changes.
-
-Defaults: paused, check eligible feedback every 30 minutes, USD 0.10 per cycle, USD 0.25 per day, up to three passes/two calls per pass, 1,024 output tokens per call, a conservative 16,000 token allowance per cycle, and a two-minute dispatch window. Lower workspace spend/token/refinement/time limits also apply. Checks cost nothing without new eligible feedback; consumed evidence is not automatically processed again. Work runs only while the local server is running. Pause prevents further calls; an in-flight request may finish and be billed.
-
-The persistent header shows reflection cost/tokens separately from demo usage. Tokens come from provider responses; USD is calculated using your entered rates, including conservative reservations, rather than downloaded invoices. Failed/uncertain calls pause the worker and block further dispatch until you confirm their actual billed charge in the UI. Restart does not erase usage or replay interrupted requests. Clearing feedback/lessons keeps accounting metadata; deletion cannot erase provider copies or backups. The single-installation worker is an early implementation, not the full durable multi-agent scheduler.
-
-## What Maestro will do
-
-| Area | Intended experience |
-| --- | --- |
-| Chat | Talk to the coordinator with relevant context from your private memory bank. |
-| To-dos | Capture work, set priorities and completion criteria, and turn selected items into agent runs. |
-| Orchestration | Assign specialist agents different prompts, models, tools, and limited permissions. |
-| Run browser | Browse queued and active tasks, delegation trees, actions, review feedback, results, costs, and stop reasons. |
-| GitHub collaboration | Turn authorized coding tasks into draft PRs in selected repositories, with reviewable changes and validation. |
-| Refinement | Review a result against the task's criteria and iterate within enforced limits. |
-| Code improvement proposals | Explain evidence-backed changes to Maestro's own code, prepare scoped patches and tests, and submit reviewable draft PRs under the configured policy. |
-| Memory | Keep useful preferences, project context, decisions, and lessons across sessions; inspect, correct, and forget them. |
-| Integrations | Retrieve financial documentation through a locally configured MarketPulse connector, then add other scoped tools. |
-| Settings | Configure a provider, API key, model, spending limits, agent profiles, memory policy, and integrations. |
-
-## A typical task
-
-1. Enter a to-do, for example: "Summarize the selected financial documents and identify follow-up questions."
-2. Maestro saves it and any user-entered completion criteria locally.
-3. Start the task, or let a previously configured automation rule start eligible tasks on entry. Maestro then creates a plan. The default is to save new to-dos without making paid API calls.
-4. The coordinator assigns the work to a document analyst and requests an independent review when useful.
-5. A reviewer checks coverage, evidence, and the requested format. Maestro refines incomplete work while the shared run budget permits it.
-6. The web interface shows the outcome, document references, remaining questions, and why execution stopped.
-7. Useful lessons become proposed local memory entries or prompt improvements under your chosen memory policy.
-
-The coordinator remains responsible for the task and the final response. Specialist agents receive only the context and tools needed for their assignment. This manager pattern follows the [OpenAI orchestration guidance](https://developers.openai.com/api/docs/guides/agents/orchestration).
-
-## Public code, private workspace
-
-The GitHub repository is intended to be public. It contains reusable code, generic agent templates, documentation, and synthetic examples. Your personal workspace belongs outside the Git checkout.
-
-The preview uses `%LOCALAPPDATA%\Maestro\preview` on Windows. `MAESTRO_DATA_DIR` can select another external location; the backend rejects locations inside the repository, including paths resolved through links. The full workspace will use `%LOCALAPPDATA%\Maestro`; other operating systems will use their standard per-user application-data location.
-
-| Public repository | Private local storage |
-| --- | --- |
-| Application source and documentation | Chats, to-dos, projects, and user preferences |
-| Generic prompts and synthetic test fixtures | Custom prompts and agent settings containing personal context |
-| Blank configuration examples | API credentials in the operating system credential store |
-| Dependency manifests and build configuration | Memory records, search indexes, and task history |
-| Public integration interfaces | MarketPulse connection details and retrieved documents |
-| | Generated results, attachments, logs, exports, and backups |
-
-[.gitignore](.gitignore) already excludes common credentials and runtime files as a second layer of protection. Git exclusions do not protect files that were previously committed or explicitly force-added. Before publishing changes, inspect the staged files and scan for secrets. Personal content must also stay out of GitHub issues, pull requests, screenshots, and CI logs.
-
-Local hosting means the interface and workspace run on your computer. When a cloud model is selected, the chosen conversation, memory excerpts, and document excerpts are sent to that provider for processing. The interface will expose those sharing settings. An OpenAI adapter will use locally managed conversation history and request `store: false`; this does not eliminate all provider-side retention. See [OpenAI data controls](https://developers.openai.com/api/docs/guides/your-data).
-
-## API keys and providers
-
-The Settings API-key field is disabled until OS credential storage is implemented. For the first reflection worker, provide `OPENAI_API_KEY` only through the backend process environment. The UI receives configured/missing status, never the key. This example prompts without putting the key literal in your shell history:
-
-```powershell
-.\scripts\stop.ps1
-$maestroKey = Read-Host "OpenAI API key" -AsSecureString
-$env:OPENAI_API_KEY = [System.Net.NetworkCredential]::new("", $maestroKey).Password
 .\scripts\start.ps1 -NoBrowser
-Remove-Item Env:\OPENAI_API_KEY
-Remove-Variable maestroKey
 ```
 
-The started server retains its inherited environment until it stops. Repeat this setup after a server restart; the app does not persist the key. Never enter credentials as chat, memory or feedback. Upcoming provider settings will use the OS credential store. Keys must stay out of frontend bundles, browser storage, URLs, prompts and logs, in line with [OpenAI authentication guidance](https://developers.openai.com/api/reference/overview#authentication).
+Open [http://127.0.0.1:8765](http://127.0.0.1:8765). Stop with `.\scripts\stop.ps1`. If script execution is blocked, run `powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\start.ps1 -NoBrowser`.
 
-[.env.example](.env.example) contains blank fields for proposed development configuration. The backend reads selected environment variables, including `OPENAI_API_KEY` for reflection; it does not load `.env` files. Real keys must never be entered in that tracked file. Model, pricing and reflection limits are saved through the local Reflection page outside Git.
+## Connect and chat
 
-OpenAI is the first provider adapter, currently used only for reflection. Provider adapters will keep the task and memory system independent of a specific vendor. Additional cloud providers and a local model adapter can follow. Models are selected explicitly rather than fixed to a changing "latest" alias.
+1. Open **Settings**. Keep the OpenAI base URL, or enter a compatible HTTPS endpoint/local loopback server and choose its API protocol.
+2. Enter the API key and **Save connection**. Default storage is Windows Credential Manager. Uncheck persistence to keep a new key only in server memory.
+3. **Test connection** fetches the provider's model list without generating a response. Select/type the desired model ID. Models listed by an API are not necessarily chat-capable.
+4. Enter verified input/output prices in USD per million tokens, confirm pricing, and save. Zero prices are valid only for genuinely free inference.
+5. Return to **Workspace**, send a message, and inspect the answer, token counts and estimated cost. Successful model-list access alone does not verify generation.
 
-## Controlled iteration and improvement
+OpenAI uses the Responses API. The Chat Completions option supports compatible providers; compatibility and model access depend on that provider. Chat uses actual provider responses and has no canned fallback. Missing settings, unsupported models, exhausted limits and provider errors produce explicit errors. The first version waits for a complete response rather than streaming it.
 
-Each task will share one budget across the coordinator, workers, reviewers, retries, and memory updates. The backend will enforce limits on spend, model calls, tokens, review passes, delegation depth, concurrent agents, and elapsed time. Daily and monthly spending ceilings apply across runs. The run browser will show usage, reservations for in-flight requests, and stop reasons; an emergency stop will block new work.
+Conversation history is sent with later messages. **New chat** clears history while keeping usage accounting. Existing demo messages are labelled and excluded from model context. To-dos can be added, completed/reopened and deleted without model calls; automatic agent execution is paused.
 
-Improvement means learning from feedback, preserving useful context, and proposing better prompts/workflows. Changes are versioned, evaluated, and reversible. Background work is opt-in and uses the same budgets. Authorized coding tasks may create isolated branches and submit draft PRs to allowed repositories after validation and secret scanning. You control merging; the running application does not rewrite itself automatically.
+## Usage and limits
 
-### Proposed improvements to Maestro's own code
+The header shows today's tokens and estimated USD. Each answer shows its model, input/output tokens and estimated cost. Usage details include day/month totals and reserved/uncertain charges.
 
-Planned next layer: Maestro can identify a concrete limitation and ask for a code change with motivation and an explanation. A proposal records the observed problem, private evidence references, likely components, intended behavior, expected benefit, acceptance checks, estimated implementation cost and rollback approach. A concise rationale is sufficient; hidden model reasoning is not required.
+Tokens come from provider responses. USD uses your configured prices and excludes cache discounts; it is not an invoice or a billing feed. Changing prices does not recalculate earlier requests. Spend and conservative token reservations are checked before dispatch. One chat request runs at a time, with a configured output cap and no automatic retries.
 
-For example, a synthetic proposal might say: "Interrupted jobs currently need manual recovery. Add resumable checkpoints for read-only tasks so completed steps can be reused. Verify recovery after a forced restart and ensure actions are not duplicated. Keep changes within the job runner; leave spending limits unchanged."
+Failed requests with unknown usage retain a reservation and block further chat until their billed amount is verified in Settings. Known access/quota rejections release the reservation. Restart preserves accounting and marks interrupted requests uncertain.
 
-The initial policy is **propose for review**. Approval creates a bounded coding task. With a configured policy authorizing preparation and draft PRs, Maestro can prepare the change without asking again for each routine step. Implementation uses an isolated worktree and compares the candidate against the unchanged code. Failed checks trigger focused revisions within the existing allowance. A draft PR explains the behavior change and validation using public-safe material; personal evidence and discussion remain local. Merging and activating a new version are separate decisions.
+## Private credentials and data
 
-After activation, Maestro checks whether the expected improvement occurred, records the result and can propose a follow-up. It does not repeatedly submit the same idea: proposals retain their decision history and code version. UI controls will cover proposal-only or automatic draft preparation, background cadence, spending limits, maximum concurrent proposals and pause. This code-proposal pipeline is a design requirement; the current Reflection page produces lessons and has no code execution or GitHub tool access. See [the planned lifecycle](DEVELOPMENT_PLAN.md#7a-code-improvement-proposals-and-evolution).
+Keys never go into Git, the workspace database, browser storage, prompts, read API responses or logs. The password field clears on submission. Persisted keys are scoped to the exact provider endpoint in Windows Credential Manager. Session-only keys disappear when the server stops; previously saved credentials remain until removed. A server-environment OpenAI key can also be used and is controlled outside the UI.
 
-## Planned local setup
+Tasks, conversations, model settings and accounting live in `%LOCALAPPDATA%\Maestro\preview`, outside the checkout. An alternative `MAESTRO_DATA_DIR` must also resolve outside it. A public repository contains only reusable source, documentation and synthetic fixtures.
 
-The preview launcher starts the backend and serves the built interface on loopback. The next milestone adds provider/model setup, secure credentials, and bounded live chat. Tasks and history already work without an API key; live AI execution will require a configured provider.
+When you send chat, its history and your key go to the configured provider. Provider retention rules still apply. OpenAI requests use `store: false`; see [OpenAI data controls](https://developers.openai.com/api/docs/guides/your-data). The backend binds to loopback and requires local session/CSRF protection.
 
-The preview uses Python/FastAPI, React/TypeScript, and SQLite local persistence, with pinned direct dependencies and a frontend lockfile. The full runner adds normalized records and scoped search. One installation supports one local user.
-
-## Development
-
-Start with [the architecture draft](docs/ARCHITECTURE.md) and [development plan](DEVELOPMENT_PLAN.md). The visual preview precedes the full provider/agent runtime. For frontend development, start the backend and run `npm run dev` in `frontend`; it proxies `/api` to the local server.
-
-Checks:
+## Validation
 
 ```powershell
 .\.venv\Scripts\python.exe -m pip install -r backend/requirements-dev.txt
@@ -133,6 +50,6 @@ npm run build
 npm run test:ui
 ```
 
-For the first UI test run, install the test browser with `npx playwright install chromium`. Browser tests use a separate temporary private workspace and synthetic fixtures.
+Browser tests exercise the complete setup/chat/history/usage flow against a synthetic HTTP provider in a temporary workspace. Windows credential tests use a synthetic key and remove it afterward. Automated checks require no personal credentials or paid calls. A real LLM check requires a locally configured user key, model and prices.
 
-Do not place real user content or credentials in this repository while developing. Use synthetic fixtures and a mock provider for automated checks.
+The broader [development plan](DEVELOPMENT_PLAN.md) and [architecture](docs/ARCHITECTURE.md) describe planned capabilities. They are not acceptance evidence for the current chat milestone.

@@ -1,4 +1,4 @@
-"""Local workspace: demo chat/tasks, plus an opt-in live reflection worker."""
+"""Local workspace with configurable live chat and persistent to-dos."""
 
 from contextlib import closing, contextmanager, asynccontextmanager
 from datetime import datetime
@@ -6,6 +6,7 @@ import hmac
 import json
 import os
 from pathlib import Path
+from typing import Literal
 import secrets
 import sqlite3
 import uuid
@@ -18,6 +19,8 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 from backend.reflection import ReflectionEngine
+from backend.provider import Provider
+from backend import credentials
 
 ROOT = Path(__file__).resolve().parent.parent
 DATA_DIR = Path(os.environ.get("MAESTRO_DATA_DIR") or Path(os.environ.get("LOCALAPPDATA", Path.home() / ".local" / "share")) / "Maestro" / "preview").expanduser().resolve()
@@ -78,6 +81,10 @@ def workspace_transaction():
         connection.execute("BEGIN IMMEDIATE")
         row = connection.execute("SELECT value FROM workspace WHERE id=1").fetchone()
         state = json.loads(row[0]) if row else seed_workspace()
+        if not state.get("live_chat_migrated"):
+            for message in state["messages"]:
+                message.setdefault("demo", True)
+            state["live_chat_migrated"] = True
         yield state
         connection.execute("INSERT INTO workspace VALUES (1, ?) ON CONFLICT(id) DO UPDATE SET value=excluded.value", (json.dumps(state),))
 
@@ -88,19 +95,21 @@ def snapshot(state: dict) -> dict:
     month = [entry for entry in state["ledger"] if datetime.fromisoformat(entry["at"]).astimezone(TIMEZONE).strftime("%Y-%m") == current.strftime("%Y-%m")]
     return {
         **{key: state[key] for key in ("tasks", "memories", "runs", "messages", "limits")},
-        "usage": {
+        "demo_usage": {
             "today_usd": round(sum(entry["cost"] for entry in today), 6),
             "month_usd": round(sum(entry["cost"] for entry in month), 6),
             "input_tokens": sum(entry["input_tokens"] for entry in today),
             "output_tokens": sum(entry["output_tokens"] for entry in today),
             "calls": sum(entry["calls"] for entry in today), "reserved_usd": 0,
         },
-        "capabilities": {"mode": "preview", "live_ai": False, "github_pr": False, "secure_credentials": False},
+        "usage": Provider(DATABASE, TIMEZONE).usage(),
+        "provider": Provider(DATABASE, TIMEZONE).status(),
+        "capabilities": {"mode": "local", "live_ai": True, "github_pr": False, "secure_credentials": os.name == "nt"},
     }
 
 
 def charge_demo(state: dict, cost: float, input_tokens: int, output_tokens: int, calls: int) -> None:
-    usage = snapshot(state)["usage"]
+    usage = snapshot(state)["demo_usage"]
     limits = state["limits"]
     if cost > limits["run_usd"] or usage["today_usd"] + cost > limits["daily_usd"] or usage["month_usd"] + cost > limits["monthly_usd"]:
         raise HTTPException(409, "This preview would exceed your budget. Adjust your limits to continue.")
@@ -161,6 +170,26 @@ class ReflectionCharge(StrictModel):
     billed_usd: float = Field(ge=0, le=100000, allow_inf_nan=False)
 
 
+class ProviderConfig(StrictModel):
+    base_url: str = Field(default="https://api.openai.com/v1", min_length=1, max_length=2048)
+    protocol: Literal["responses", "chat_completions"] = "responses"
+    model: str = Field(default="", max_length=200, pattern=r"^[A-Za-z0-9_./:-]*$")
+    input_usd_per_million: float = Field(default=0, ge=0, le=10000, allow_inf_nan=False)
+    output_usd_per_million: float = Field(default=0, ge=0, le=10000, allow_inf_nan=False)
+    pricing_verified: bool = False
+    max_output_tokens: int = Field(default=1024, ge=64, le=32768)
+
+
+class ProviderSetup(StrictModel):
+    config: ProviderConfig
+    api_key: str = Field(default="", max_length=4096, repr=False)
+    persist: bool = True
+
+
+def provider():
+    return Provider(DATABASE, TIMEZONE)
+
+
 def reflection_engine():
     return ReflectionEngine(DATABASE, TIMEZONE)
 
@@ -168,11 +197,9 @@ def reflection_engine():
 @asynccontextmanager
 async def lifespan(application):
     engine = reflection_engine()
-    engine.start()
-    try:
-        yield
-    finally:
-        engine.close()
+    engine.configure({**engine.status()["config"], "enabled": False})
+    provider().recover()
+    yield  # Background orchestration is paused for the live-chat milestone.
 
 
 app = FastAPI(title="Maestro local preview", docs_url=None, redoc_url=None, openapi_url=None, lifespan=lifespan)
@@ -235,6 +262,8 @@ def get_reflection():
 
 @app.put("/api/reflection/config")
 def configure_reflection(entry: ReflectionConfig):
+    if entry.enabled:
+        raise HTTPException(409, "Background reflection is paused while the live-chat milestone is completed.")
     reflection_engine().configure(entry.model_dump())
     return reflection_engine().status()
 
@@ -250,11 +279,47 @@ def reflection_feedback(entry: ReflectionFeedback):
 
 @app.post("/api/reflection/run")
 def run_reflection():
+    raise HTTPException(409, "Background reflection is paused while the live-chat milestone is completed.")
+
+
+@app.get("/api/provider")
+def get_provider():
+    return provider().status()
+
+
+@app.put("/api/provider")
+def configure_provider(entry: ProviderSetup):
     try:
-        reflection_engine().enqueue(manual=True)
+        return provider().configure(entry.config.model_dump(), entry.api_key, entry.persist)
     except ValueError as error:
-        raise HTTPException(409, str(error))
-    return reflection_engine().status()
+        raise HTTPException(409, str(error)) from None
+
+
+@app.post("/api/provider/test")
+def test_provider():
+    try:
+        return provider().test()
+    except ValueError as error:
+        raise HTTPException(409, str(error)) from None
+
+
+@app.delete("/api/provider/key")
+def remove_provider_key():
+    try:
+        credentials.delete(provider().status()["config"]["base_url"])
+        return provider().status()
+    except ValueError as error:
+        raise HTTPException(409, str(error)) from None
+
+
+@app.post("/api/provider/charges/{entry_id}/reconcile")
+def reconcile_provider_charge(entry_id: str, entry: ReflectionCharge):
+    try:
+        provider().reconcile(entry_id, entry.billed_usd)
+    except ValueError as error:
+        raise HTTPException(409, str(error)) from None
+    with workspace_transaction() as state:
+        return snapshot(state)
 
 
 @app.post("/api/reflection/jobs/{job_id}/review")
@@ -332,9 +397,29 @@ def simulate_task(task_id: str):
 @app.post("/api/chat")
 def chat(entry: TextInput):
     with workspace_transaction() as state:
-        charge_demo(state, 0.005, 256, 128, 1)
-        reply = "I've saved that in this local conversation. This is a preview response, so I haven't called an AI model. You can turn your idea into a task with New task, then preview how the coordinator delegates and reviews the work."
-        state["messages"].extend([{"id": identifier(), "role": "user", "text": entry.text}, {"id": identifier(), "role": "assistant", "text": reply}])
+        pass  # Initialize storage before provider dispatch, then release the DB lock.
+    try:
+        provider().chat(entry.text)
+    except ValueError as error:
+        raise HTTPException(409, str(error)) from None
+    with workspace_transaction() as state:
+        return snapshot(state)
+
+
+@app.delete("/api/chat")
+def clear_chat():
+    try:
+        with provider().transaction(with_db=True) as (provider_state, db):
+            if any(x["status"] == "reserved" for x in provider_state["ledger"]):
+                raise ValueError("Wait for the current request to finish before starting a new chat.")
+            row = db.execute("SELECT value FROM workspace WHERE id=1").fetchone()
+            if row:
+                state = json.loads(row[0])
+                state["messages"] = []
+                db.execute("UPDATE workspace SET value=? WHERE id=1", (json.dumps(state),))
+    except ValueError as error:
+        raise HTTPException(409, str(error)) from None
+    with workspace_transaction() as state:
         return snapshot(state)
 
 

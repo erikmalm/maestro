@@ -33,8 +33,7 @@ import {
 } from "lucide-react";
 import * as api from "./api";
 import type { Limits, Run, Task, Workspace } from "./api";
-import Reflection from "./Reflection";
-import type { ReflectionStatus } from "./api";
+import ProviderSetup from "./ProviderSetup";
 
 type Page =
   | "workspace"
@@ -42,11 +41,11 @@ type Page =
   | "runs"
   | "agents"
   | "memory"
-  | "reflection"
   | "integrations"
   | "settings";
 type Panel = "task" | "usage" | "memory" | null;
-const money = (value: number) => `$${value.toFixed(2)}`;
+const money = (value: number) =>
+  `$${value.toFixed(value > 0 && value < 0.01 ? 4 : 2)}`;
 const tokens = (value: number) =>
   value >= 1000 ? `${(value / 1000).toFixed(1)}k` : String(value);
 const navigation = [
@@ -55,7 +54,6 @@ const navigation = [
   { id: "runs", name: "Runs", icon: Workflow },
   { id: "agents", name: "Agents", icon: Users },
   { id: "memory", name: "Memory", icon: BookOpen },
-  { id: "reflection", name: "Reflection", icon: Sparkles },
   { id: "integrations", name: "Integrations", icon: Plug },
 ] as const;
 
@@ -173,7 +171,7 @@ function LimitsForm({
       <div className="form-section-label secondary-label">EXECUTION LIMITS</div>
       <div className="execution-inputs">
         <label>
-          Tokens per run
+          Tokens per chat request
           <input
             type="number"
             min="0"
@@ -184,33 +182,10 @@ function LimitsForm({
             onChange={(event) => change("max_tokens", event.target.value)}
           />
         </label>
-        <label>
-          Refinements
-          <input
-            type="number"
-            min="0"
-            max="10"
-            step="1"
-            required
-            value={draft.max_refinements}
-            onChange={(event) => change("max_refinements", event.target.value)}
-          />
-        </label>
-        <label>
-          Minutes per run
-          <input
-            type="number"
-            min="1"
-            max="120"
-            step="1"
-            required
-            value={draft.max_minutes}
-            onChange={(event) => change("max_minutes", event.target.value)}
-          />
-        </label>
       </div>
       <p className="form-note">
-        <ShieldCheck size={15} /> Limits are shared by all agents in a run.
+        <ShieldCheck size={15} /> Spending and token limits are checked before
+        each chat request.
       </p>
       <div className="form-actions">
         <span>Saved privately on this computer</span>
@@ -239,12 +214,12 @@ function UsageDetails({ workspace }: { workspace: Workspace }) {
     <div className="usage-details">
       <div className="usage-total">
         <div>
-          <span>Simulated spend today</span>
+          <span>Estimated spend today</span>
           <strong>
             {money(usage.today_usd)} <small>/ {money(limits.daily_usd)}</small>
           </strong>
         </div>
-        <span className="badge lavender">Demo data</span>
+        <span className="badge lavender">Provider usage</span>
       </div>
       <div className="progress-track">
         <div style={{ width: `${percent}%` }} />
@@ -259,20 +234,20 @@ function UsageDetails({ workspace }: { workspace: Workspace }) {
           <strong>{usage.output_tokens.toLocaleString()}</strong>
         </div>
         <div>
-          <span>Demo calls</span>
+          <span>API requests</span>
           <strong>{usage.calls}</strong>
         </div>
       </div>
       <div className="usage-month">
-        <span>Simulated month to date</span>
+        <span>Estimated month to date</span>
         <strong>
           {money(usage.month_usd)} <span>/ {money(limits.monthly_usd)}</span>
         </strong>
       </div>
       <p className="preview-note">
-        <CircleHelp size={15} /> These are example usage figures. This preview
-        makes no paid API calls. Live usage and billing reconciliation come with
-        the provider integration.
+        <CircleHelp size={15} /> Tokens come from provider responses. USD uses
+        your configured prices; cache discounts are not included. Reserved or
+        uncertain spend: {money(usage.reserved_usd)}.
       </p>
     </div>
   );
@@ -321,12 +296,8 @@ function TaskRow({
       </div>
       {!compact && (
         <div className="task-actions">
-          <button
-            className="button subtle small"
-            disabled={busy || task.done}
-            onClick={onPreview}
-          >
-            <Play size={13} /> Preview run
+          <button className="button subtle small" disabled onClick={onPreview}>
+            <Play size={13} /> Agent runs paused
           </button>
           {onDelete && (
             <button
@@ -386,7 +357,6 @@ function RunDetail({ run }: { run: Run }) {
 
 export default function App() {
   const [workspace, setWorkspace] = useState<Workspace | null>(null);
-  const [reflection, setReflection] = useState<ReflectionStatus | null>(null);
   const [page, setPage] = useState<Page>("workspace");
   const [panel, setPanel] = useState<Panel>(null);
   const [busy, setBusy] = useState("");
@@ -403,28 +373,16 @@ export default function App() {
 
   useEffect(() => {
     let cancelled = false;
-    let timer: number | undefined;
-    const poll = async () => {
-      try {
-        const next = await api.loadReflection();
-        if (!cancelled) setReflection(next);
-      } catch {
-        /* Initial load owns connection errors. Polling never dispatches provider calls. */
-      }
-      if (!cancelled) timer = window.setTimeout(poll, 5000);
-    };
     api
       .loadWorkspace()
       .then((next) => {
         if (!cancelled) {
           setWorkspace(next);
-          void poll();
         }
       })
       .catch((reason: Error) => setError(reason.message));
     return () => {
       cancelled = true;
-      window.clearTimeout(timer);
     };
   }, []);
   useEffect(() => {
@@ -450,6 +408,10 @@ export default function App() {
       if (success) setToast(success);
       return true;
     } catch (reason) {
+      void api
+        .loadWorkspace()
+        .then(setWorkspace)
+        .catch(() => {});
       setError(
         reason instanceof Error
           ? reason.message
@@ -591,7 +553,7 @@ export default function App() {
           </div>
           <p>A little visibility goes a long way.</p>
           <div className="sidebar-budget-values">
-            <span>Demo today</span>
+            <span>Estimated today</span>
             <strong>
               {money(workspace.usage.today_usd)}{" "}
               <span>/ {money(workspace.limits.daily_usd)}</span>
@@ -645,24 +607,8 @@ export default function App() {
             <strong>{pageLabel}</strong>
           </div>
           <div className="topbar-right">
-            <button
-              className="reflection-usage"
-              title="Estimated USD from entered model prices and provider-reported tokens; includes reservations"
-              onClick={() => navigate("reflection")}
-              aria-label="View real reflection cost and tokens"
-            >
-              <Sparkles size={14} />
-              <span>
-                <strong>
-                  ${(reflection?.usage.today_usd ?? 0).toFixed(4)}
-                </strong>{" "}
-                <small>
-                  reflection · {reflection?.usage.tokens ?? 0} tokens
-                </small>
-              </span>
-            </button>
             <span className="preview-badge">
-              <i /> Local preview
+              <i /> Local workspace
             </span>
             <button
               className="usage-strip"
@@ -672,7 +618,7 @@ export default function App() {
               <span>
                 <Coins size={14} />
                 <strong>{money(workspace.usage.today_usd)}</strong>
-                <small>demo today</small>
+                <small>today · est.</small>
               </span>
               <span className="usage-divider" />
               <span>
@@ -711,7 +657,27 @@ export default function App() {
                   <span /> A SPACE FOR YOUR NEXT GOOD IDEA
                 </div>
                 <h1>What’s on your mind?</h1>
-                <p>Think it through. Make a plan. Bring in the right agent.</p>
+                <p>
+                  Chat with your chosen model. Keep your next steps in view.
+                </p>
+                {!workspace.provider.credentials_present ||
+                !workspace.provider.config.model ||
+                !workspace.provider.config.pricing_verified ? (
+                  <button
+                    className="button secondary"
+                    onClick={() => navigate("settings")}
+                  >
+                    Set up model connection
+                  </button>
+                ) : (
+                  <button
+                    className="button subtle small"
+                    disabled={!!busy}
+                    onClick={() => void perform("new-chat", api.clearChat)}
+                  >
+                    New chat
+                  </button>
+                )}
               </div>
               {workspace.messages.length === 0 ? (
                 <div className="conversation-intro">
@@ -768,10 +734,19 @@ export default function App() {
                       <div>
                         <span className="message-author">
                           {message.role === "assistant"
-                            ? "Maestro · preview"
+                            ? message.demo
+                              ? "Maestro · saved demo"
+                              : `Maestro · ${message.model ?? workspace.provider.config.model}`
                             : "You"}
                         </span>
                         <p>{message.text}</p>
+                        {message.cost !== undefined && (
+                          <small className="message-usage">
+                            {message.input_tokens} input ·{" "}
+                            {message.output_tokens} output tokens ·{" "}
+                            {money(message.cost)} estimated
+                          </small>
+                        )}
                       </div>
                     </div>
                   ))}
@@ -798,12 +773,21 @@ export default function App() {
                     <span>
                       <span className="agent-dot" /> Coordinator{" "}
                       <ChevronRight size={12} />
-                      <small>Preview mode</small>
+                      <small>
+                        {workspace.provider.config.model ||
+                          "Choose a model in Settings"}
+                      </small>
                     </span>
                     <button
                       type="submit"
                       className="send-button"
-                      disabled={!chat.trim() || !!busy}
+                      disabled={
+                        !chat.trim() ||
+                        !!busy ||
+                        !workspace.provider.credentials_present ||
+                        !workspace.provider.config.model ||
+                        !workspace.provider.config.pricing_verified
+                      }
                       aria-label="Send message"
                     >
                       {busy === "chat" ? (
@@ -815,8 +799,8 @@ export default function App() {
                   </div>
                 </form>
                 <p className="composer-note">
-                  <ShieldCheck size={12} /> Saved locally. Demo replies. No paid
-                  API calls.
+                  <ShieldCheck size={12} /> Chat is saved locally and sent to
+                  your configured model provider when you send a message.
                 </p>
               </div>
             </section>
@@ -932,8 +916,6 @@ export default function App() {
                           "The right perspective for each part of the work.",
                         memory:
                           "Useful context, kept close and under your control.",
-                        reflection:
-                          "Learn from feedback, with visible limits and your review.",
                         integrations:
                           "Connect the places your work already lives.",
                         settings: "Make Maestro work at your pace.",
@@ -960,9 +942,6 @@ export default function App() {
               )}
             </div>
 
-            {page === "reflection" && (
-              <Reflection status={reflection} onChange={setReflection} />
-            )}
             {page === "tasks" && (
               <>
                 <div className="section-tabs">
@@ -1254,28 +1233,50 @@ export default function App() {
                     onSave={(limits) => void save(limits)}
                     busy={busy === "limits"}
                   />
+                  {workspace.usage.uncertain.map((entry) => (
+                    <form
+                      className="entry-form"
+                      key={entry.id}
+                      onSubmit={(event) => {
+                        event.preventDefault();
+                        const data = new FormData(event.currentTarget);
+                        void perform("reconcile", () =>
+                          api.reconcileProviderCharge(
+                            entry.id,
+                            Number(data.get("cost")),
+                          ),
+                        );
+                      }}
+                    >
+                      <p>
+                        Unknown charge from{" "}
+                        {new Date(entry.at).toLocaleString()}:{" "}
+                        {money(entry.reserved_usd)} reserved. Confirm actual
+                        billed USD from your provider before retrying.
+                      </p>
+                      <label>
+                        Verified billed USD
+                        <input
+                          name="cost"
+                          type="number"
+                          required
+                          min="0"
+                          max="100000"
+                          step="any"
+                        />
+                      </label>
+                      <button className="button secondary" disabled={!!busy}>
+                        Reconcile charge
+                      </button>
+                    </form>
+                  ))}
                 </div>
                 <div className="settings-side">
-                  <div className="card credential-card">
-                    <div className="setting-icon">
-                      <ShieldCheck size={22} />
-                    </div>
-                    <h3>Provider credentials</h3>
-                    <p>
-                      Secure key setup is the next milestone. Keys will be
-                      stored in the OS credential store.
-                    </p>
-                    <label>
-                      API key
-                      <input
-                        type="password"
-                        disabled
-                        placeholder="Not available in this preview"
-                        aria-label="API key setup not yet available"
-                      />
-                    </label>
-                    <span className="badge neutral">No provider connected</span>
-                  </div>
+                  <ProviderSetup
+                    onChange={() => {
+                      void api.loadWorkspace().then(setWorkspace);
+                    }}
+                  />
                   <div className="settings-hint">
                     <BookOpen size={18} />
                     <h3>A private workspace</h3>

@@ -3,75 +3,44 @@ import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import { homedir } from "node:os";
 
-test("workspace layout, usage controls, tasks, and local persistence", async ({
-  page,
-}) => {
-  const errors: string[] = [];
-  page.on("pageerror", (error) => errors.push(error.message));
+const artifacts = join(
+  process.env.LOCALAPPDATA || join(homedir(), ".local", "share"),
+  "Maestro",
+  "preview",
+  "artifacts",
+);
+
+test("to-dos and budgets persist without model calls", async ({ page }) => {
   await page.goto("/");
   await expect(
-    page.getByRole("heading", { name: "What’s on your mind?" }),
-  ).toBeVisible();
-  await expect(
     page.getByRole("button", { name: "View usage and manage budgets" }),
-  ).toContainText("$0.42");
-  const artifacts = join(
-    process.env.LOCALAPPDATA || join(homedir(), ".local", "share"),
-    "Maestro",
-    "preview",
-    "artifacts",
-  );
-  await mkdir(artifacts, { recursive: true });
-  await page.screenshot({
-    path: join(artifacts, "maestro-desktop.png"),
-    fullPage: true,
-  });
-
+  ).toContainText("$0.00");
+  await expect(
+    page.getByRole("button", { name: "Send message" }),
+  ).toBeDisabled();
   await page
     .getByRole("button", { name: "View usage and manage budgets" })
     .click();
-  await expect(page.getByRole("dialog")).toBeVisible();
-  await expect(page.getByText("Input tokens", { exact: true })).toBeVisible();
   await page.getByLabel("Per day", { exact: true }).fill("6");
   await page.getByRole("button", { name: "Save limits" }).click();
-  await expect(page.getByRole("dialog")).not.toBeVisible();
   await page.reload();
   await page
     .getByRole("button", { name: "View usage and manage budgets" })
     .click();
   await expect(page.getByLabel("Per day", { exact: true })).toHaveValue("6");
   await page.getByRole("button", { name: "Close dialog" }).click();
-
   await page.getByRole("button", { name: "New task", exact: true }).click();
   await page
     .getByLabel("What would you like to do?")
-    .fill("Synthetic browser task");
+    .fill("Synthetic persistent to-do");
   await page
     .getByLabel("Context & completion criteria")
-    .fill("Verify a usable, private local task flow.");
+    .fill("A real local storage task.");
   await page.getByRole("button", { name: "Save task" }).click();
-  await expect(
-    page.getByText("Synthetic browser task", { exact: true }),
-  ).toBeVisible();
-  await page.getByRole("button", { name: /^Tasks/ }).click();
-  await page.getByRole("button", { name: "Preview run" }).first().click();
-  await expect(
-    page.getByRole("heading", { name: "Synthetic browser task", exact: true }),
-  ).toBeVisible();
-  await expect(
-    page.getByText("Simulation finished", { exact: true }),
-  ).toBeVisible();
-  await expect(
-    page.getByRole("button", { name: "View usage and manage budgets" }),
-  ).toContainText("$0.44");
-  await page.screenshot({
-    path: join(artifacts, "maestro-runs.png"),
-    fullPage: true,
-  });
   await page.getByRole("button", { name: /^Tasks/ }).click();
   await page
     .getByRole("button", {
-      name: "Complete Synthetic browser task",
+      name: "Complete Synthetic persistent to-do",
       exact: true,
     })
     .click();
@@ -79,54 +48,130 @@ test("workspace layout, usage controls, tasks, and local persistence", async ({
   await page.getByRole("button", { name: /^Tasks/ }).click();
   await expect(
     page.getByRole("button", {
-      name: "Reopen Synthetic browser task",
+      name: "Reopen Synthetic persistent to-do",
       exact: true,
     }),
   ).toBeVisible();
   await page
-    .getByRole("button", { name: "Delete Synthetic browser task", exact: true })
-    .click();
-  await expect(
-    page.getByText("Synthetic browser task", { exact: true }),
-  ).not.toBeVisible();
-  expect(errors).toEqual([]);
-});
-
-test("chat and manual memory stay interactive with clear preview labels", async ({
-  page,
-}) => {
-  await page.goto("/");
-  await page.getByRole("button", { name: "Help me plan my week" }).click();
-  await expect(
-    page.getByRole("textbox", { name: "Message Maestro" }),
-  ).toHaveValue("Help me plan my priorities for the week.");
-  await page.getByRole("button", { name: "Send message" }).click();
-  await expect(page.getByText(/This is a preview response/)).toBeVisible();
-  await page.getByRole("button", { name: "Memory", exact: true }).click();
-  await page.getByRole("button", { name: "Add memory", exact: true }).click();
-  await page
-    .getByLabel("What should Maestro remember?")
-    .fill("Synthetic browser preference");
-  await page.getByRole("button", { name: "Save memory", exact: true }).click();
-  await expect(
-    page.getByText("Synthetic browser preference", { exact: true }),
-  ).toBeVisible();
-  await page
     .getByRole("button", {
-      name: "Forget Synthetic browser preference",
+      name: "Delete Synthetic persistent to-do",
       exact: true,
     })
     .click();
   await expect(
-    page.getByText("Synthetic browser preference", { exact: true }),
+    page.getByText("Synthetic persistent to-do", { exact: true }),
   ).not.toBeVisible();
-  await page.getByRole("button", { name: "Settings", exact: true }).click();
-  await expect(
-    page.getByRole("textbox", { name: "API key setup not yet available" }),
-  ).toBeDisabled();
 });
 
-test("mobile navigation, usage, and layout remain usable", async ({ page }) => {
+test("connection setup, HTTP chat, conversation context and usage", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await page.getByRole("button", { name: "Settings", exact: true }).click();
+  const fixture = await (
+    await page.request.get("/api/provider-fixture")
+  ).json();
+  await page.getByLabel("API base URL", { exact: true }).fill(fixture.base_url);
+  await page
+    .getByLabel("API key", { exact: true })
+    .fill("synthetic-browser-key");
+  await page
+    .getByLabel("Save a new key in Windows Credential Manager")
+    .uncheck();
+  await page
+    .getByRole("button", { name: "Save connection", exact: true })
+    .click();
+  await expect(page.getByLabel("API key", { exact: true })).toHaveValue("");
+  await page
+    .getByRole("button", { name: "Test connection", exact: true })
+    .click();
+  await expect(
+    page.getByText(
+      "Model-list request succeeded. Send a chat message to verify generation.",
+    ),
+  ).toBeVisible();
+  await expect(page.locator("#provider-models option")).toHaveAttribute(
+    "value",
+    "synthetic-browser-model",
+  );
+  await page
+    .getByLabel("Available models", { exact: true })
+    .selectOption("synthetic-browser-model");
+  await page.getByLabel("Input USD / 1M tokens", { exact: true }).fill("1");
+  await page.getByLabel("Output USD / 1M tokens", { exact: true }).fill("2");
+  await page.getByLabel("I verified these prices for this model").check();
+  await page
+    .getByRole("button", { name: "Save connection", exact: true })
+    .click();
+  await page.reload();
+  await page.getByRole("button", { name: "Settings", exact: true }).click();
+  await expect(page.getByLabel("Model ID", { exact: true })).toHaveValue(
+    "synthetic-browser-model",
+  );
+  await expect(page.getByLabel("API key", { exact: true })).toHaveValue("");
+  await mkdir(artifacts, { recursive: true });
+  await page.screenshot({
+    path: join(artifacts, "maestro-provider-settings.png"),
+    fullPage: true,
+    animations: "disabled",
+  });
+  await page.getByRole("button", { name: "Workspace", exact: true }).click();
+  await page
+    .getByLabel("Message Maestro")
+    .fill("Remember the codeword JUNIPER.");
+  await page.getByRole("button", { name: "Send message" }).click();
+  await expect(
+    page.getByText(
+      "Synthetic HTTP provider received: Remember the codeword JUNIPER.",
+      { exact: true },
+    ),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: "View usage and manage budgets" }),
+  ).toContainText("$0.0014");
+  await page.getByLabel("Message Maestro").fill("What was the codeword?");
+  await page.getByRole("button", { name: "Send message" }).click();
+  await expect(
+    page.getByText(/Earlier message: Remember the codeword JUNIPER/),
+  ).toBeVisible();
+  await page.reload();
+  await expect(
+    page.getByText(/Earlier message: Remember the codeword JUNIPER/),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: "View usage and manage budgets" }),
+  ).toContainText("$0.0028");
+  await page.screenshot({
+    path: join(artifacts, "maestro-provider-chat.png"),
+    fullPage: true,
+    animations: "disabled",
+  });
+  await page
+    .getByRole("button", { name: "View usage and manage budgets" })
+    .click();
+  await expect(page.getByText("2,000", { exact: true })).toBeVisible();
+  await expect(page.getByText("400", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "Close dialog" }).click();
+  await page.getByRole("button", { name: "New chat", exact: true }).click();
+  await expect(
+    page.getByText(/Earlier message: Remember the codeword JUNIPER/),
+  ).not.toBeVisible();
+  await expect(
+    page.getByRole("button", { name: "View usage and manage budgets" }),
+  ).toContainText("$0.0028");
+  await page.getByRole("button", { name: "Settings", exact: true }).click();
+  await page
+    .getByRole("button", { name: "Remove API key", exact: true })
+    .click();
+  await expect(page.getByText("No API key", { exact: true })).toBeVisible();
+  expect(
+    await page.evaluate(() => JSON.stringify([localStorage, sessionStorage])),
+  ).not.toContain("synthetic-browser-key");
+});
+
+test("mobile chat, settings and navigation fit the viewport", async ({
+  page,
+}) => {
   await page.setViewportSize({ width: 390, height: 844 });
   await page.goto("/");
   await expect(
@@ -134,112 +179,22 @@ test("mobile navigation, usage, and layout remain usable", async ({ page }) => {
   ).toBeVisible();
   expect(
     await page.evaluate(
-      () => document.documentElement.scrollWidth <= window.innerWidth,
+      () => document.documentElement.scrollWidth <= innerWidth,
     ),
   ).toBe(true);
   await page.getByRole("button", { name: "Open navigation" }).click();
-  await page.getByRole("button", { name: /^Tasks/ }).click();
+  await page.getByRole("button", { name: "Settings", exact: true }).click();
   await expect(
-    page.getByRole("heading", { name: "Tasks", exact: true }),
+    page.getByRole("heading", { name: "Model connection" }),
   ).toBeVisible();
-  await expect(
-    page.getByRole("button", { name: "Close navigation" }),
-  ).not.toBeInViewport();
   expect(
     await page.evaluate(
-      () => document.documentElement.scrollWidth <= window.innerWidth,
-    ),
-  ).toBe(true);
-  const artifacts = join(
-    process.env.LOCALAPPDATA || join(homedir(), ".local", "share"),
-    "Maestro",
-    "preview",
-    "artifacts",
-  );
-  await page.screenshot({
-    path: join(artifacts, "maestro-mobile.png"),
-    fullPage: true,
-  });
-  await page
-    .getByRole("button", { name: "View usage and manage budgets" })
-    .click();
-  await expect(page.getByRole("dialog")).toBeVisible();
-  await page.getByRole("button", { name: "Close dialog" }).click();
-});
-
-test("reflection persists controls and feedback without keys or simulated charges", async ({
-  page,
-}) => {
-  await page.goto("/");
-  await page.getByRole("button", { name: "Reflection", exact: true }).click();
-  await expect(
-    page.getByRole("heading", { name: "Learn from the work" }),
-  ).toBeVisible();
-  await expect(
-    page.getByRole("button", { name: "Run one cycle" }),
-  ).toBeDisabled();
-  await page
-    .getByLabel("Feedback", { exact: true })
-    .fill("Synthetic reflection correction: always include evidence.");
-  await page
-    .getByRole("button", { name: "Save feedback", exact: true })
-    .click();
-  await expect(
-    page.getByText(
-      "Synthetic reflection correction: always include evidence.",
-      { exact: true },
-    ),
-  ).toBeVisible();
-  await expect(page.getByText("Local only", { exact: true })).toBeVisible();
-  await page.getByLabel("USD per cycle", { exact: true }).fill("0.05");
-  await page
-    .getByLabel("Enable background reflection on new approved feedback.")
-    .check();
-  await page.getByRole("button", { name: "Save reflection settings" }).click();
-  await expect(
-    page.getByText("missing credentials", { exact: true }),
-  ).toBeVisible();
-  await page.reload();
-  await page.getByRole("button", { name: "Reflection", exact: true }).click();
-  await expect(page.getByLabel("USD per cycle", { exact: true })).toHaveValue(
-    "0.05",
-  );
-  await expect(
-    page.getByRole("button", { name: "View real reflection cost and tokens" }),
-  ).toContainText("$0.0000");
-  await page.getByRole("button", { name: "Pause background" }).click();
-  await expect(page.getByText("paused", { exact: true })).toBeVisible();
-  const artifacts = join(
-    process.env.LOCALAPPDATA || join(homedir(), ".local", "share"),
-    "Maestro",
-    "preview",
-    "artifacts",
-  );
-  await page.screenshot({
-    path: join(artifacts, "maestro-reflection.png"),
-    fullPage: true,
-  });
-  await page.setViewportSize({ width: 390, height: 844 });
-  expect(
-    await page.evaluate(
-      () => document.documentElement.scrollWidth <= window.innerWidth,
+      () => document.documentElement.scrollWidth <= innerWidth,
     ),
   ).toBe(true);
   await page.screenshot({
-    path: join(artifacts, "maestro-reflection-mobile.png"),
+    path: join(artifacts, "maestro-provider-mobile.png"),
     fullPage: true,
     animations: "disabled",
   });
-  await page
-    .getByText("Clear private reflection history", { exact: true })
-    .click();
-  await page
-    .getByRole("button", { name: "Clear feedback and lessons" })
-    .click();
-  await expect(
-    page.getByText(
-      "Synthetic reflection correction: always include evidence.",
-      { exact: true },
-    ),
-  ).not.toBeVisible();
 });
