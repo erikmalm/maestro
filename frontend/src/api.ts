@@ -48,7 +48,7 @@ export type Workspace = {
     uncertain: { id: string; at: string; reserved_usd: number }[];
   };
   provider: ProviderStatus;
-  web_search: WebSearchSummary;
+  web_search: WebSearchStatus;
   capabilities: {
     mode: "local";
     live_ai: boolean;
@@ -171,13 +171,11 @@ export type WebSearchConfig = {
   daily_limit: number;
   max_results: number;
 };
-export type WebSearchSummary = {
+export type WebSearchStatus = {
   config: WebSearchConfig;
   searches_today: number;
   remaining_today: number;
   paused_until: string | null;
-};
-export type WebSearchStatus = WebSearchSummary & {
   credentials_present: boolean;
   credential_source: string;
   tested_at: string | null;

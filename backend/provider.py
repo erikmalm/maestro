@@ -160,9 +160,9 @@ class Provider:
         return {"config": DEFAULT.copy(), "models": [], "tested_at": None, "ledger": []}
 
     def configure(self, config, key, persist):
-        config["base_url"] = validate_url(config["base_url"])
-        if config["protocol"] == "ollama":
-            config["base_url"] = validate_ollama_url(config["base_url"])
+        local = config["protocol"] == "ollama"
+        config["base_url"] = validate_ollama_url(config["base_url"]) if local else validate_url(config["base_url"])
+        if local:
             if key:
                 raise ValueError("Local Ollama does not use an API key. Leave the key empty.")
             config.update(input_usd_per_million=0, output_usd_per_million=0, pricing_verified=True)
@@ -193,6 +193,8 @@ class Provider:
             if not isinstance(data.get("data"), list):
                 raise ValueError("Provider does not expose an OpenAI-compatible model list. Enter a model ID manually.")
             models = sorted({item["id"] for item in data["data"] if isinstance(item, dict) and isinstance(item.get("id"), str)})
+            if any(key in model for model in models):
+                raise ValueError("Provider returned an unsafe model list. Enter a model ID manually.")
         with self.transaction() as state:
             if state["config"] != config or (not local and credentials.read(config["base_url"])[0] != key):
                 raise ValueError("Connection settings changed. Test the new connection again.")
@@ -337,10 +339,7 @@ class Provider:
                 if (not local and state["config"] == config
                         and (input_tokens > input_bound or output_tokens > output_bound or cost > reserve)):
                     state["config"]["pricing_verified"] = False
-                if local:
-                    message = data.get("message")
-                    reply = message.get("content", "") if isinstance(message, dict) else ""
-                elif config["protocol"] == "responses":
+                if not local and config["protocol"] == "responses":
                     reply_parts = []
                     for item in data.get("output", []) if isinstance(data.get("output"), list) else []:
                         if not isinstance(item, dict) or item.get("type") != "message" or not isinstance(item.get("content"), list):
@@ -354,10 +353,11 @@ class Provider:
                 else:
                     choices = data.get("choices")
                     first = choices[0] if isinstance(choices, list) and choices and isinstance(choices[0], dict) else {}
-                    message = first.get("message")
+                    message = data.get("message") if local else first.get("message")
                     reply = message.get("content", "") if isinstance(message, dict) else ""
-                if not isinstance(reply, str):
-                    reply = ""
+                reply = reply if isinstance(reply, str) else ""
+                if key:
+                    reply = reply.replace(key, "\u2588" if key in "[redacted]" else "[redacted]")
                 # Persist the actual exchange and accounting atomically.
                 workspace = json.loads(db.execute("SELECT value FROM workspace WHERE id=1").fetchone()[0])
                 chat = next((item for item in workspace["chats"] if item["id"] == chat_id), None)

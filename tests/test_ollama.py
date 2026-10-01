@@ -9,6 +9,7 @@ import httpx
 from fastapi.testclient import TestClient
 
 from backend import app as backend, credentials
+from backend.web_search import ENDPOINT
 from backend.provider import DEFAULT, Provider, TITLE_INSTRUCTIONS
 
 
@@ -136,7 +137,7 @@ class OllamaTests(unittest.TestCase):
             self.assertEqual(reply.status_code, 200, reply.text)
         self.client.get("/api/provider")
         restored = self.client.get("/api/workspace").json()
-        self.read_key.assert_not_called()
+        self.assertEqual({call.args for call in self.read_key.call_args_list}, {(ENDPOINT,)})
         self.save_key.assert_not_called()
         self.assertNotIn(synthetic_key, json.dumps(restored))
         self.assertNotIn(synthetic_key.encode(), backend.DATABASE.read_bytes())
@@ -176,7 +177,7 @@ class OllamaTests(unittest.TestCase):
         self.assertEqual(usage["reserved_usd"], 0)
         self.assertEqual(usage["uncertain"], [])
         self.assertEqual(restored["provider"]["models"], [self.model])
-        self.read_key.assert_not_called()
+        self.assertEqual({call.args for call in self.read_key.call_args_list}, {(ENDPOINT,)})
 
     def test_model_list_excludes_cloud_and_non_completion_entries(self):
         self.configure()

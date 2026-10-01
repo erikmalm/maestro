@@ -401,12 +401,16 @@ class ChatTests(unittest.TestCase):
                 def handler(request):
                     self.requests.append((request.url.path, json.loads(request.content)))
                     self.read_key.return_value = (replacement, "session")
-                    return self.response(local=False)
+                    data = self.response(local=False).json()
+                    data["output"][0]["content"][0]["text"] += " synthetic-original-key"
+                    return httpx.Response(200, json=data)
                 with self.mock_http(handler):
                     result = self.send(chat_id)
                 self.assertEqual(result.status_code, 200, result.text)
                 self.assertEqual(len(self.requests), 1)
-                self.assertEqual(result.json()["messages"][-1]["text"], "Synthetic useful reply")
+                self.assertEqual(result.json()["messages"][-1]["text"], "Synthetic useful reply [redacted]")
+                self.assertNotIn("synthetic-original-key", result.text)
+                self.assertNotIn(b"synthetic-original-key", backend.DATABASE.read_bytes())
 
 
 if __name__ == "__main__":

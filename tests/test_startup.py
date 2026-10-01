@@ -3,8 +3,23 @@
 import os
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 import unittest
+
+
+class HealthTests(unittest.TestCase):
+    def test_health_identifies_the_launched_server(self):
+        with tempfile.TemporaryDirectory(prefix="maestro-health-test-") as directory:
+            result = subprocess.run(
+                [sys.executable, "-c", "from fastapi.testclient import TestClient; from backend.app import app; "
+                 "response = TestClient(app).get('/health'); assert response.status_code == 200; "
+                 "assert response.json() == {'application': 'maestro', 'mode': 'local', 'launch_id': 'test-launch'}"],
+                cwd=Path(__file__).resolve().parent.parent,
+                env={**os.environ, "MAESTRO_DATA_DIR": directory, "MAESTRO_LAUNCH_ID": "test-launch"},
+                capture_output=True, text=True, timeout=20,
+            )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
 
 @unittest.skipUnless(os.name == "nt", "Windows PowerShell launcher")
@@ -40,16 +55,23 @@ $healthStatements = $ast.EndBlock.Statements | Where-Object {
 $healthProbe = [scriptblock]::Create(($healthStatements.Extent.Text -join "`n"))
 function Start-Process {
     if ($mode -eq 'browser-failure') { throw 'Synthetic browser failure' }
+    if ($env:MAESTRO_LAUNCH_ID -notmatch '^[a-f0-9]{32}$' -or $env:MAESTRO_LAUNCH_ID -eq $launchedNonce) { throw 'Launch identity was absent or reused.' }
+    $script:launchedNonce = $env:MAESTRO_LAUNCH_ID
     $script:launches++
     if ($mode -like 'retry-*') { $fakeProcess.Id = 54321; $fakeProcess.HasExited = $false }
     if ($mode -eq 'success-changed-pid') { Set-Content -LiteralPath $pidPath -Value 99999 }
     return $fakeProcess
 }
-function Start-Sleep { }
+function Start-Sleep { $script:sleeps++ }
 function Invoke-RestMethod {
     $script:polls++
-    if ($mode -eq 'health-exit') { $fakeProcess.HasExited = $true }
-    if ($mode -in @('success', 'success-changed-pid', 'health-exit', 'retry-success', 'retry-stale', 'browser-failure')) { return @{ application = 'maestro'; mode = 'local' } }
+    if ($mode -eq 'health-exit' -or ($mode -eq 'other-health-exit' -and $polls -eq 2)) { $fakeProcess.HasExited = $true }
+    if ($mode -in @('success', 'success-changed-pid', 'health-exit', 'retry-success', 'retry-stale', 'browser-failure', 'other-health', 'missing-health', 'other-health-exit', 'eventual-health')) {
+        $response = @{ application = 'maestro'; mode = 'local'; launch_id = $launchedNonce }
+        if ($mode -like 'other-health*' -or ($mode -eq 'eventual-health' -and $polls -eq 1)) { $response.launch_id = 'another-launch' }
+        if ($mode -eq 'missing-health') { $response.Remove('launch_id') }
+        return $response
+    }
     throw 'Synthetic health timeout'
 }
 function Get-CimInstance {
@@ -79,25 +101,26 @@ foreach ($mode in @('retry-success', 'retry-stale', 'retry-unrelated', 'cleanup-
         if (($mode -eq 'retry-success') -ne $stopped) { throw 'Retry stopped an unexpected process.' }
     } elseif (-not $failure -or $launches -or $stopped -or (Get-Content -LiteralPath $pidPath) -ne '43210') { throw 'Retry replaced an unresolved process record.' }
 }
-foreach ($mode in @('exit', 'health-exit', 'timeout', 'cleanup-failure', 'cleanup-untracked', 'cleanup-changed-pid', 'cleanup-live', 'changed-pid', 'success-changed-pid', 'success')) {
+foreach ($mode in @('exit', 'health-exit', 'timeout', 'cleanup-failure', 'cleanup-untracked', 'cleanup-changed-pid', 'cleanup-live', 'changed-pid', 'success-changed-pid', 'success', 'other-health', 'missing-health', 'other-health-exit', 'eventual-health')) {
     $fakeProcess = [pscustomobject]@{ Id = 43210; HasExited = ($mode -eq 'exit') }
     $serverProcess = $null
-    $stopped = $false; $polls = 0; $failure = $null; $cleanupWarnings = 0
+    $stopped = $false; $polls = 0; $sleeps = 0; $failure = $null; $cleanupWarnings = 0
     Remove-Item -LiteralPath $pidPath -ErrorAction SilentlyContinue
-    if ($mode -notin @('success', 'success-changed-pid', 'cleanup-untracked', 'cleanup-live')) { Set-Content -LiteralPath $pidPath -Value $(if ($mode -in @('changed-pid', 'cleanup-changed-pid')) { 99999 } else { 43210 }) }
+    if ($mode -notin @('success', 'success-changed-pid', 'cleanup-untracked', 'cleanup-live', 'eventual-health')) { Set-Content -LiteralPath $pidPath -Value $(if ($mode -in @('changed-pid', 'cleanup-changed-pid', 'other-health')) { 99999 } else { 43210 }) }
     try { . $launch } catch { $failure = $_.Exception.Message }
-    if ($mode -eq 'success') {
+    if ($mode -in @('success', 'eventual-health')) {
         if ($failure -or $stopped -or $fakeProcess.HasExited -or (Get-Content -LiteralPath $pidPath) -ne '43210') { throw 'Success did not preserve its running server and PID.' }
+        if ($mode -eq 'eventual-health' -and ($polls -ne 2 -or $sleeps -ne 1)) { throw 'Readiness accepted another launch or failed to wait for its own server.' }
     } elseif ($mode -eq 'success-changed-pid') {
         if (-not $failure -or -not $stopped -or -not $fakeProcess.HasExited -or (Get-Content -LiteralPath $pidPath) -ne '99999') { throw 'Success replaced a concurrent launch PID.' }
     } else {
-        $expected = if ($mode -in @('exit', 'health-exit')) { "Maestro could not start. Check $dataDirectory\server.stderr.log" } else { "Maestro did not become ready. Check $dataDirectory\server.stderr.log" }
+        $expected = if ($mode -in @('exit', 'health-exit', 'other-health-exit')) { "Maestro could not start. Check $dataDirectory\server.stderr.log" } else { "Maestro did not become ready. Check $dataDirectory\server.stderr.log" }
         if ($failure -ne $expected) { throw "Original startup failure was lost: $failure" }
-        if ($mode -in @('timeout', 'changed-pid') -and (-not $stopped -or $polls -ne 30)) { throw 'Timeout did not stop the launched process tree after its bounded polls.' }
+        if ($mode -in @('timeout', 'changed-pid', 'other-health', 'missing-health') -and (-not $stopped -or $polls -ne 30 -or $sleeps -ne 30)) { throw 'Unready launch did not stop its process tree after its bounded polls and waits.' }
         if ($mode -like 'cleanup-*') {
             $tracked = if ($mode -eq 'cleanup-changed-pid') { '99999' } else { '43210' }
             if ($fakeProcess.HasExited -or $cleanupWarnings -ne 1 -or (Get-Content -LiteralPath $pidPath) -ne $tracked) { throw 'Surviving launch lost its own record or overwrote another PID.' }
-        } elseif ($mode -eq 'changed-pid') {
+        } elseif ($mode -in @('changed-pid', 'other-health')) {
             if ((Get-Content -LiteralPath $pidPath) -ne '99999') { throw 'Cleanup removed another launch PID.' }
         } elseif (Test-Path -LiteralPath $pidPath) { throw 'Failed launch left its PID file.' }
     }

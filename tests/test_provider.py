@@ -141,6 +141,65 @@ class ProviderTests(unittest.TestCase):
                 self.assertIsNone(status["tested_at"])
                 self.assertNotIn("synthetic-replacement-key", result.text)
 
+    def test_model_test_rejects_echoed_credentials_before_persistence(self):
+        with self.mock_http():
+            before = self.client.post("/api/provider/test", headers=self.headers).json()
+        with self.mock_http(lambda request: httpx.Response(200, json={
+                "data": [{"id": "safe-model"}, {"id": "model-" + self.key + "-suffix"}]})):
+            response = self.client.post("/api/provider/test", headers=self.headers)
+        self.assertEqual(response.status_code, 409)
+        self.assertNotIn(self.key, response.text)
+        self.assertEqual(self.client.get("/api/provider").json(), before)
+        self.assertNotIn(self.key.encode(), backend.DATABASE.read_bytes())
+
+    def test_successful_reply_refusal_and_title_redact_dispatched_credentials(self):
+        for protocol, kind in (("responses", "output_text"), ("responses", "refusal"), ("chat_completions", "content")):
+            with self.subTest(protocol=protocol, kind=kind):
+                self.setup_provider({**self.config, "protocol": protocol})
+                self.client.post("/api/chats", headers=self.headers)
+                def handler(request):
+                    self.assertEqual(request.headers["Authorization"], "Bearer " + self.key)
+                    payload = json.loads(request.content)
+                    if payload.get("instructions", (payload.get("messages") or [{}])[0].get("content")) == TITLE_INSTRUCTIONS:
+                        credentials.session_keys[self.base] = "synthetic-replacement-key"
+                    reply = "Provider echo " + self.key
+                    if protocol == "responses":
+                        field = "refusal" if kind == "refusal" else "text"
+                        # The echoed key straddles two output parts.
+                        content = [{"type": kind, field: part} for part in (reply[:-5], reply[-5:])]
+                        data = {"output": [{"type": "message", "content": content}],
+                                "usage": {"input_tokens": 100, "output_tokens": 5}}
+                    else:
+                        data = {"choices": [{"message": {"content": reply}}],
+                                "usage": {"prompt_tokens": 100, "completion_tokens": 5}}
+                    return httpx.Response(200, json=data)
+                with self.mock_http(handler):
+                    response = self.client.post("/api/chat", headers=self.headers, json={"text": "Synthetic echo check"})
+                self.assertEqual(response.status_code, 200, response.text)
+                workspace = response.json()
+                self.assertEqual(workspace["messages"][-1]["text"], "Provider echo [redacted]")
+                self.assertEqual(next(x["title"] for x in workspace["chats"] if x["id"] == workspace["active_chat_id"]), "Provider echo [redacted]")
+                self.assertEqual(workspace["usage"]["reserved_usd"], 0)
+                self.assertNotIn(self.key, response.text)
+                self.assertNotIn(self.key, self.client.get("/api/workspace").text)
+                self.assertNotIn(self.key.encode(), backend.DATABASE.read_bytes())
+
+    def test_redaction_marker_cannot_contain_the_dispatched_key(self):
+        for key in ("redacted", "[redacted]"):
+            with self.subTest(key=key):
+                self.key = key
+                self.setup_provider()
+                def handler(request):
+                    data = self.provider_http(request).json()
+                    data["output"][0]["content"][0]["text"] = "Provider echo " + self.key
+                    return httpx.Response(200, json=data)
+                with self.mock_http(handler):
+                    response = self.client.post("/api/chat", headers=self.headers, json={"text": "Synthetic marker check"})
+                self.assertEqual(response.status_code, 200, response.text)
+                self.assertEqual(response.json()["messages"][-1]["text"], "Provider echo \u2588")
+                self.assertNotIn(self.key, response.text)
+                self.assertNotIn(self.key.encode(), backend.DATABASE.read_bytes())
+
     def test_overrun_settles_reply_without_invalidating_another_configuration(self):
         for change_model in (False, True):
             with self.subTest(change_model=change_model):

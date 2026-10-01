@@ -141,7 +141,7 @@ def snapshot(state: dict, chat_id: str | None = None) -> dict:
         "messages": chat["messages"] if chat else [],
         "usage": service.usage(provider_state),
         "provider": service.status(provider_state),
-        "web_search": WebSearch(DATABASE, TIMEZONE).summary(),
+        "web_search": WebSearch(DATABASE, TIMEZONE).status(),
         "capabilities": {"mode": "local", "live_ai": True, "task_execution": False, "delegation": False, "github_pr": False, "secure_credentials": os.name == "nt"},
     }
 
@@ -242,7 +242,7 @@ async def invalid_entry(request: Request, error: RequestValidationError):
 
 @app.get("/health")
 def health():
-    return {"application": "maestro", "mode": "local"}
+    return {"application": "maestro", "mode": "local", "launch_id": os.environ.get("MAESTRO_LAUNCH_ID")}
 
 
 @app.middleware("http")

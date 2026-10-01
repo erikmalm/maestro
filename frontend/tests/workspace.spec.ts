@@ -714,7 +714,7 @@ test("verified search key enables bounded local-model search with persistent sou
   const tested = await (await page.request.get("/api/workspace")).json();
   expect(tested.web_search.config.enabled).toBe(false);
   expect(tested.web_search.searches_today).toBe(1);
-  expect(tested.web_search).not.toHaveProperty("credentials_present");
+  expect(tested.web_search.credentials_present).toBe(true);
   expect(JSON.stringify(tested)).not.toContain(searchKey);
   await page.getByLabel("Let Maestro decide when to search").check();
   await page

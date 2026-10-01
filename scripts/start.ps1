@@ -46,14 +46,16 @@ try {
     $env:MAESTRO_PORT = '8765'
     $serverProcess = $null
     try {
+        $env:MAESTRO_LAUNCH_ID = [guid]::NewGuid().ToString('N')
         $serverProcess = Start-Process -FilePath $pythonPath -ArgumentList @('-m', 'uvicorn', 'backend.app:app', '--host', '127.0.0.1', '--port', '8765', '--no-access-log') -WorkingDirectory $repoDirectory -WindowStyle Hidden -PassThru -RedirectStandardOutput (Join-Path $dataDirectory 'server.stdout.log') -RedirectStandardError (Join-Path $dataDirectory 'server.stderr.log')
         $ready = $false
         for ($attempt = 0; $attempt -lt 30; $attempt++) {
             if ($serverProcess.HasExited) { throw "Maestro could not start. Check $dataDirectory\server.stderr.log" }
             try {
                 $health = Invoke-RestMethod -Uri "$previewUrl/health" -TimeoutSec 1
-                if ($health.application -eq 'maestro' -and $health.mode -in @('local', 'preview') -and -not $serverProcess.HasExited) { $ready = $true; break }
-            } catch { Start-Sleep -Milliseconds 200 }
+                if ($health.application -eq 'maestro' -and $health.mode -in @('local', 'preview') -and $health.launch_id -eq $env:MAESTRO_LAUNCH_ID -and -not $serverProcess.HasExited) { $ready = $true; break }
+            } catch { }
+            Start-Sleep -Milliseconds 200
         }
         if (-not $ready) { throw "Maestro did not become ready. Check $dataDirectory\server.stderr.log" }
         New-Item -ItemType File -Path $pidPath -Value $serverProcess.Id | Out-Null
@@ -70,9 +72,9 @@ try {
             try {
                 $pidExists = Test-Path -LiteralPath $pidPath
                 $ownsPidFile = $pidExists -and ([string](Get-Content -Raw -LiteralPath $pidPath)).Trim() -eq [string]$serverProcess.Id
-                if ($serverProcess.HasExited) {
-                    if ($ownsPidFile) { Remove-Item -LiteralPath $pidPath }
-                } elseif (-not $pidExists) {
+                if ($serverProcess.HasExited -and $ownsPidFile) {
+                    Remove-Item -LiteralPath $pidPath
+                } elseif (-not $serverProcess.HasExited -and -not $pidExists) {
                     New-Item -ItemType File -Path $pidPath -Value $serverProcess.Id | Out-Null
                 }
             } catch { Write-Warning "Could not update the launched Maestro process record (PID $($serverProcess.Id))." }

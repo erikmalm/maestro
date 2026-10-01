@@ -2,6 +2,7 @@ import { useState } from "react";
 import { Check, LoaderCircle, ShieldCheck } from "lucide-react";
 import * as api from "./api";
 import type { ProviderConfig, ProviderStatus } from "./api";
+import { NumberFields, useSetupAction } from "./SetupForm";
 
 // Standard short-context text rates, checked against https://developers.openai.com/api/docs/pricing.
 // Expired or unlisted rates require manual confirmation; never infer model prices from an ID.
@@ -33,36 +34,15 @@ export default function ProviderSetup({
   const [config, setConfig] = useState(initialStatus.config);
   const [apiKey, setApiKey] = useState("");
   const [persist, setPersist] = useState(true);
-  const [busy, setBusy] = useState("");
-  const [error, setError] = useState("");
-  const [notice, setNotice] = useState("");
+  const { busy, error, notice, setError, setNotice, act } = useSetupAction(
+    update,
+    "Could not update the connection.",
+  );
 
   function update(next: ProviderStatus) {
     setStatus(next);
     setConfig(next.config);
     onChange(next);
-  }
-
-  async function act(
-    name: string,
-    action: () => Promise<ProviderStatus>,
-    message: string,
-  ) {
-    setBusy(name);
-    setError("");
-    setNotice("");
-    try {
-      update(await action());
-      setNotice(message);
-    } catch (reason) {
-      setError(
-        reason instanceof Error
-          ? reason.message
-          : "Could not update the connection.",
-      );
-    } finally {
-      setBusy("");
-    }
   }
 
   const dirty =
@@ -327,25 +307,20 @@ export default function ProviderSetup({
             </p>
             <div className="form-section-label">COST ESTIMATES · USD</div>
             <div className="reflection-fields">
-              {(
-                [
-                  ["input_usd_per_million", "Input USD / 1M tokens"],
-                  ["output_usd_per_million", "Output USD / 1M tokens"],
-                ] as const
-              ).map(([key, label]) => (
-                <label key={key}>
-                  {label}
-                  <input
-                    required
-                    type="number"
-                    min="0"
-                    max="10000"
-                    step="any"
-                    value={config[key]}
-                    onChange={(event) => field(key, Number(event.target.value))}
-                  />
-                </label>
-              ))}
+              <NumberFields
+                values={config}
+                onChange={field}
+                step="any"
+                fields={[
+                  ["input_usd_per_million", "Input USD / 1M tokens", 0, 10000],
+                  [
+                    "output_usd_per_million",
+                    "Output USD / 1M tokens",
+                    0,
+                    10000,
+                  ],
+                ]}
+              />
             </div>
             <label className="reflection-check">
               <input
@@ -393,20 +368,13 @@ export default function ProviderSetup({
             electricity costs are excluded. Token usage is still tracked.
           </p>
         )}
-        <label>
-          Maximum output tokens per reply
-          <input
-            required
-            type="number"
-            min="64"
-            max="32768"
-            step="1"
-            value={config.max_output_tokens}
-            onChange={(event) =>
-              field("max_output_tokens", Number(event.target.value))
-            }
-          />
-        </label>
+        <NumberFields
+          values={config}
+          onChange={field}
+          fields={[
+            ["max_output_tokens", "Maximum output tokens per reply", 64, 32768],
+          ]}
+        />
         {isOllama && (
           <details className="reflection-cleanup">
             <summary>Local worker settings</summary>
@@ -415,8 +383,10 @@ export default function ProviderSetup({
               to choose automatically.
             </p>
             <div className="reflection-fields">
-              {(
-                [
+              <NumberFields
+                values={config}
+                onChange={field}
+                fields={[
                   [
                     "ollama_context_tokens",
                     "Context size (tokens)",
@@ -430,21 +400,8 @@ export default function ProviderSetup({
                     0,
                     120,
                   ],
-                ] as const
-              ).map(([key, label, min, max]) => (
-                <label key={key}>
-                  {label}
-                  <input
-                    required
-                    type="number"
-                    min={min}
-                    max={max}
-                    step="1"
-                    value={config[key]}
-                    onChange={(event) => field(key, Number(event.target.value))}
-                  />
-                </label>
-              ))}
+                ]}
+              />
             </div>
             <p className="reflection-note">
               Set keep-loaded minutes to 0 to unload the model after each reply.

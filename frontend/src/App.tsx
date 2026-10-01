@@ -834,6 +834,7 @@ export default function App() {
                   onChange={refreshWorkspace}
                 />
                 <OllamaSearchSetup
+                  initialStatus={workspace.web_search}
                   provider={workspace.provider}
                   onChange={refreshWorkspace}
                 />
