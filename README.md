@@ -2,7 +2,25 @@
 
 Maestro is a planned local AI assistant and agent coordinator with a web interface. It will help you discuss ideas, organize to-dos, delegate work to specialist agents, inspect their progress, and improve results through bounded review and refinement.
 
-**Status: planning.** This repository currently contains documentation and Git exclusions. There is no runnable application yet. The build sequence and acceptance criteria are in [DEVELOPMENT_PLAN.md](DEVELOPMENT_PLAN.md).
+**Status: local UI preview.** Run and inspect the interface, save tasks and manual memories, try simulated chat/agent runs, and change budget limits locally. Usage figures are labelled demo data. Live AI, secure key setup, automatic recall, and integrations remain planned. See the [architecture draft](docs/ARCHITECTURE.md) and [development plan](DEVELOPMENT_PLAN.md).
+
+## Run the local preview
+
+Prerequisites: Windows, Python 3.11+, and Node.js 20.19+ or 22.12+. From this repository:
+
+```powershell
+.\scripts\start.ps1
+```
+
+The launcher installs missing dependencies, builds the interface, starts a hidden local server, and opens `http://127.0.0.1:8765`. Use `-NoBrowser` to start without opening a browser. Stop with:
+
+```powershell
+.\scripts\stop.ps1
+```
+
+If PowerShell blocks local scripts, use `powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\start.ps1` for this invocation; no permanent policy change is needed.
+
+Preview state is saved under `%LOCALAPPDATA%\Maestro\preview`. Initial examples and usage are synthetic. Entered tasks, conversations, manual memories, and limits persist across restart. No API key is needed, and the preview makes no paid calls or GitHub submissions.
 
 ## What Maestro will do
 
@@ -12,6 +30,7 @@ Maestro is a planned local AI assistant and agent coordinator with a web interfa
 | To-dos | Capture work, set priorities and completion criteria, and turn selected items into agent runs. |
 | Orchestration | Assign specialist agents different prompts, models, tools, and limited permissions. |
 | Run browser | Browse queued and active tasks, delegation trees, actions, review feedback, results, costs, and stop reasons. |
+| GitHub collaboration | Turn authorized coding tasks into draft PRs in selected repositories, with reviewable changes and validation. |
 | Refinement | Review a result against the task's criteria and iterate within enforced limits. |
 | Memory | Keep useful preferences, project context, decisions, and lessons across sessions; inspect, correct, and forget them. |
 | Integrations | Retrieve financial documentation through a locally configured MarketPulse connector, then add other scoped tools. |
@@ -33,7 +52,7 @@ The coordinator remains responsible for the task and the final response. Special
 
 The GitHub repository is intended to be public. It contains reusable code, generic agent templates, documentation, and synthetic examples. Your personal workspace belongs outside the Git checkout.
 
-The planned default on Windows is `%LOCALAPPDATA%\Maestro`. Other operating systems will use their standard per-user application-data location. `MAESTRO_DATA_DIR` will allow an external location to be selected; startup must reject locations inside the repository, including paths resolved through links.
+The preview uses `%LOCALAPPDATA%\Maestro\preview` on Windows. `MAESTRO_DATA_DIR` can select another external location; the backend rejects locations inside the repository, including paths resolved through links. The full workspace will use `%LOCALAPPDATA%\Maestro`; other operating systems will use their standard per-user application-data location.
 
 | Public repository | Private local storage |
 | --- | --- |
@@ -50,9 +69,9 @@ Local hosting means the interface and workspace run on your computer. When a clo
 
 ## API keys and providers
 
-The planned Settings screen will let you add, replace, test, and remove a provider key. The backend will save credentials in the operating system credential store and return only a configured/missing status. Keys must stay out of frontend bundles, browser storage, URLs, task prompts, and logs, in line with [OpenAI authentication guidance](https://developers.openai.com/api/reference/overview#authentication).
+The preview Settings screen saves budget controls locally. API key entry is disabled until secure credential storage is implemented. Upcoming provider settings will let you add, replace, test, and remove a key. The backend will save credentials in the OS credential store and return only configured/missing status. Keys must stay out of frontend bundles, browser storage, URLs, prompts, and logs, in line with [OpenAI authentication guidance](https://developers.openai.com/api/reference/overview#authentication).
 
-[.env.example](.env.example) contains blank fields for the proposed development configuration. It is a specification for the upcoming application; no configuration loader exists yet. Real keys must never be entered in that tracked file. A session environment variable can be used for development; the settings screen and OS credential store are the intended everyday setup.
+[.env.example](.env.example) contains blank fields for proposed development configuration. The preview reads selected server environment variables; it does not load `.env` files or use provider keys. Real keys must never be entered in that tracked file. Settings and the OS credential store are the intended everyday setup.
 
 OpenAI is the first planned provider. Provider adapters will keep the task and memory system independent of a specific vendor. Additional cloud providers and a local model adapter can follow. Models will be selected explicitly in Settings rather than fixed to a changing "latest" alias.
 
@@ -60,16 +79,28 @@ OpenAI is the first planned provider. Provider adapters will keep the task and m
 
 Each task will share one budget across the coordinator, workers, reviewers, retries, and memory updates. The backend will enforce limits on spend, model calls, tokens, review passes, delegation depth, concurrent agents, and elapsed time. Daily and monthly spending ceilings apply across runs. The run browser will show usage, reservations for in-flight requests, and stop reasons; an emergency stop will block new work.
 
-Improvement means learning from your feedback, preserving useful context, and proposing better prompts or workflows. Prompt changes will be versioned, evaluated, and reversible. Background learning and scheduling will be opt-in and use the same budgets. Changes to application code will go through the normal development and review process.
+Improvement means learning from feedback, preserving useful context, and proposing better prompts/workflows. Changes are versioned, evaluated, and reversible. Background work is opt-in and uses the same budgets. Authorized coding tasks may create isolated branches and submit draft PRs to allowed repositories after validation and secret scanning. You control merging; the running application does not rewrite itself automatically.
 
 ## Planned local setup
 
-The first runnable milestone will provide a Windows launcher that starts the backend, serves the web interface on a loopback address, opens the browser, and reports any missing prerequisites. The initial setup screen will configure the private storage location, provider/model, credential, and limits. To-dos and stored history will remain usable without an API key; AI execution will require a configured provider.
+The preview launcher starts the backend and serves the built interface on loopback. The next milestone adds provider/model setup, secure credentials, and bounded live chat. Tasks and history already work without an API key; live AI execution will require a configured provider.
 
-The proposed implementation is a Python/FastAPI backend, a React/TypeScript web interface, and SQLite for local state and search. One installation will support a single local user initially. Exact dependency versions and executable startup instructions will be added when that milestone exists.
+The preview uses Python/FastAPI, React/TypeScript, and SQLite local persistence, with pinned direct dependencies and a frontend lockfile. The full runner adds normalized records and scoped search. One installation supports one local user.
 
 ## Development
 
-Start with [the development plan](DEVELOPMENT_PLAN.md). It defines the architecture, task lifecycle, privacy boundaries, default budgets, milestones, and verification requirements. Documentation is the only completed milestone so far.
+Start with [the architecture draft](docs/ARCHITECTURE.md) and [development plan](DEVELOPMENT_PLAN.md). The visual preview precedes the full provider/agent runtime. For frontend development, start the backend and run `npm run dev` in `frontend`; it proxies `/api` to the local server.
+
+Checks:
+
+```powershell
+.\.venv\Scripts\python.exe -m pip install -r backend/requirements-dev.txt
+.\.venv\Scripts\python.exe -m unittest discover -s tests -p "test_*.py"
+cd frontend
+npm run build
+npm run test:ui
+```
+
+For the first UI test run, install the test browser with `npx playwright install chromium`. Browser tests use a separate temporary private workspace and synthetic fixtures.
 
 Do not place real user content or credentials in this repository while developing. Use synthetic fixtures and a mock provider for automated checks.

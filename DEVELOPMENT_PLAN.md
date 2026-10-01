@@ -1,6 +1,6 @@
 # Maestro development plan
 
-Plan date: 2026-10-01. Status: documentation complete; application implementation has not started. Decisions below are the proposed baseline and will be refined during implementation.
+Plan date: 2026-10-01. Status: documentation and an interactive local UI preview are implemented. Live provider calls and the full agent runtime remain planned. The [architecture draft](docs/ARCHITECTURE.md) separates the current implementation from the proposed system.
 
 ## 1. Product goal
 
@@ -17,11 +17,14 @@ The first version supports one user on one computer, with Windows as the first s
 | Chat | Streaming discussion, relevant memory/source references, and conversion of a message into a to-do. |
 | Tasks | Inbox and status board; priority, project, due date, completion criteria, assignment, run/cancel, and execution policy. |
 | Runs | Coordinator and agent tree; action timeline, concise progress summaries, tool calls, review passes, artifacts, usage, and stop reasons. |
+| Persistent usage control | Today's estimated cost and tokens on every screen; open details and edit limits without leaving the current work. |
 | Agents | Versioned role prompts, provider/model, output contract, permitted tools, context scope, and per-agent limits. |
 | Memory | Search and inspect records; provenance, proposed entries, corrections, deletion, recall controls, and private export. |
 | Settings | Provider credentials, model, data location, limits, integration scope, sharing policy, and local backup/restore. |
 
 The Runs view exposes decisions and observable actions, rather than requiring access to a model's hidden reasoning. Local state must survive a browser refresh and application restart.
+
+Use a restrained modern interface with clear hierarchy, generous spacing, and progressive disclosure for configuration. The cost/token display stays visible while chatting or inspecting tasks. Usage details separate input/output tokens, reservations, per-run/agent usage, daily/monthly totals, estimates, and reconciled billing. Budget changes are saved privately and applied before subsequent dispatches. Identify sample data as simulated until live providers are connected.
 
 ## 3. Proposed architecture
 
@@ -36,6 +39,7 @@ flowchart TD
     P --> L[Selected cloud or local model]
     A --> T[Scoped tool adapters]
     T --> MP[Configured MarketPulse source]
+    T --> GH[Scoped GitHub draft PR workflow]
     B --> S[Private SQLite workspace]
     Q --> S
     C --> S
@@ -172,7 +176,7 @@ Start with SQLite text search and a bounded recall context. Keep each memory's p
 
 The initial policy saves explicitly requested memories and presents inferred entries for review. A later opt-in policy can automatically save selected low-risk categories with an audit history. Provide edit, forget, project isolation, recall disable, and private export controls. Deletion removes live records, FTS entries, derived summaries, and cached embeddings if introduced; disclose that previously exported files and backups need separate removal.
 
-Improvement cycle: collect feedback, record a concrete lesson, propose a prompt/workflow revision, test it against synthetic or explicitly selected private evaluation cases, then allow promotion and rollback. Keep generic shipped prompts in Git and personal overrides in the private database. Automated promotion can be added as an opt-in policy with a fixed evaluation budget and regression criteria. Runtime agents do not mutate application source or publish memory to GitHub.
+Improvement cycle: collect feedback, record a concrete lesson, propose a prompt/workflow revision, test it against synthetic or explicitly selected private evaluation cases, then allow promotion and rollback. Keep generic shipped prompts in Git and personal overrides in the private database. Automated promotion can be added as an opt-in policy with a fixed evaluation budget and regression criteria. Runtime agents never publish memory to GitHub. Authorized coding tasks may implement changes in isolated worktrees and submit draft PRs; replacing the running application or merging requires separate authorization.
 
 Memory extraction, compaction, embeddings, and evaluations are subject to the same call gate and usage ledger. No unbounded idle-time reflection jobs. Add backup/restore before relying on memory as durable project knowledge; backups remain outside the checkout.
 
@@ -194,6 +198,8 @@ MarketPulse connector sequence:
 
 Any future tool that modifies an external system needs scoped authorization, an audit record, and an idempotent or reviewable action contract. Unrestricted shell/file access is not part of the initial agent toolset.
 
+GitHub PR submission is an authorized capability for user-assigned coding tasks in locally allowlisted repositories. Use a scoped GitHub App or fine-grained token, isolated branches/worktrees, validation, and secret/private-data scans before pushing. PR text includes public-safe changes and checks, with private task context kept local. Draft PR creation/update may run under the user's configured policy; merges and deployments remain separate actions. See [the GitHub architecture](docs/ARCHITECTURE.md#github-collaboration).
+
 ## 9. Milestones and acceptance criteria
 
 ### M0 - Public foundation and documentation
@@ -203,7 +209,19 @@ Any future tool that modifies an external system needs scoped authorization, an 
 - [x] Audit repository history and publication files for secrets and private runtime data.
 - [x] Confirm public visibility and enable secret scanning with push protection.
 
+### M0a - Local visual preview
+
+- [x] Add a responsive web workspace with persistent demo cost/token visibility.
+- [x] Save tasks, preview conversations, manual memories, and budget settings in private SQLite storage outside Git.
+- [x] Provide simulated agent run timelines and atomic demo spending/token limits.
+- [x] Add a first architecture draft and authorized GitHub draft PR workflow.
+- [x] Verify the production build, backend behavior, desktop/mobile interactions, and Windows startup/shutdown.
+
+This milestone enables early visual inspection without credentials or paid calls. It does not complete the live provider or agent milestones below.
+
 ### M1 - Bootable local chat and configuration
+
+The local UI preview precedes M1. It implements responsive navigation, persistent demo cost/token visibility, local tasks/chat/manual memory, budget settings, and simulated run inspection. It has no paid API calls, accepted credentials, or live integration actions. M1 remains incomplete until the secure provider setup and live chat checks below pass.
 
 Build the web shell, local backend, Windows startup/shutdown scripts, private storage migrations, session protection, Settings, mock provider, and OpenAI adapter. Include the call gate and spend ledger for chat from the start.
 
@@ -220,6 +238,12 @@ Acceptance: entering a to-do persists it and queues it only under its configured
 Add role templates and local overrides, delegation trees, structured outputs, reviewer criteria, child limits, and no-progress detection.
 
 Acceptance: a synthetic task delegates to distinct roles; a deliberately incomplete result triggers focused refinement; completion, failure, and each configured limit end with a visible reason; grandchildren inherit remaining permissions and budgets; agent requests to raise limits are rejected.
+
+### M3a - GitHub coding tasks and draft PRs
+
+Add selected-repository configuration, secure GitHub credentials, coding worktrees, branch publication, draft PR create/update, and PR links in the task/run UI.
+
+Acceptance: a synthetic coding task creates a reviewable draft PR only in an allowed repository; secrets/private workspace content block publication; retries update the existing PR; the PR states behavior and checks; scope prevents unauthorized workflow/privileged changes; Maestro does not merge or deploy without separate authorization.
 
 ### M4 - Persistent memory and feedback
 
@@ -247,4 +271,4 @@ Use mock providers and synthetic content in automated checks. Cover lifecycle tr
 
 Keep any live provider smoke tests opt-in with an explicit small budget and local credentials. Record dependency versions and setup instructions at M1; update milestone status only when its acceptance checks pass.
 
-Next step: implement M1 as the first usable vertical slice - startup, private workspace, Settings, and one bounded chat - then build task execution and specialist orchestration on that foundation.
+Next step: inspect the local UI preview, refine its layout and workflow, then finish M1 with secure provider settings and bounded live chat. Build the durable task runner, specialist orchestration, and GitHub PR connector on that foundation.
