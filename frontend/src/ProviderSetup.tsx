@@ -92,6 +92,12 @@ export default function ProviderSetup({
     config?.base_url.replace(/\/+$/, "") === "https://api.openai.com/v1";
   const pricesCurrent = pricesAreCurrent();
   const preset = isOpenAI && config ? openAIPrices(config.model) : undefined;
+  const canSave =
+    !!config?.model.trim() &&
+    !!config.pricing_verified &&
+    (!!apiKey.trim() ||
+      (!!status?.credentials_present &&
+        config.base_url.replace(/\/+$/, "") === status.config.base_url));
   function selectModel(model: string) {
     if (!config) return;
     const prices =
@@ -156,12 +162,13 @@ export default function ProviderSetup({
         <form
           onSubmit={(event) => {
             event.preventDefault();
+            if (!canSave) return;
             const submittedKey = apiKey;
             setApiKey("");
             void act(
               "save",
               () => api.saveProvider(config, submittedKey, persist),
-              "Connection settings saved.",
+              "Chat model settings saved. Return to Workspace to send a message.",
             );
           }}
         >
@@ -354,7 +361,11 @@ export default function ProviderSetup({
             />
           </label>
           <div className="reflection-actions">
-            <button type="submit" className="button primary" disabled={!!busy}>
+            <button
+              type="submit"
+              className="button primary"
+              disabled={!!busy || !canSave}
+            >
               {busy === "save" ? (
                 <LoaderCircle size={15} className="spin" />
               ) : (
@@ -402,6 +413,13 @@ export default function ProviderSetup({
             </button>
           </div>
           <p className="reflection-note">
+            {!config.model.trim()
+              ? "Choose a model before saving the chat connection. "
+              : !config.pricing_verified
+                ? "Confirm this model's prices before saving the chat connection. "
+                : !canSave
+                  ? "Connect an API key for this endpoint before saving. "
+                  : ""}
             {dirty
               ? "Save to apply your model and cost settings. Connect and load models also saves your changes."
               : status.tested_at

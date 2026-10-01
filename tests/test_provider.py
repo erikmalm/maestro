@@ -128,6 +128,27 @@ class ProviderTests(unittest.TestCase):
         self.assertEqual(resolved.json()["usage"]["reserved_usd"], 0)
         self.assertAlmostEqual(resolved.json()["usage"]["today_usd"], 0.002)
 
+    def test_quota_and_rate_errors_are_distinct_redacted_and_release_reservations(self):
+        cases = [("credit_balance_exhausted", "insufficient_quota", "credits are exhausted"),
+                 ("project_spend_limit_exceeded", "insufficient_quota", "project spending limit"),
+                 ("organization_spend_limit_exceeded", "insufficient_quota", "organization spending limit"),
+                 ("organization_usage_limit_exceeded", "insufficient_quota", "usage limit"),
+                 ("insufficient_quota", "insufficient_quota", "quota is unavailable"),
+                 ("rate_limit_exceeded", "rate_limit_error", "request rate limit"),
+                 ("slow_down", "rate_limit_error", "slower traffic"),
+                 (["malformed"], None, "Provider limit reached")]
+        for code, kind, expected in cases:
+            with self.subTest(code=code), self.mock_http(lambda request: httpx.Response(429, json={
+                    "error": {"code": code, "type": kind, "message": self.key}})):
+                response = self.client.post("/api/chat", headers=self.headers, json={"text": "Synthetic error check"})
+                self.assertEqual(response.status_code, 409)
+                self.assertIn(expected, response.json()["detail"])
+                self.assertNotIn(self.key, response.text)
+        usage = self.client.get("/api/workspace").json()["usage"]
+        self.assertEqual(usage["reserved_usd"], 0)
+        self.assertEqual(usage["today_usd"], 0)
+        self.assertEqual(usage["input_tokens"], 0)
+
     def test_endpoint_changes_cannot_receive_previous_key(self):
         changed = {**self.config, "base_url": "https://different.example/v1"}
         response = self.client.put("/api/provider", headers=self.headers, json={"config": changed, "api_key": "", "persist": False})

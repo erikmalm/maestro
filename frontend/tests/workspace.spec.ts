@@ -68,6 +68,9 @@ test("connection setup, HTTP chat, conversation context and usage", async ({
 }) => {
   await page.goto("/");
   await page.getByRole("button", { name: "Settings", exact: true }).click();
+  await expect(
+    page.getByRole("button", { name: "Save connection", exact: true }),
+  ).toBeDisabled();
   const fixture = await (
     await page.request.get("/api/provider-fixture")
   ).json();
@@ -94,6 +97,9 @@ test("connection setup, HTTP chat, conversation context and usage", async ({
   await page
     .getByLabel("Available models", { exact: true })
     .selectOption("synthetic-browser-model");
+  await expect(
+    page.getByRole("button", { name: "Save connection", exact: true }),
+  ).toBeDisabled();
   await page.getByLabel("Input USD / 1M tokens", { exact: true }).fill("1");
   await page.getByLabel("Output USD / 1M tokens", { exact: true }).fill("2");
   await page.getByLabel("Use these prices for cost estimates").check();

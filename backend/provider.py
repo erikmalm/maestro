@@ -48,7 +48,29 @@ def network(config, key, method, path, payload=None):
     if response.status_code in (401, 403):
         raise ProviderFailure("Provider rejected access. Check the API key and model permissions.", False)
     if response.status_code == 429:
-        raise ProviderFailure("Provider limit reached. Check quota, billing and rate limits.", False)
+        # Only classify documented codes; never display the provider's raw message or body.
+        try:
+            body = response.json()
+            error = body.get("error", {}) if isinstance(body, dict) else {}
+            code = error.get("code") if isinstance(error, dict) else None
+            kind = error.get("type") if isinstance(error, dict) else None
+        except ValueError:
+            code = kind = None
+        messages = {
+            "credit_balance_exhausted": "Provider API credits are exhausted. Check API billing and credit balance.",
+            "project_spend_limit_exceeded": "Provider project spending limit reached. Check the project's API limits.",
+            "organization_spend_limit_exceeded": "Provider organization spending limit reached. Check the organization's API limits.",
+            "organization_usage_limit_exceeded": "Provider organization API usage limit reached. Check the approved usage limit.",
+            "insufficient_quota": "Provider API quota is unavailable. Check API billing, credits and project limits.",
+            "rate_limit_exceeded": "Provider request rate limit reached. Wait before sending another message.",
+            "slow_down": "Provider requested slower traffic. Wait before sending another message.",
+        }
+        message = messages.get(code) if isinstance(code, str) else None
+        if not message and kind == "insufficient_quota":
+            message = messages["insufficient_quota"]
+        if not message and kind == "rate_limit_error":
+            message = messages["rate_limit_exceeded"]
+        raise ProviderFailure(message or "Provider limit reached. Check quota, billing and rate limits.", False)
     if response.status_code >= 300:
         raise ProviderFailure(f"Provider returned HTTP {response.status_code}. Check the model, endpoint and API format.", response.status_code >= 500)
     try:
