@@ -186,6 +186,33 @@ class ProviderTests(unittest.TestCase):
         finally:
             credentials.session_keys.pop(target, None)
 
+    def test_base_url_rejects_known_keys_before_changing_configuration_or_credentials(self):
+        with self.mock_http():
+            before = self.client.post("/api/provider/test", headers=self.headers).json()
+        for submitted, exposed, target_key in (("", self.key, self.key),
+                                               ("synthetic-replacement-key", "synthetic-replacement-key", self.key),
+                                               ("", self.key, None), ("synthetic-replacement-key", self.key, None)):
+            for encoded in (False, True):
+                path = "".join(f"%{ord(char):02X}" for char in exposed) if encoded else exposed
+                target = self.base + "/" + path
+                if target_key:
+                    credentials.session_keys[target] = target_key
+                try:
+                    with self.subTest(submitted=bool(submitted), target_key=bool(target_key), encoded=encoded), patch.object(credentials, "save", wraps=credentials.save) as save:
+                        response = self.client.put("/api/provider", headers=self.headers, json={
+                            "config": {**self.config, "base_url": target}, "api_key": submitted, "persist": False})
+                        self.assertEqual(response.status_code, 409)
+                        self.assertNotIn(exposed, response.text)
+                        self.assertNotIn(path, response.text)
+                        save.assert_not_called()
+                        self.assertEqual(credentials.read(target)[0], target_key)
+                        self.assertEqual(credentials.read(self.base)[0], self.key)
+                        self.assertEqual(self.client.get("/api/provider").json(), before)
+                        self.assertNotIn(exposed.encode(), backend.DATABASE.read_bytes())
+                        self.assertNotIn(path.encode(), backend.DATABASE.read_bytes())
+                finally:
+                    credentials.session_keys.pop(target, None)
+
     def test_successful_reply_refusal_and_title_redact_dispatched_credentials(self):
         for protocol, kind in (("responses", "output_text"), ("responses", "refusal"), ("chat_completions", "content")):
             with self.subTest(protocol=protocol, kind=kind):

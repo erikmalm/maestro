@@ -2,6 +2,7 @@
 
 from contextlib import closing, contextmanager, asynccontextmanager
 from datetime import datetime
+import hashlib
 import hmac
 import json
 import os
@@ -242,7 +243,8 @@ async def invalid_entry(request: Request, error: RequestValidationError):
 
 @app.get("/health")
 def health():
-    return {"application": "maestro", "mode": "local", "launch_id": os.environ.get("MAESTRO_LAUNCH_ID")}
+    return {"application": "maestro", "mode": "local", "launch_id": os.environ.get("MAESTRO_LAUNCH_ID"),
+            "workspace_id": hashlib.sha256(os.path.normcase(str(DATA_DIR)).encode()).hexdigest()}
 
 
 @app.middleware("http")

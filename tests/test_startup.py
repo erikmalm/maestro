@@ -1,5 +1,6 @@
 """Exercise Windows launch cleanup with synthetic processes and temporary PID files."""
 
+import hashlib
 import os
 from pathlib import Path
 import subprocess
@@ -11,10 +12,11 @@ import unittest
 class HealthTests(unittest.TestCase):
     def test_health_identifies_the_launched_server(self):
         with tempfile.TemporaryDirectory(prefix="maestro-health-test-") as directory:
+            workspace_id = hashlib.sha256(os.path.normcase(str(Path(directory).resolve())).encode()).hexdigest()
             result = subprocess.run(
                 [sys.executable, "-c", "from fastapi.testclient import TestClient; from backend.app import app; "
                  "response = TestClient(app).get('/health'); assert response.status_code == 200; "
-                 "assert response.json() == {'application': 'maestro', 'mode': 'local', 'launch_id': 'test-launch'}"],
+                 f"assert response.json() == {{'application': 'maestro', 'mode': 'local', 'launch_id': 'test-launch', 'workspace_id': '{workspace_id}'}}"],
                 cwd=Path(__file__).resolve().parent.parent,
                 env={**os.environ, "MAESTRO_DATA_DIR": directory, "MAESTRO_LAUNCH_ID": "test-launch"},
                 capture_output=True, text=True, timeout=20,
@@ -35,6 +37,22 @@ $pidPath = Join-Path $dataDirectory 'server.pid'
 $tokens = $null; $parseErrors = $null
 $ast = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $repoDirectory 'scripts/start.ps1'), [ref]$tokens, [ref]$parseErrors)
 if ($parseErrors.Count) { throw 'Launcher did not parse.' }
+$identityStatements = $ast.EndBlock.Statements | Where-Object {
+    $_.Extent.StartOffset -ge ($ast.EndBlock.Statements | Where-Object { $_.Extent.Text.StartsWith('$identityPython =') }).Extent.StartOffset -and
+    $_.Extent.StartOffset -lt ($ast.EndBlock.Statements | Where-Object { $_.Extent.Text.StartsWith('$previewUrl =') }).Extent.StartOffset
+}
+$identify = [scriptblock]::Create(($identityStatements.Extent.Text -join "`n"))
+. $identify
+if ($workspaceId -ne $env:MAESTRO_EXPECTED_WORKSPACE_ID) { throw 'Launcher and backend workspace identities differ.' }
+$originalDirectory = $dataDirectory
+$dataDirectory = (Join-Path $dataDirectory '.').ToUpperInvariant()
+. $identify
+if ($workspaceId -ne $env:MAESTRO_EXPECTED_WORKSPACE_ID) { throw 'Equivalent private directory aliases changed workspace identity.' }
+$dataDirectory = Join-Path (Split-Path -Parent $originalDirectory) 'maestro-different-workspace'
+. $identify
+if ($workspaceId -eq $env:MAESTRO_EXPECTED_WORKSPACE_ID) { throw 'Another private directory reused the workspace identity.' }
+$dataDirectory = $originalDirectory
+. $identify
 # Run the production launch/readiness/catch block; setup, network and processes are mocked.
 $startup = $ast.Find({ param($node)
     $node -is [System.Management.Automation.Language.TryStatementAst] -and
@@ -67,9 +85,15 @@ function Invoke-RestMethod {
     $script:polls++
     if ($mode -eq 'health-exit' -or ($mode -eq 'other-health-exit' -and $polls -eq 2)) { $fakeProcess.HasExited = $true }
     if ($mode -in @('success', 'success-changed-pid', 'health-exit', 'retry-success', 'retry-stale', 'browser-failure', 'other-health', 'missing-health', 'other-health-exit', 'eventual-health')) {
-        $response = @{ application = 'maestro'; mode = 'local'; launch_id = $launchedNonce }
+        $response = @{ application = 'maestro'; mode = 'local'; launch_id = $launchedNonce; workspace_id = $workspaceId }
         if ($mode -like 'other-health*' -or ($mode -eq 'eventual-health' -and $polls -eq 1)) { $response.launch_id = 'another-launch' }
         if ($mode -eq 'missing-health') { $response.Remove('launch_id') }
+        return $response
+    }
+    if ($mode -like 'reuse-*') {
+        $response = @{ application = 'maestro'; mode = 'local'; workspace_id = $workspaceId }
+        if ($mode -eq 'reuse-different') { $response.workspace_id = 'another-workspace' }
+        if ($mode -eq 'reuse-missing') { $response.Remove('workspace_id') }
         return $response
     }
     throw 'Synthetic health timeout'
@@ -91,6 +115,15 @@ function Write-Warning { $script:cleanupWarnings++ }
 $mode = 'browser-failure'; $NoBrowser = $false; $continued = $false; $failure = $null
 try { . $healthProbe; $continued = $true } catch { $failure = $_.Exception.Message }
 if ($continued -or $failure -ne 'Synthetic browser failure') { throw 'Browser failure retried an already-running server.' }
+$NoBrowser = $true
+foreach ($mode in @('reuse-same', 'reuse-different', 'reuse-missing')) {
+    $failure = $null; $launches = 0; $polls = 0; $output = $null
+    try { $output = & $healthProbe } catch { $failure = $_.Exception.Message }
+    if ($launches -or $polls -ne 1) { throw 'Workspace reuse started a process or retried a healthy server.' }
+    if ($mode -eq 'reuse-same') {
+        if ($failure -or $output -ne "Maestro is already running at $previewUrl") { throw 'Matching workspace did not reuse its healthy server.' }
+    } elseif ($failure -notlike '*different or unverified private data directory*') { throw 'Workspace reuse accepted a conflicting or absent identity.' }
+}
 foreach ($mode in @('retry-success', 'retry-stale', 'retry-unrelated', 'cleanup-failure', 'cleanup-live')) {
     $fakeProcess = [pscustomobject]@{ Id = 43210; HasExited = ($mode -eq 'retry-stale') }
     $serverProcess = $null; $launches = 0; $stopped = $false; $failure = $null
@@ -142,7 +175,8 @@ Write-Output 'Startup cleanup scenarios passed.'
             result = subprocess.run(
                 ["powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", harness],
                 cwd=Path(__file__).resolve().parent.parent,
-                env={**os.environ, "MAESTRO_DATA_DIR": directory},
+                env={**os.environ, "MAESTRO_DATA_DIR": directory,
+                     "MAESTRO_EXPECTED_WORKSPACE_ID": hashlib.sha256(os.path.normcase(str(Path(directory).resolve())).encode()).hexdigest()},
                 capture_output=True, text=True, timeout=20,
             )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)

@@ -4,7 +4,7 @@ from datetime import datetime
 import json
 import sqlite3
 import uuid
-from urllib.parse import urlsplit
+from urllib.parse import unquote, urlsplit
 
 import httpx
 
@@ -168,6 +168,9 @@ class Provider:
             config.update(input_usd_per_million=0, output_usd_per_million=0, pricing_verified=True)
         with self.transaction() as state:
             effective_key = None if local else key or credentials.read(config["base_url"])[0]
+            current_key = None if local or state["config"]["protocol"] == "ollama" else credentials.read(state["config"]["base_url"])[0]
+            if any(saved_key and saved_key in url for saved_key in (effective_key, current_key) for url in (config["base_url"], unquote(config["base_url"]))):
+                raise ValueError("Enter an API base URL without the API key.")
             if effective_key and effective_key in config["model"]:
                 raise ValueError("Enter a model ID without the API key.")
             # Model-list access depends on the endpoint/key, not the chat model or API format.

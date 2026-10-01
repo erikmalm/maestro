@@ -94,8 +94,21 @@ function LimitsForm({
   onSave: (limits: Limits) => void;
   busy: boolean;
 }) {
+  const form = useRef<HTMLFormElement>(null);
+  const savedLimits = useRef(limits);
+  useEffect(() => {
+    // Update saved fields without replacing drafts in the other limits form.
+    for (const key of Object.keys(limits) as (keyof Limits)[]) {
+      const input = form.current?.elements.namedItem(key) as HTMLInputElement;
+      if (input?.value && Number(input.value) === savedLimits.current[key]) {
+        input.value = String(limits[key]);
+      }
+    }
+    savedLimits.current = limits;
+  }, [limits]);
   return (
     <form
+      ref={form}
       className="limits-form"
       onSubmit={(event) => {
         event.preventDefault();
@@ -331,16 +344,19 @@ export default function App() {
     };
   }, [mobileNav]);
 
-  function applyWorkspace(next: Workspace) {
-    workspaceRevision.current += 1;
+  function setChatUrl(id: string | null) {
     const url = new URL(window.location.href);
-    if (next.active_chat_id) url.searchParams.set("chat", next.active_chat_id);
+    if (id) url.searchParams.set("chat", id);
     else url.searchParams.delete("chat");
     window.history.replaceState(null, "", url);
+  }
+  function applyWorkspace(next: Workspace) {
+    workspaceRevision.current += 1;
+    setChatUrl(next.active_chat_id);
     setWorkspace(next);
   }
   function refreshWorkspace() {
-    const revision = workspaceRevision.current;
+    const revision = ++workspaceRevision.current;
     void api
       .loadWorkspace()
       .then((next) => {
@@ -356,22 +372,31 @@ export default function App() {
     success?: string,
     selectReturnedChat = false,
   ) {
-    workspaceRevision.current += 1;
+    let revision = ++workspaceRevision.current;
+    let completed = false;
     setBusy(key);
     setError("");
     try {
       let next = await action();
-      const selected = workspace?.active_chat_id;
-      if (!selectReturnedChat && selected && next.active_chat_id !== selected) {
+      completed = true;
+      const selected = selectReturnedChat
+        ? next.active_chat_id
+        : new URLSearchParams(window.location.search).get("chat");
+      if (
+        workspaceRevision.current !== revision ||
+        (selected && next.active_chat_id !== selected)
+      ) {
+        if (selectReturnedChat) setChatUrl(selected);
+        revision = ++workspaceRevision.current;
         next = await api.loadWorkspace(selected);
       }
-      applyWorkspace(next);
+      if (workspaceRevision.current === revision) applyWorkspace(next);
       if (success) setToast(success);
       return true;
     } catch (reason) {
       refreshWorkspace();
       setError(reason instanceof Error ? reason.message : "Please try again.");
-      return false;
+      return completed;
     } finally {
       setBusy("");
     }

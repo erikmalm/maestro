@@ -10,10 +10,14 @@ $dataAbsolute = [IO.Path]::GetFullPath($dataDirectory).TrimEnd('\')
 if ($dataAbsolute -eq $repoAbsolute -or $dataAbsolute.StartsWith($repoAbsolute + '\', [StringComparison]::OrdinalIgnoreCase)) {
     throw 'Choose MAESTRO_DATA_DIR outside the Git checkout.'
 }
+$identityPython = if (Test-Path -LiteralPath $pythonPath) { $pythonPath } else { 'python' }
+$workspaceId = & $identityPython -c "from pathlib import Path; import hashlib, os, sys; repo = Path(sys.argv[1]).resolve(); data = Path(sys.argv[2]).expanduser().resolve(); sys.exit(1) if data == repo or repo in data.parents else None; print(hashlib.sha256(os.path.normcase(str(data)).encode()).hexdigest())" $repoDirectory $dataDirectory
+if ($LASTEXITCODE -ne 0) { throw 'The resolved private data directory must be outside the Git checkout.' }
 $previewUrl = 'http://127.0.0.1:8765'
 try { $health = Invoke-RestMethod -Uri "$previewUrl/health" -TimeoutSec 2; $healthAvailable = $true } catch { $healthAvailable = $false }
 if ($healthAvailable) {
     if ($health.application -ne 'maestro' -or $health.mode -notin @('local', 'preview')) { throw 'Port 8765 is occupied by another application.' }
+    if ($health.workspace_id -ne $workspaceId) { throw 'Maestro is already running with a different or unverified private data directory. Stop that instance using its original MAESTRO_DATA_DIR before starting this workspace.' }
     Write-Output "Maestro is already running at $previewUrl"
     if (-not $NoBrowser) { Start-Process $previewUrl }
     return
@@ -27,8 +31,6 @@ try {
         python -m venv .venv
         if ($LASTEXITCODE -ne 0) { throw 'Python 3.11 or newer is required.' }
     }
-    & $pythonPath -c "from pathlib import Path; import sys; repo = Path(sys.argv[1]).resolve(); data = Path(sys.argv[2]).expanduser().resolve(); sys.exit(1 if data == repo or repo in data.parents else 0)" $repoDirectory $dataDirectory
-    if ($LASTEXITCODE -ne 0) { throw 'The resolved private data directory must be outside the Git checkout.' }
     $env:MAESTRO_DATA_DIR = $dataDirectory
     if (Test-Path -LiteralPath $pidPath) { & (Join-Path $repoDirectory 'scripts/stop.ps1') }
     & $pythonPath -m pip install --quiet --disable-pip-version-check -r backend/requirements.txt

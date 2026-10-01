@@ -57,6 +57,41 @@ test("empty workspace, manual tasks and budgets persist without model calls", as
     .click();
   await expect(page.getByLabel("Per day", { exact: true })).toHaveValue("6");
   await page.getByRole("button", { name: "Close dialog" }).click();
+  await page.getByRole("button", { name: "Settings", exact: true }).click();
+  await page.getByLabel("Per day", { exact: true }).fill("6.00");
+  await page.getByRole("button", { name: "Save limits" }).click();
+  await expect(page.getByLabel("Per day", { exact: true })).toHaveValue("6");
+  await page.getByLabel("Per chat request", { exact: true }).fill("2");
+  await page
+    .getByRole("button", { name: "View usage and manage budgets" })
+    .click();
+  const dialog = page.getByRole("dialog");
+  await dialog.getByLabel("Per chat request", { exact: true }).fill("3");
+  await dialog.getByLabel("Per day", { exact: true }).fill("9");
+  await dialog.getByLabel("Tokens per chat request").fill("110000");
+  await dialog.getByRole("button", { name: "Save limits" }).click();
+  await expect(dialog).not.toBeVisible();
+  await expect(page.getByLabel("Per day", { exact: true })).toHaveValue("9");
+  await expect(page.getByLabel("Tokens per chat request")).toHaveValue(
+    "110000",
+  );
+  await expect(
+    page.getByLabel("Per chat request", { exact: true }),
+  ).toHaveValue("2");
+  await page.getByRole("button", { name: "Save limits" }).click();
+  await expect(page.getByRole("button", { name: "Save limits" })).toBeEnabled();
+  const savedLimits = await (await page.request.get("/api/workspace")).json();
+  expect(savedLimits.limits).toEqual({
+    ...initial.limits,
+    run_usd: 2,
+    daily_usd: 9,
+    max_tokens: 110000,
+  });
+  await page.getByLabel("Per chat request", { exact: true }).fill("1");
+  await page.getByLabel("Per day", { exact: true }).fill("6");
+  await page.getByLabel("Tokens per chat request").fill("100000");
+  await page.getByRole("button", { name: "Save limits" }).click();
+  await expect(page.getByRole("button", { name: "Save limits" })).toBeEnabled();
   await page.getByRole("button", { name: /^Tasks/ }).click();
   await expect(
     page.getByRole("heading", { name: "No tasks yet" }),
@@ -192,6 +227,19 @@ test("connection setup, named persistent chats, isolated context and usage", asy
     (request) =>
       request.url().endsWith("/api/chat") && request.method() === "POST",
   );
+  let failRefresh = true;
+  await page.route("**/api/**", async (route) => {
+    if (
+      failRefresh &&
+      new URL(route.request().url()).pathname === "/api/workspace"
+    ) {
+      failRefresh = false;
+      await route.fulfill({
+        status: 500,
+        json: { detail: "Refresh interrupted." },
+      });
+    } else await route.continue();
+  });
   await page.getByRole("button", { name: "Send message" }).click();
   await expect(
     page.getByText(
@@ -199,6 +247,8 @@ test("connection setup, named persistent chats, isolated context and usage", asy
       { exact: true },
     ),
   ).toBeVisible();
+  await expect(page.getByLabel("Message Maestro")).toHaveValue("");
+  await page.unroute("**/api/**");
   await expect(
     page.getByRole("button", { name: "View usage and manage budgets" }),
   ).toContainText("$0.0015");
