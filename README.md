@@ -1,6 +1,8 @@
 # Maestro
 
-A local web interface for chat with your chosen model, usage tracking and persistent to-dos. Local Ollama chat is verified with real generation and conversation context. Orchestration, background reflection and code self-improvement remain paused.
+A local web interface for persistent chats with your chosen model, usage tracking and to-dos. Workspace, Tasks and Settings expose the working core: live conversation, manual task management and provider configuration.
+
+Maestro currently saves one active provider/model connection. It supports local Ollama or a compatible remote API, but has no autonomous task execution, delegation or model routing between tasks. Optional Ollama web search is the only model-selected tool. The [development plan](DEVELOPMENT_PLAN.md) describes the next functional increments.
 
 ## Run locally
 
@@ -29,15 +31,19 @@ For OpenAI or another API provider:
 
 1. Open **Settings** and choose **Model provider → OpenAI** or **Custom API**. For a custom provider, enter its compatible HTTPS endpoint/local loopback server and API protocol.
 2. Enter the API key and **Connect and load models**. This saves the key and fetches the model list without generating a response. Default storage is Windows Credential Manager. Uncheck persistence to keep a new key only in server memory.
-3. Select/type the desired model ID. The key authorizes your account/project; the model is chosen separately for each chat request. Models listed by an API are not necessarily chat-capable.
+3. Select/type the desired model ID. The key authorizes your account/project; the saved model is used for subsequent chat requests. Models listed by an API are not necessarily chat-capable.
 4. Selecting the exact `gpt-6-luna`, `gpt-6.1-sol` or `gpt-6-astra` ID fills standard OpenAI prices when the dated snapshot is at most 30 days old. For other models/providers or an older snapshot, enter verified input/output prices in USD per million tokens and enable **Use these prices for cost estimates**. Save the connection. Saved prices remain in effect until updated; zero prices are valid only for genuinely free inference.
 5. Return to **Workspace**, send a message, and inspect the answer, token counts and estimated cost. Successful model-list access alone does not verify generation.
 
 OpenAI uses the Responses API. The Chat Completions option supports compatible providers; compatibility and model access depend on that provider. Chat uses actual provider responses and has no canned fallback. Missing settings, unsupported models, exhausted limits and provider errors produce explicit errors. The first version waits for a complete response rather than streaming it.
 
-Conversation history is sent with later messages. **New chat** clears history while keeping usage accounting. Existing demo messages are labelled and excluded from model context. To-dos can be added, completed/reopened and deleted without model calls; automatic agent execution is paused.
+Each chat keeps its own history, and only that chat's messages are sent with later requests. **New chat** preserves previous chats; select them in the sidebar to continue. Chats can be renamed or deleted; deletion removes the conversation and keeps usage accounting. Earlier live history migrates into one **Previous conversation**.
 
-The next proposed increment is a separate Maestro background task process using the same Ollama server. It should prove one queued text-only to-do completing with the browser closed, with persistent progress, pause and shared generation limits, before enabling iterative review or integrations. See the [process boundaries](docs/ARCHITECTURE.md#background-task-process-planned).
+After the first successful reply, Maestro tries once to name the chat using the same model, a bounded first message and the remaining request allowance, without tools. If naming fails, model settings change or the allowance is insufficient, a short title from the first message remains. A manual rename always takes precedence. Usage totals include title calls. Project grouping is a later increment.
+
+To-dos can be added, completed/reopened and deleted without model calls; saving a task does not execute it.
+
+The next increment is a shared generation service, followed by one durable task worker using the same Ollama server and usage ledger. Its first acceptance check is one queued text-only task completing with the browser closed, with pause and restart recovery. Multiple saved model profiles and bounded delegation follow that working path. See the [build sequence](docs/ARCHITECTURE.md#next-build-sequence).
 
 ## Optional automatic web search
 
@@ -48,7 +54,7 @@ Ollama web search is a hosted tool, separate from local model inference. Creatin
 3. Set a **Daily search cap** (default 20; 0 stops search) and **Results per search** (1-3). Click **Test search connection**. It saves the key if necessary and sends one fixed public query, which counts against the cap. Testing keeps automatic search disabled.
 4. After a successful test, check **Let Maestro decide when to search** and **Save search settings**. Chat will show the actual query and numbered source links when search is used. The key remains separate from the local model connection.
 
-Automatic search sends the model's chosen query to Ollama.com; queries can contain terms from the conversation. The key is sent only to the hosted search endpoint and never to the local model. Local models must report tool support. Maestro permits at most one search and two local model calls per message, sharing the reply token allowance and recording both calls' actual usage. Ordinary replies can complete without search. Failed searches show explicit errors and preserve known model usage; they do not silently generate a purported search answer.
+Automatic search sends the model's chosen query to Ollama.com; queries can contain terms from the conversation. The key is sent only to the hosted search endpoint and never to the local model. Local models must report tool support. Maestro permits at most one search and two local model calls for an answer, sharing the reply token allowance and recording both calls' actual usage. The optional first-chat title call uses only the remaining allowance. Ordinary replies can complete without search. Failed searches show explicit errors and preserve known model usage; they do not silently generate a purported search answer.
 
 Search attempts, including tests, failures and interrupted requests, count toward the daily cap. Requests are at least five seconds apart, have a 30-second search timeout and no automatic retry. Rate-limit responses pause further searches and respect `Retry-After` (60 seconds if absent). These controls use the hosted service normally and do not evade site or service restrictions. Search counts and cooldowns are visible in Settings/usage; the search API supplies no billing feed, so search fees are not included in the local model's $0 inference figure. [Ollama's announcement](https://ollama.com/blog/web-search) describes free searches and subscription rate limits without a numerical quota or per-search price.
 
@@ -70,6 +76,8 @@ The Ollama search key uses its own credential scope for `https://ollama.com/api/
 
 Tasks, conversations, model settings and accounting live in `%LOCALAPPDATA%\Maestro\preview`, outside the checkout. An alternative `MAESTRO_DATA_DIR` must also resolve outside it. A public repository contains only reusable source, documentation and synthetic fixtures.
 
+Earlier prototype runs, memory records and simulated accounting remain archived in the private database; their APIs and demo screens have been removed. Existing reflection tables are retained without a runtime. Simulated chat messages are excluded from active history and model context. Real conversations, provider settings and usage accounting are preserved.
+
 When you send API chat, its history and your key go to the configured provider. In Ollama mode, history goes to your local server without any saved provider key. Provider retention rules still apply. OpenAI requests use `store: false`; see [OpenAI data controls](https://developers.openai.com/api/docs/guides/your-data). The backend binds to loopback and requires local session/CSRF protection.
 
 ## Validation
@@ -82,6 +90,6 @@ npm run build
 npm run test:ui
 ```
 
-Browser tests exercise setup/chat/history/usage and automatic search with source persistence against synthetic API/Ollama/search services in a temporary workspace. Windows credential tests use a synthetic key and remove it afterward. Automated checks require no personal credentials or paid calls. Real local tool selection and final generation are verified with synthetic hosted search results; hosted authentication must be verified with the user's key through **Test search connection**. A real LLM check requires either a running local Ollama model or a configured provider key, model and prices.
+Browser tests exercise setup, separate chats, rename/delete, usage and automatic search with source persistence against synthetic API/Ollama/search services in a temporary workspace. Windows credential tests use a synthetic key and remove it afterward. Automated checks require no personal credentials or paid calls. Real local tool selection and final generation are verified with synthetic hosted search results; hosted authentication must be verified with the user's key through **Test search connection**. A real LLM check requires either a running local Ollama model or a configured provider key, model and prices.
 
-The broader [development plan](DEVELOPMENT_PLAN.md) and [architecture](docs/ARCHITECTURE.md) describe planned capabilities. They are not acceptance evidence for the current chat milestone.
+The [architecture](docs/ARCHITECTURE.md) distinguishes the implemented runtime from planned task execution. Automated checks use synthetic providers; they do not establish remote model access or hosted search authentication.

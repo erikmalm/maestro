@@ -10,8 +10,33 @@ const artifacts = join(
   "artifacts",
 );
 
-test("to-dos and budgets persist without model calls", async ({ page }) => {
+test("empty workspace, manual tasks and budgets persist without model calls", async ({
+  page,
+}) => {
   await page.goto("/");
+  await expect(
+    page.getByRole("heading", { name: "Start a conversation" }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: "Open navigation" }),
+  ).not.toBeVisible();
+  await expect(
+    page
+      .getByRole("navigation", { name: "Main navigation" })
+      .getByRole("button"),
+  ).toHaveCount(3);
+  const initial = await (await page.request.get("/api/workspace")).json();
+  expect(initial.tasks).toEqual([]);
+  expect(initial.messages).toEqual([]);
+  expect(initial.chats).toEqual([]);
+  expect(initial.active_chat_id).toBeNull();
+  expect(initial.usage.calls).toBe(0);
+  await mkdir(artifacts, { recursive: true });
+  await page.screenshot({
+    path: join(artifacts, "maestro-workspace.png"),
+    fullPage: true,
+    animations: "disabled",
+  });
   await expect(
     page.getByRole("button", { name: "View usage and manage budgets" }),
   ).toContainText("$0.00");
@@ -29,6 +54,10 @@ test("to-dos and budgets persist without model calls", async ({ page }) => {
     .click();
   await expect(page.getByLabel("Per day", { exact: true })).toHaveValue("6");
   await page.getByRole("button", { name: "Close dialog" }).click();
+  await page.getByRole("button", { name: /^Tasks/ }).click();
+  await expect(
+    page.getByRole("heading", { name: "No tasks yet" }),
+  ).toBeVisible();
   await page.getByRole("button", { name: "New task", exact: true }).click();
   await page
     .getByLabel("What would you like to do?")
@@ -36,8 +65,19 @@ test("to-dos and budgets persist without model calls", async ({ page }) => {
   await page
     .getByLabel("Context & completion criteria")
     .fill("A real local storage task.");
+  await page
+    .getByRole("combobox", { name: "Priority", exact: true })
+    .selectOption("high");
   await page.getByRole("button", { name: "Save task" }).click();
-  await page.getByRole("button", { name: /^Tasks/ }).click();
+  await expect(
+    page.getByText("A real local storage task.", { exact: true }),
+  ).toBeVisible();
+  await expect(page.getByText("High priority", { exact: true })).toBeVisible();
+  await page.screenshot({
+    path: join(artifacts, "maestro-tasks.png"),
+    fullPage: true,
+    animations: "disabled",
+  });
   await page
     .getByRole("button", {
       name: "Complete Synthetic persistent to-do",
@@ -61,9 +101,12 @@ test("to-dos and budgets persist without model calls", async ({ page }) => {
   await expect(
     page.getByText("Synthetic persistent to-do", { exact: true }),
   ).not.toBeVisible();
+  const after = await (await page.request.get("/api/workspace")).json();
+  expect(after.tasks).toEqual([]);
+  expect(after.usage).toEqual(initial.usage);
 });
 
-test("connection setup, HTTP chat, conversation context and usage", async ({
+test("connection setup, named persistent chats, isolated context and usage", async ({
   page,
 }) => {
   await page.goto("/");
@@ -125,6 +168,10 @@ test("connection setup, HTTP chat, conversation context and usage", async ({
   await page
     .getByLabel("Message Maestro")
     .fill("Remember the codeword JUNIPER.");
+  const firstSend = page.waitForRequest(
+    (request) =>
+      request.url().endsWith("/api/chat") && request.method() === "POST",
+  );
   await page.getByRole("button", { name: "Send message" }).click();
   await expect(
     page.getByText(
@@ -134,7 +181,13 @@ test("connection setup, HTTP chat, conversation context and usage", async ({
   ).toBeVisible();
   await expect(
     page.getByRole("button", { name: "View usage and manage budgets" }),
-  ).toContainText("$0.0014");
+  ).toContainText("$0.0015");
+  await expect(
+    page.getByRole("heading", { name: "Juniper codeword", exact: true }),
+  ).toBeVisible();
+  const juniperId = new URL(page.url()).searchParams.get("chat");
+  expect(juniperId).toBeTruthy();
+  expect((await firstSend).postDataJSON().chat_id).toBe(juniperId);
   await page.getByLabel("Message Maestro").fill("What was the codeword?");
   await page.getByRole("button", { name: "Send message" }).click();
   await expect(
@@ -146,7 +199,7 @@ test("connection setup, HTTP chat, conversation context and usage", async ({
   ).toBeVisible();
   await expect(
     page.getByRole("button", { name: "View usage and manage budgets" }),
-  ).toContainText("$0.0028");
+  ).toContainText("$0.0029");
   await page.screenshot({
     path: join(artifacts, "maestro-provider-chat.png"),
     fullPage: true,
@@ -155,16 +208,123 @@ test("connection setup, HTTP chat, conversation context and usage", async ({
   await page
     .getByRole("button", { name: "View usage and manage budgets" })
     .click();
-  await expect(page.getByText("2,000", { exact: true })).toBeVisible();
-  await expect(page.getByText("400", { exact: true })).toBeVisible();
+  await expect(page.getByText("2,100", { exact: true })).toBeVisible();
+  await expect(page.getByText("405", { exact: true })).toBeVisible();
   await page.getByRole("button", { name: "Close dialog" }).click();
+  await page.getByLabel("Message Maestro").fill("Unsent Juniper draft");
   await page.getByRole("button", { name: "New chat", exact: true }).click();
+  await expect(
+    page.getByRole("heading", { name: "New chat", exact: true }),
+  ).toBeVisible();
+  await expect(page.getByLabel("Message Maestro")).toHaveValue("");
   await expect(
     page.getByText(/Earlier message: Remember the codeword JUNIPER/),
   ).not.toBeVisible();
   await expect(
     page.getByRole("button", { name: "View usage and manage budgets" }),
-  ).toContainText("$0.0028");
+  ).toContainText("$0.0029");
+  await expect(
+    page.getByRole("button", {
+      name: "Open chat: Juniper codeword",
+      exact: true,
+    }),
+  ).toBeVisible();
+  await page
+    .getByLabel("Message Maestro")
+    .fill("Keep this conversation separate.");
+  await page.getByRole("button", { name: "Send message" }).click();
+  await expect(
+    page.getByText(
+      "Synthetic HTTP provider received: Keep this conversation separate.",
+      { exact: true },
+    ),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("heading", {
+      name: "Independent conversation",
+      exact: true,
+    }),
+  ).toBeVisible();
+  await page.getByLabel("Message Maestro").fill("Unsent independent draft");
+  await page
+    .getByRole("button", { name: "Open chat: Juniper codeword", exact: true })
+    .click();
+  await expect(page.getByLabel("Message Maestro")).toHaveValue("");
+  await expect(
+    page.getByText(/Earlier message: Remember the codeword JUNIPER/),
+  ).toBeVisible();
+  expect(new URL(page.url()).searchParams.get("chat")).toBe(juniperId);
+  // Saving settings must preserve an older selected thread even when mutations return the latest one.
+  await page
+    .getByRole("button", { name: "View usage and manage budgets" })
+    .click();
+  await page.getByRole("button", { name: "Save limits", exact: true }).click();
+  await expect(
+    page.getByRole("button", { name: "Close dialog" }),
+  ).not.toBeVisible();
+  await expect(
+    page.getByRole("heading", { name: "Juniper codeword", exact: true }),
+  ).toBeVisible();
+  const beforeMetadata = await (
+    await page.request.get("/api/workspace")
+  ).json();
+  expect(beforeMetadata.usage.input_tokens).toBe(3200);
+  expect(beforeMetadata.usage.output_tokens).toBe(610);
+  expect(beforeMetadata.usage.calls).toBe(5);
+  expect(beforeMetadata.chats).toHaveLength(2);
+  await page.getByRole("button", { name: "Rename chat", exact: true }).click();
+  await page.getByLabel("Chat title", { exact: true }).fill("Juniper notes");
+  await page.getByRole("button", { name: "Save title", exact: true }).click();
+  await expect(page.getByRole("dialog")).not.toBeVisible();
+  await page.reload();
+  await expect(
+    page.getByRole("heading", { name: "Juniper notes", exact: true }),
+  ).toBeVisible();
+  expect(new URL(page.url()).searchParams.get("chat")).toBe(juniperId);
+  await expect(
+    page.getByText(/Earlier message: Remember the codeword JUNIPER/),
+  ).toBeVisible();
+  await page.screenshot({
+    path: join(artifacts, "maestro-chat-threads.png"),
+    fullPage: true,
+    animations: "disabled",
+  });
+  await page
+    .getByRole("button", {
+      name: "Open chat: Independent conversation",
+      exact: true,
+    })
+    .click();
+  await expect(
+    page.getByRole("heading", {
+      name: "Independent conversation",
+      exact: true,
+    }),
+  ).toBeVisible();
+  const deletedId = new URL(page.url()).searchParams.get("chat");
+  await page.getByRole("button", { name: "Delete chat", exact: true }).click();
+  await page
+    .getByRole("dialog")
+    .getByRole("button", { name: "Delete chat", exact: true })
+    .click();
+  await expect(page.getByRole("dialog")).not.toBeVisible();
+  await expect(
+    page.getByRole("heading", { name: "Juniper notes", exact: true }),
+  ).toBeVisible();
+  const afterMetadata = await (await page.request.get("/api/workspace")).json();
+  expect(afterMetadata.chats).toHaveLength(1);
+  expect(afterMetadata.usage).toEqual(beforeMetadata.usage);
+  await expect(
+    page.getByRole("button", {
+      name: "Open chat: Independent conversation",
+      exact: true,
+    }),
+  ).not.toBeVisible();
+  await page.goto(`/?chat=${deletedId}`);
+  await expect(
+    page.getByRole("heading", { name: "Juniper notes", exact: true }),
+  ).toBeVisible();
+  expect(new URL(page.url()).searchParams.get("chat")).toBe(juniperId);
   await page.getByRole("button", { name: "Settings", exact: true }).click();
   await page
     .getByRole("button", { name: "Remove API key", exact: true })
@@ -255,11 +415,56 @@ test("mobile chat, settings and navigation fit the viewport", async ({
       () => document.documentElement.scrollWidth <= innerWidth,
     ),
   ).toBe(true);
-  await page.getByRole("button", { name: "Open navigation" }).click();
+  // Hidden navigation must also be removed from keyboard focus and the accessibility tree.
+  await expect(
+    page.getByRole("navigation", { name: "Main navigation" }),
+  ).not.toBeVisible();
+  const menu = page.getByRole("button", { name: "Open navigation" });
+  await menu.focus();
+  // Tabbing through the closed page cannot reach the off-screen sidebar.
+  for (let index = 0; index < 8; index++) {
+    await page.keyboard.press("Tab");
+    expect(
+      await page.evaluate(() => !!document.activeElement?.closest(".sidebar")),
+    ).toBe(false);
+  }
+  await expect(page.locator(".usage-tokens")).toBeVisible();
+  await page.screenshot({
+    path: join(artifacts, "maestro-workspace-mobile.png"),
+    fullPage: true,
+    animations: "disabled",
+  });
+  await menu.click();
+  const drawer = page.getByRole("dialog", { name: "Navigation", exact: true });
+  await expect(drawer).toBeVisible();
+  await expect(
+    drawer.getByRole("button", { name: "Close navigation" }),
+  ).toBeFocused();
+  await expect(page.locator(".main-shell")).toHaveJSProperty("inert", true);
+  const drawerButtons = drawer.getByRole("button");
+  await page.keyboard.press("Shift+Tab");
+  await expect(drawerButtons.last()).toBeFocused();
+  await page.keyboard.press("Tab");
+  await expect(drawerButtons.first()).toBeFocused();
+  for (let index = 0; index < (await drawerButtons.count()) + 2; index++) {
+    await page.keyboard.press("Tab");
+    expect(
+      await page.evaluate(() => !!document.activeElement?.closest(".sidebar")),
+    ).toBe(true);
+  }
+  await page.keyboard.press("Escape");
+  await expect(drawer).not.toBeVisible();
+  await expect(menu).toBeFocused();
+  await expect(page.locator(".main-shell")).toHaveJSProperty("inert", false);
+  await menu.click();
+  await drawer.getByRole("button", { name: "Close navigation" }).click();
+  await expect(menu).toBeFocused();
+  await menu.click();
   await page.getByRole("button", { name: "Settings", exact: true }).click();
   await expect(
     page.getByRole("heading", { name: "Model connection" }),
   ).toBeVisible();
+  await expect(menu).toBeFocused();
   expect(
     await page.evaluate(
       () => document.documentElement.scrollWidth <= innerWidth,
@@ -349,8 +554,8 @@ test("local Ollama chat needs no key or USD budget and records native tokens", a
   await Promise.all([
     page.waitForResponse(
       (response) =>
-        response.url().endsWith("/api/chat") &&
-        response.request().method() === "DELETE" &&
+        response.url().endsWith("/api/chats") &&
+        response.request().method() === "POST" &&
         response.ok(),
     ),
     page.getByRole("button", { name: "New chat", exact: true }).click(),
@@ -359,7 +564,7 @@ test("local Ollama chat needs no key or USD budget and records native tokens", a
     name: "View usage and manage budgets",
   });
   await usageButton.click();
-  for (const label of ["Per run", "Per day", "Per month"]) {
+  for (const label of ["Per chat request", "Per day", "Per month"]) {
     await page.getByLabel(label, { exact: true }).fill("0");
   }
   await page.getByRole("button", { name: "Save limits" }).click();
@@ -390,9 +595,12 @@ test("local Ollama chat needs no key or USD budget and records native tokens", a
   const after = (await (await page.request.get("/api/workspace")).json()).usage;
   expect(after.today_usd).toBe(before.today_usd);
   expect(after.month_usd).toBe(before.month_usd);
-  expect(after.input_tokens).toBe(before.input_tokens + 200);
-  expect(after.output_tokens).toBe(before.output_tokens + 40);
-  expect(after.calls).toBe(before.calls + 2);
+  expect(after.input_tokens).toBe(before.input_tokens + 220);
+  expect(after.output_tokens).toBe(before.output_tokens + 45);
+  expect(after.calls).toBe(before.calls + 3);
+  await expect(
+    page.getByRole("heading", { name: "Cedar codeword", exact: true }),
+  ).toBeVisible();
   await page.reload();
   await expect(
     page.getByText(/Earlier message: Remember codeword CEDAR/),
@@ -481,8 +689,8 @@ test("verified search key enables bounded local-model search with persistent sou
   await Promise.all([
     page.waitForResponse(
       (response) =>
-        response.url().endsWith("/api/chat") &&
-        response.request().method() === "DELETE" &&
+        response.url().endsWith("/api/chats") &&
+        response.request().method() === "POST" &&
         response.ok(),
     ),
     page.getByRole("button", { name: "New chat", exact: true }).click(),
@@ -519,8 +727,15 @@ test("verified search key enables bounded local-model search with persistent sou
     page.getByText(/Automatic web search.*2 \/ 2 today/),
   ).toBeVisible();
   const after = await (await page.request.get("/api/workspace")).json();
-  expect(after.usage.input_tokens).toBe(before.usage.input_tokens + 200);
-  expect(after.usage.output_tokens).toBe(before.usage.output_tokens + 30);
+  expect(after.usage.input_tokens).toBe(before.usage.input_tokens + 220);
+  expect(after.usage.output_tokens).toBe(before.usage.output_tokens + 35);
+  expect(after.usage.calls).toBe(before.usage.calls + 3);
+  await expect(
+    page.getByRole("heading", {
+      name: "Ollama search documentation",
+      exact: true,
+    }),
+  ).toBeVisible();
   expect(after.usage.today_usd).toBe(before.usage.today_usd);
   expect(after.web_search.config.enabled).toBe(true);
   expect(after.web_search.searches_today).toBe(2);

@@ -18,7 +18,6 @@ from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field
 from starlette.middleware.trustedhost import TrustedHostMiddleware
-from backend.reflection import ReflectionEngine
 from backend.provider import Provider
 from backend import credentials
 from backend.web_search import WebSearch
@@ -45,33 +44,57 @@ def identifier() -> str:
 
 
 def seed_workspace() -> dict:
-    stamp = now()
-    tasks = [
-        {"id": "sample-documents", "title": "Review the latest financial documents", "details": "Find the key changes and questions worth following up.", "priority": "high", "done": False, "agent": "Document analyst", "created_at": stamp},
-        {"id": "sample-week", "title": "Make a clear plan for the week", "details": "Break the work into a few achievable next steps.", "priority": "normal", "done": False, "agent": "Work organizer", "created_at": stamp},
-        {"id": "sample-workflow", "title": "Explore a better research workflow", "details": "Compare a few approaches and propose a practical improvement.", "priority": "normal", "done": False, "agent": "Coordinator", "created_at": stamp},
-    ]
-    steps = [
-        {"title": "Coordinator made a plan", "detail": "Defined the outcome and selected the right specialist."},
-        {"title": "Specialist prepared a draft", "detail": "Worked through the assignment using synthetic example context."},
-        {"title": "Reviewer checked the result", "detail": "Checked coverage and completion criteria. Demo review passed."},
-    ]
-    runs = [
-        {"id": "sample-run-one", "title": "Outline a document review", "agent": "Document analyst", "cost": 0.24, "input_tokens": 13000, "output_tokens": 4200, "created_at": stamp, "steps": steps},
-        {"id": "sample-run-two", "title": "Organize a project into next steps", "agent": "Work organizer", "cost": 0.18, "input_tokens": 8400, "output_tokens": 2860, "created_at": stamp, "steps": steps},
-    ]
     return {
-        "tasks": tasks, "runs": runs, "messages": [],
-        "memories": [
-            {"id": "sample-memory-one", "text": "Keep summaries concise, with clear next steps.", "category": "Example preference"},
-            {"id": "sample-memory-two", "text": "Include source references when reviewing documents.", "category": "Example workflow"},
-        ],
-        "limits": {"run_usd": 1.0, "daily_usd": 5.0, "monthly_usd": 50.0, "max_tokens": 100000, "max_refinements": 2, "max_minutes": 10},
-        "ledger": [
-            {"at": stamp, "cost": 0.24, "input_tokens": 13000, "output_tokens": 4200, "calls": 6},
-            {"at": stamp, "cost": 0.18, "input_tokens": 8400, "output_tokens": 2860, "calls": 4},
-        ],
+        "tasks": [], "chats": [],
+        "limits": {"run_usd": 1.0, "daily_usd": 5.0, "monthly_usd": 50.0, "max_tokens": 100000},
+        "working_core_migrated": True,
     }
+
+
+def migrate_workspace(state: dict) -> None:
+    """Retire preview records without erasing private content or real accounting."""
+    if state.get("working_core_migrated"):
+        migrate_chats(state)
+        return
+    archive = state.setdefault("legacy_preview", {})
+    for key in ("runs", "memories", "ledger"):
+        if key in state:
+            archive[key] = state.pop(key)
+    sample_ids = {"sample-documents", "sample-week", "sample-workflow"}
+    archive["tasks"] = [task for task in state["tasks"] if task["id"] in sample_ids]
+    state["tasks"] = [task for task in state["tasks"] if task["id"] not in sample_ids]
+    archive["task_assignments"] = {task["id"]: task.pop("agent") for task in state["tasks"] if "agent" in task}
+    # Before live chat was introduced, every saved message was simulated.
+    if not state.pop("live_chat_migrated", False):
+        for message in state["messages"]:
+            message.setdefault("demo", True)
+    archive["messages"] = [message for message in state["messages"] if message.get("demo")]
+    state["messages"] = [message for message in state["messages"] if not message.get("demo")]
+    archive["limits"] = {key: state["limits"].pop(key) for key in ("max_refinements", "max_minutes") if key in state["limits"]}
+    state["working_core_migrated"] = True
+    migrate_chats(state)
+
+
+def create_chat_record(title: str = "New chat", messages=None) -> dict:
+    stamp = now()
+    return {"id": identifier(), "title": title, "created_at": stamp, "updated_at": stamp,
+            "messages": messages or [], "title_source": "fallback", "title_attempted": bool(messages)}
+
+
+def migrate_chats(state: dict) -> None:
+    messages = state.pop("messages", [])
+    state.setdefault("chats", [])
+    if messages:
+        state["chats"].append(create_chat_record("Previous conversation", messages))
+
+
+def selected_chat(state: dict, chat_id: str | None = None) -> dict | None:
+    if chat_id is not None:
+        chat = next((item for item in state["chats"] if item["id"] == chat_id), None)
+        if chat is None:
+            raise HTTPException(404, "That chat could not be found.")
+        return chat
+    return max(state["chats"], key=lambda item: item["updated_at"], default=None)
 
 
 @contextmanager
@@ -82,42 +105,43 @@ def workspace_transaction():
         connection.execute("BEGIN IMMEDIATE")
         row = connection.execute("SELECT value FROM workspace WHERE id=1").fetchone()
         state = json.loads(row[0]) if row else seed_workspace()
-        if not state.get("live_chat_migrated"):
-            for message in state["messages"]:
-                message.setdefault("demo", True)
-            state["live_chat_migrated"] = True
+        migrate_workspace(state)
         yield state
         connection.execute("INSERT INTO workspace VALUES (1, ?) ON CONFLICT(id) DO UPDATE SET value=excluded.value", (json.dumps(state),))
 
 
-def snapshot(state: dict) -> dict:
-    current = datetime.now(TIMEZONE)
-    today = [entry for entry in state["ledger"] if datetime.fromisoformat(entry["at"]).astimezone(TIMEZONE).date() == current.date()]
-    month = [entry for entry in state["ledger"] if datetime.fromisoformat(entry["at"]).astimezone(TIMEZONE).strftime("%Y-%m") == current.strftime("%Y-%m")]
+def read_workspace() -> dict:
+    """Read without claiming a write lock; initialize or migrate only when needed."""
+    if DATABASE.is_file():
+        with closing(sqlite3.connect(DATABASE.resolve().as_uri() + "?mode=ro", uri=True, timeout=10)) as connection:
+            try:
+                row = connection.execute("SELECT value FROM workspace WHERE id=1").fetchone()
+            except sqlite3.OperationalError as error:
+                if str(error) != "no such table: workspace":
+                    raise
+                row = None
+        if row:
+            state = json.loads(row[0])
+            if state.get("working_core_migrated") and "chats" in state and "messages" not in state:
+                return state
+    # Re-read under the lock so concurrent first loads cannot seed or migrate twice.
+    with workspace_transaction() as state:
+        return state
+
+
+def snapshot(state: dict, chat_id: str | None = None) -> dict:
+    chat = selected_chat(state, chat_id)
     return {
-        **{key: state[key] for key in ("tasks", "memories", "runs", "messages", "limits")},
-        "demo_usage": {
-            "today_usd": round(sum(entry["cost"] for entry in today), 6),
-            "month_usd": round(sum(entry["cost"] for entry in month), 6),
-            "input_tokens": sum(entry["input_tokens"] for entry in today),
-            "output_tokens": sum(entry["output_tokens"] for entry in today),
-            "calls": sum(entry["calls"] for entry in today), "reserved_usd": 0,
-        },
+        **{key: state[key] for key in ("tasks", "limits")},
+        "chats": [{key: item[key] for key in ("id", "title", "created_at", "updated_at")}
+                  for item in sorted(state["chats"], key=lambda item: item["updated_at"], reverse=True)],
+        "active_chat_id": chat["id"] if chat else None,
+        "messages": chat["messages"] if chat else [],
         "usage": Provider(DATABASE, TIMEZONE).usage(),
         "provider": Provider(DATABASE, TIMEZONE).status(),
         "web_search": WebSearch(DATABASE, TIMEZONE).summary(),
-        "capabilities": {"mode": "local", "live_ai": True, "github_pr": False, "secure_credentials": os.name == "nt"},
+        "capabilities": {"mode": "local", "live_ai": True, "task_execution": False, "delegation": False, "github_pr": False, "secure_credentials": os.name == "nt"},
     }
-
-
-def charge_demo(state: dict, cost: float, input_tokens: int, output_tokens: int, calls: int) -> None:
-    usage = snapshot(state)["demo_usage"]
-    limits = state["limits"]
-    if cost > limits["run_usd"] or usage["today_usd"] + cost > limits["daily_usd"] or usage["month_usd"] + cost > limits["monthly_usd"]:
-        raise HTTPException(409, "This preview would exceed your budget. Adjust your limits to continue.")
-    if input_tokens + output_tokens > limits["max_tokens"]:
-        raise HTTPException(409, "This preview would exceed your per-run token limit.")
-    state["ledger"].append({"at": now(), "cost": cost, "input_tokens": input_tokens, "output_tokens": output_tokens, "calls": calls})
 
 
 class StrictModel(BaseModel):
@@ -136,6 +160,11 @@ class DoneInput(StrictModel):
 
 class TextInput(StrictModel):
     text: str = Field(min_length=1, max_length=4000)
+    chat_id: str | None = Field(default=None, min_length=1, max_length=100)
+
+
+class ChatTitleInput(StrictModel):
+    title: str = Field(min_length=1, max_length=120)
 
 
 class LimitsInput(StrictModel):
@@ -143,32 +172,9 @@ class LimitsInput(StrictModel):
     daily_usd: float = Field(ge=0, le=100000, allow_inf_nan=False)
     monthly_usd: float = Field(ge=0, le=1000000, allow_inf_nan=False)
     max_tokens: int = Field(ge=0, le=10000000)
-    max_refinements: int = Field(ge=0, le=10)
-    max_minutes: int = Field(ge=1, le=120)
 
 
-class ReflectionConfig(StrictModel):
-    enabled: bool = False
-    interval_minutes: int = Field(default=30, ge=5, le=1440)
-    cycle_usd: float = Field(default=0.1, ge=0, le=10, allow_inf_nan=False)
-    daily_usd: float = Field(default=0.25, ge=0, le=100, allow_inf_nan=False)
-    max_passes: int = Field(default=3, ge=1, le=3)
-    model: str = Field(default="", max_length=100, pattern=r"^[A-Za-z0-9_.:-]*$")
-    input_usd_per_million: float = Field(default=0, ge=0, le=10000, allow_inf_nan=False)
-    output_usd_per_million: float = Field(default=0, ge=0, le=10000, allow_inf_nan=False)
-    pricing_verified: bool = False
-
-
-class ReflectionFeedback(StrictModel):
-    text: str = Field(min_length=1, max_length=2000)
-    share: bool = False
-
-
-class ReflectionReview(StrictModel):
-    accept: bool
-
-
-class ReflectionCharge(StrictModel):
+class ChargeInput(StrictModel):
     billed_usd: float = Field(ge=0, le=100000, allow_inf_nan=False)
 
 
@@ -207,20 +213,14 @@ def provider():
     return Provider(DATABASE, TIMEZONE)
 
 
-def reflection_engine():
-    return ReflectionEngine(DATABASE, TIMEZONE)
-
-
 @asynccontextmanager
 async def lifespan(application):
-    engine = reflection_engine()
-    engine.configure({**engine.status()["config"], "enabled": False})
     provider().recover()
     WebSearch(DATABASE, TIMEZONE).recover()
-    yield  # Background orchestration is paused for the live-chat milestone.
+    yield
 
 
-app = FastAPI(title="Maestro local preview", docs_url=None, redoc_url=None, openapi_url=None, lifespan=lifespan)
+app = FastAPI(title="Maestro", docs_url=None, redoc_url=None, openapi_url=None, lifespan=lifespan)
 app.add_middleware(TrustedHostMiddleware, allowed_hosts=["127.0.0.1", "localhost", "testserver"])
 
 
@@ -232,7 +232,7 @@ async def invalid_entry(request: Request, error: RequestValidationError):
 
 @app.get("/health")
 def health():
-    return {"application": "maestro", "mode": "preview"}
+    return {"application": "maestro", "mode": "local"}
 
 
 @app.middleware("http")
@@ -268,36 +268,36 @@ def session(response: Response):
 
 
 @app.get("/api/workspace")
-def get_workspace():
+def get_workspace(chat_id: str | None = None):
+    return snapshot(read_workspace(), chat_id)
+
+
+@app.post("/api/chats")
+def create_chat():
     with workspace_transaction() as state:
+        chat = create_chat_record()
+        state["chats"].append(chat)
+        return snapshot(state, chat["id"])
+
+
+@app.patch("/api/chats/{chat_id}")
+def rename_chat(chat_id: str, entry: ChatTitleInput):
+    with workspace_transaction() as state:
+        chat = selected_chat(state, chat_id)
+        chat.update(title=entry.title, title_source="manual", updated_at=now())
+        return snapshot(state, chat_id)
+
+
+@app.delete("/api/chats/{chat_id}")
+def delete_chat(chat_id: str):
+    # The workspace and provider reservation share this immediate SQLite lock.
+    with workspace_transaction() as state:
+        selected_chat(state, chat_id)
+        if any(entry["status"] == "reserved" and entry.get("thread_id") == chat_id
+               for entry in provider().read_state()["ledger"]):
+            raise HTTPException(409, "Wait for this chat's current request to finish before deleting it.")
+        state["chats"] = [chat for chat in state["chats"] if chat["id"] != chat_id]
         return snapshot(state)
-
-
-@app.get("/api/reflection")
-def get_reflection():
-    return reflection_engine().status()
-
-
-@app.put("/api/reflection/config")
-def configure_reflection(entry: ReflectionConfig):
-    if entry.enabled:
-        raise HTTPException(409, "Background reflection is paused while the live-chat milestone is completed.")
-    reflection_engine().configure(entry.model_dump())
-    return reflection_engine().status()
-
-
-@app.post("/api/reflection/feedback")
-def reflection_feedback(entry: ReflectionFeedback):
-    try:
-        reflection_engine().evidence(entry.text, entry.share)
-    except ValueError as error:
-        raise HTTPException(409, str(error))
-    return reflection_engine().status()
-
-
-@app.post("/api/reflection/run")
-def run_reflection():
-    raise HTTPException(409, "Background reflection is paused while the live-chat milestone is completed.")
 
 
 @app.get("/api/provider")
@@ -366,46 +366,18 @@ def remove_provider_key():
 
 
 @app.post("/api/provider/charges/{entry_id}/reconcile")
-def reconcile_provider_charge(entry_id: str, entry: ReflectionCharge):
+def reconcile_provider_charge(entry_id: str, entry: ChargeInput):
     try:
         provider().reconcile(entry_id, entry.billed_usd)
     except ValueError as error:
         raise HTTPException(409, str(error)) from None
-    with workspace_transaction() as state:
-        return snapshot(state)
-
-
-@app.post("/api/reflection/jobs/{job_id}/review")
-def review_reflection(job_id: str, entry: ReflectionReview):
-    try:
-        reflection_engine().review(job_id, entry.accept)
-    except ValueError as error:
-        raise HTTPException(409, str(error)) from None
-    return reflection_engine().status()
-
-
-@app.delete("/api/reflection/history")
-def clear_reflection_history():
-    try:
-        reflection_engine().clear_history()
-    except ValueError as error:
-        raise HTTPException(409, str(error)) from None
-    return reflection_engine().status()
-
-
-@app.post("/api/reflection/charges/{entry_id}/reconcile")
-def reconcile_reflection_charge(entry_id: str, entry: ReflectionCharge):
-    try:
-        reflection_engine().reconcile(entry_id, entry.billed_usd)
-    except ValueError as error:
-        raise HTTPException(409, str(error)) from None
-    return reflection_engine().status()
+    return snapshot(read_workspace())
 
 
 @app.post("/api/tasks")
 def create_task(entry: TaskInput):
     with workspace_transaction() as state:
-        state["tasks"].insert(0, {"id": identifier(), **entry.model_dump(), "done": False, "agent": "Coordinator", "created_at": now()})
+        state["tasks"].insert(0, {"id": identifier(), **entry.model_dump(), "done": False, "created_at": now()})
         return snapshot(state)
 
 
@@ -426,74 +398,26 @@ def remove_task(task_id: str):
         return snapshot(state)
 
 
-@app.post("/api/tasks/{task_id}/preview")
-def simulate_task(task_id: str):
-    with workspace_transaction() as state:
-        task = next((task for task in state["tasks"] if task["id"] == task_id), None)
-        if task is None:
-            raise HTTPException(404, "That task could not be found.")
-        if task["done"]:
-            raise HTTPException(409, "Reopen this task before previewing a run.")
-        charge_demo(state, 0.02, 1024, 384, 3)
-        state["runs"].insert(0, {
-            "id": identifier(), "title": task["title"], "agent": task["agent"], "cost": 0.02,
-            "input_tokens": 1024, "output_tokens": 384, "created_at": now(),
-            "steps": [
-                {"title": "Coordinator planned the assignment", "detail": "A simulated plan was created. No model was called."},
-                {"title": f"{task['agent']} prepared an example result", "detail": "This preview shows the delegation flow. It does not perform the real task."},
-                {"title": "Reviewer checked the example", "detail": "Simulation finished. Your real task remains open until you complete it."},
-            ],
-        })
-        return snapshot(state)
-
-
 @app.post("/api/chat")
 def chat(entry: TextInput):
     with workspace_transaction() as state:
-        pass  # Initialize storage before provider dispatch, then release the DB lock.
+        target = selected_chat(state, entry.chat_id)
+        if target is None:
+            target = create_chat_record()
+            state["chats"].append(target)
+        chat_id = target["id"]
     try:
-        provider().chat(entry.text)
+        provider().chat(entry.text, chat_id)
     except ValueError as error:
         raise HTTPException(409, str(error)) from None
-    with workspace_transaction() as state:
-        return snapshot(state)
-
-
-@app.delete("/api/chat")
-def clear_chat():
-    try:
-        with provider().transaction(with_db=True) as (provider_state, db):
-            if any(x["status"] == "reserved" for x in provider_state["ledger"]):
-                raise ValueError("Wait for the current request to finish before starting a new chat.")
-            row = db.execute("SELECT value FROM workspace WHERE id=1").fetchone()
-            if row:
-                state = json.loads(row[0])
-                state["messages"] = []
-                db.execute("UPDATE workspace SET value=? WHERE id=1", (json.dumps(state),))
-    except ValueError as error:
-        raise HTTPException(409, str(error)) from None
-    with workspace_transaction() as state:
-        return snapshot(state)
+    state = read_workspace()
+    return snapshot(state, chat_id if any(item["id"] == chat_id for item in state["chats"]) else None)
 
 
 @app.put("/api/limits")
 def put_limits(entry: LimitsInput):
     with workspace_transaction() as state:
         state["limits"] = entry.model_dump()
-        return snapshot(state)
-
-
-@app.post("/api/memory")
-def remember(entry: TextInput):
-    with workspace_transaction() as state:
-        state["memories"].insert(0, {"id": identifier(), "text": entry.text, "category": "Saved by you"})
-        return snapshot(state)
-
-
-@app.delete("/api/memory/{memory_id}")
-def forget(memory_id: str):
-    with workspace_transaction() as state:
-        state["memories"] = [memory for memory in state["memories"] if memory["id"] != memory_id]
         return snapshot(state)
 
 

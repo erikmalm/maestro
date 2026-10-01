@@ -38,6 +38,16 @@ with tempfile.TemporaryDirectory(prefix="maestro-browser-") as directory:
                 return False
             return True
 
+        def title(self, messages):
+            text = json.dumps(messages).upper()
+            if "JUNIPER" in text:
+                return "Juniper codeword"
+            if "CEDAR" in text:
+                return "Cedar codeword"
+            if "SEARCH" in text:
+                return "Ollama search documentation"
+            return "Independent conversation"
+
         def do_GET(self):
             if self.path == "/api/tags":
                 if self.headers.get("Authorization"):
@@ -54,6 +64,11 @@ with tempfile.TemporaryDirectory(prefix="maestro-browser-") as directory:
                 request = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
                 if self.path == "/api/show":
                     return self.reply(200, {"details": {"format": "gguf"}, "capabilities": ["completion", "tools"]})
+                if request["messages"][0]["content"].startswith("Create a short, specific title"):
+                    assert not request.get("tools")
+                    assert request["options"]["num_predict"] <= 64
+                    return self.reply(200, {"done": True, "message": {"role": "assistant", "content": self.title(request["messages"][1:])},
+                        "prompt_eval_count": 20, "eval_count": 5})
                 current = next(message["content"] for message in reversed(request["messages"]) if message["role"] == "user")
                 if request.get("tools") and current == "Find current Ollama web search documentation":
                     return self.reply(200, {"done": True, "message": {"role": "assistant", "content": "",
@@ -74,6 +89,11 @@ with tempfile.TemporaryDirectory(prefix="maestro-browser-") as directory:
                 return
             request = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
             history = request.get("input", [])
+            if request.get("instructions", "").startswith("Create a short, specific title"):
+                assert not request.get("tools")
+                assert request["max_output_tokens"] <= 64
+                return self.reply(200, {"status": "completed", "output": [{"type": "message", "content": [{"type": "output_text", "text": self.title(history)}]}],
+                    "usage": {"input_tokens": 100, "output_tokens": 5}})
             reply = "Synthetic HTTP provider received: " + history[-1]["content"]
             if len(history) > 1:
                 reply += ". Earlier message: " + history[0]["content"]

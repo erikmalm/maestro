@@ -1,1 +1,1 @@
-"""Maestro's local preview backend."""
+"""Maestro's local backend."""

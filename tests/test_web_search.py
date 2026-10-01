@@ -11,7 +11,7 @@ import httpx
 from fastapi.testclient import TestClient
 
 from backend import app as backend, credentials
-from backend.provider import DEFAULT as PROVIDER_DEFAULT
+from backend.provider import DEFAULT as PROVIDER_DEFAULT, TITLE_INSTRUCTIONS
 from backend.web_search import DEFAULT, ENDPOINT, WebSearch
 
 
@@ -106,6 +106,11 @@ class WebSearchTests(unittest.TestCase):
         self.assertEqual(request.url.path, "/api/chat")
         payload = json.loads(request.content)
         self.assertFalse(payload["stream"])
+        if payload["messages"][0]["content"] == TITLE_INSTRUCTIONS:
+            self.assertEqual(payload["options"]["num_predict"], 64)
+            self.assertNotIn("tools", payload)
+            return httpx.Response(200, json={"done": True, "message": {"role": "assistant", "content": "Synthetic research chat"},
+                                             "prompt_eval_count": 20, "eval_count": 5})
         self.assertEqual(payload["options"]["num_predict"], 256 if "tools" in payload else 246)
         if "tools" in payload:
             self.assertEqual(payload["tools"][0]["function"]["name"], "web_search")
@@ -123,7 +128,8 @@ class WebSearchTests(unittest.TestCase):
         return [request for request in self.requests if request.url.host == "ollama.com"]
 
     def model_requests(self):
-        return [request for request in self.requests if request.url.path == "/api/chat"]
+        return [request for request in self.requests if request.url.path == "/api/chat"
+                and json.loads(request.content)["messages"][0]["content"] != TITLE_INSTRUCTIONS]
 
     def test_verified_key_enable_gates_and_deletion(self):
         self.assertEqual(self.configure(enabled=True).status_code, 409)
@@ -179,9 +185,9 @@ class WebSearchTests(unittest.TestCase):
                                               "url": "https://docs.ollama.com/capabilities/web-search"}])
         self.assertNotIn("content", json.dumps(evidence))
         self.assertNotIn(self.snippet.encode(), backend.DATABASE.read_bytes())
-        self.assertEqual(restored["usage"]["input_tokens"], 200)
-        self.assertEqual(restored["usage"]["output_tokens"], 30)
-        self.assertEqual(restored["usage"]["calls"], 2)
+        self.assertEqual(restored["usage"]["input_tokens"], 220)
+        self.assertEqual(restored["usage"]["output_tokens"], 35)
+        self.assertEqual(restored["usage"]["calls"], 3)
         self.assertEqual(restored["usage"]["today_usd"], 0)
         self.assertEqual(restored["usage"]["uncertain"], [])
         self.assertEqual(search_status["searches_today"], 2)
@@ -198,7 +204,7 @@ class WebSearchTests(unittest.TestCase):
         self.assertEqual(self.search_requests(), [])
         self.assertNotIn("web_search", response.json()["messages"][-1])
         self.assertEqual(self.service.status()["searches_today"], 1)
-        self.assertEqual(response.json()["usage"]["calls"], 1)
+        self.assertEqual(response.json()["usage"]["calls"], 2)
 
     def test_multiple_unknown_and_invalid_tool_requests_cannot_dispatch(self):
         self.enable()
@@ -410,7 +416,8 @@ class WebSearchTests(unittest.TestCase):
             try:
                 self.assertTrue(entered.wait(3))
                 self.assertEqual(self.client.post("/api/chat", headers=self.headers, json={"text": "Concurrent request"}).status_code, 409)
-                self.assertEqual(self.client.delete("/api/chat", headers=self.headers).status_code, 409)
+                chat_id = self.client.get("/api/workspace").json()["active_chat_id"]
+                self.assertEqual(self.client.delete(f"/api/chats/{chat_id}", headers=self.headers).status_code, 409)
                 self.assertEqual(self.client.post("/api/web-search/test", headers=self.headers).status_code, 409)
             finally:
                 release.set()

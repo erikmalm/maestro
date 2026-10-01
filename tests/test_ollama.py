@@ -9,7 +9,7 @@ import httpx
 from fastapi.testclient import TestClient
 
 from backend import app as backend, credentials
-from backend.provider import DEFAULT, Provider
+from backend.provider import DEFAULT, Provider, TITLE_INSTRUCTIONS
 
 
 class OllamaTests(unittest.TestCase):
@@ -83,7 +83,8 @@ class OllamaTests(unittest.TestCase):
         self.assertEqual(request.url.path, "/api/chat")
         self.assertEqual(payload["model"], self.model)
         self.assertFalse(payload["stream"])
-        self.assertEqual(payload["options"]["num_predict"], 256)
+        title = payload["messages"][0]["content"] == TITLE_INSTRUCTIONS
+        self.assertEqual(payload["options"]["num_predict"], 64 if title else 256)
         self.assertEqual(payload["messages"][0]["role"], "system")
         self.assertNotIn("api_key", payload)
         self.assertNotIn("store", payload)
@@ -91,9 +92,9 @@ class OllamaTests(unittest.TestCase):
             200,
             json={
                 "done": True,
-                "message": {"role": "assistant", "content": "Synthetic local answer"},
-                "prompt_eval_count": 100,
-                "eval_count": 20,
+                "message": {"role": "assistant", "content": "Synthetic local chat" if title else "Synthetic local answer"},
+                "prompt_eval_count": 20 if title else 100,
+                "eval_count": 5 if title else 20,
             },
         )
 
@@ -105,6 +106,10 @@ class OllamaTests(unittest.TestCase):
                 transport=httpx.MockTransport(handler or self.provider_http), **kwargs
             ),
         )
+
+    def reply_requests(self):
+        return [request for request in self.requests if request.url.path == "/api/chat"
+                and json.loads(request.content)["messages"][0]["content"] != TITLE_INSTRUCTIONS]
 
     def test_setup_rejects_credentials_and_forces_zero_prices(self):
         synthetic_key = "synthetic-accidental-local-key"
@@ -147,7 +152,7 @@ class OllamaTests(unittest.TestCase):
                 result = self.client.post("/api/chat", headers=self.headers, json={"text": text})
                 self.assertEqual(result.status_code, 200, result.text)
         paths = [request.url.path for request in self.requests]
-        self.assertEqual(paths, ["/api/tags", "/api/show", "/api/chat", "/api/show", "/api/chat"])
+        self.assertEqual(paths, ["/api/tags", "/api/show", "/api/chat", "/api/chat", "/api/show", "/api/chat"])
         payload = json.loads(self.requests[-1].content)
         self.assertEqual(
             [(message["role"], message["content"]) for message in payload["messages"][1:]],
@@ -163,9 +168,9 @@ class OllamaTests(unittest.TestCase):
         self.assertEqual(len(restored["messages"]), 4)
         self.assertEqual(restored["messages"][-1]["text"], "Synthetic local answer")
         usage = restored["usage"]
-        self.assertEqual(usage["input_tokens"], 200)
-        self.assertEqual(usage["output_tokens"], 40)
-        self.assertEqual(usage["calls"], 2)
+        self.assertEqual(usage["input_tokens"], 220)
+        self.assertEqual(usage["output_tokens"], 45)
+        self.assertEqual(usage["calls"], 3)
         self.assertEqual(usage["today_usd"], 0)
         self.assertEqual(usage["month_usd"], 0)
         self.assertEqual(usage["reserved_usd"], 0)
@@ -205,7 +210,7 @@ class OllamaTests(unittest.TestCase):
             reply = self.client.post("/api/chat", headers=self.headers,
                                      json={"text": "Check saved local worker settings"})
         self.assertEqual(reply.status_code, 200, reply.text)
-        payload = json.loads(self.requests[-1].content)
+        payload = json.loads(self.reply_requests()[-1].content)
         self.assertEqual(payload["options"], {"num_ctx": 8192, "num_thread": 2, "num_predict": 256})
         self.assertEqual(payload["keep_alive"], 0)
         self.assertEqual(reply.json()["usage"]["today_usd"], 0)
@@ -229,7 +234,7 @@ class OllamaTests(unittest.TestCase):
             reply = self.client.post("/api/chat", headers=self.headers,
                                      json={"text": "Check old settings still generate"})
         self.assertEqual(reply.status_code, 200, reply.text)
-        payload = json.loads(self.requests[-1].content)
+        payload = json.loads(self.reply_requests()[-1].content)
         self.assertEqual(payload["options"], {"num_ctx": 4096, "num_thread": 0, "num_predict": 256})
         self.assertEqual(payload["keep_alive"], "5m")
         self.assertEqual(service.read_state()["config"], status["config"])

@@ -16,6 +16,7 @@ DEFAULT = {"base_url": "https://api.openai.com/v1", "protocol": "responses", "mo
            "pricing_verified": False, "max_output_tokens": 1024,
            "ollama_context_tokens": 4096, "ollama_threads": 0, "ollama_keep_alive_minutes": 5}
 INSTRUCTIONS = "You are Maestro, a helpful personal assistant. Be clear and concise. Do not claim to have performed actions or accessed tools that are not available."
+TITLE_INSTRUCTIONS = "Create a short, specific title for this conversation, using at most six words. Return only the title, without quotes or explanation."
 
 
 class ProviderFailure(ValueError):
@@ -218,16 +219,31 @@ class Provider:
                 raise ValueError("No unresolved charge with that ID.")
             entry.update({"status": "reconciled", "cost": cost})
 
-    def chat(self, text):
+    def chat(self, text, chat_id):
+        result = self.generate(text, chat_id)
+        if result["title_ready"]:
+            try:
+                self.generate("", chat_id, title_for=result)
+            except ValueError:
+                # Naming is optional. Keep the completed reply and any recorded charges.
+                pass
+        return result["reply"]
+
+    def generate(self, text, chat_id, title_for=None):
+        """Reply and title generation use one provider adapter, reservation gate and ledger."""
+        title = title_for is not None
         # Reserve before dispatch under the same SQLite lock used for tasks and limits.
         with self.transaction() as state, closing(sqlite3.connect(self.database)) as db:
-            config = state["config"].copy()
+            config = title_for["config"] if title else state["config"].copy()
+            if title and state["config"] != config:
+                raise ValueError("Model settings changed; the first-message title was skipped.")
             local = config["protocol"] == "ollama"
-            auto_search = local and WebSearch(self.database, self.timezone).read_state()["config"]["enabled"]
-            instructions = INSTRUCTIONS + (SEARCH_INSTRUCTIONS if auto_search else "")
+            auto_search = not title and local and WebSearch(self.database, self.timezone).read_state()["config"]["enabled"]
+            instructions = TITLE_INSTRUCTIONS if title else INSTRUCTIONS + (SEARCH_INSTRUCTIONS if auto_search else "")
             if auto_search and config["ollama_context_tokens"] < 8192:
                 raise ValueError("Automatic web search needs at least 8192 context tokens. Update Local worker settings or disable search.")
-            key, _ = (None, "not_required") if local else credentials.read(config["base_url"])
+            key, _ = ((title_for["key"], "request snapshot") if title else
+                      ((None, "not_required") if local else credentials.read(config["base_url"])))
             if not config["model"]:
                 raise ValueError("Choose a chat model in Settings before chatting.")
             if not local and not key:
@@ -237,11 +253,20 @@ class Provider:
             if any(x["status"] in ("reserved", "uncertain") for x in state["ledger"]):
                 raise ValueError("A request is running or has unknown charges. Wait or reconcile its usage before sending again.")
             workspace = json.loads(db.execute("SELECT value FROM workspace WHERE id=1").fetchone()[0])
-            history = [{"role": x["role"], "content": x["text"]} for x in workspace["messages"] if not x.get("demo", False)]
-            history.append({"role": "user", "content": text})
+            chat = next((item for item in workspace["chats"] if item["id"] == chat_id), None)
+            if chat is None:
+                raise ValueError("That chat could not be found.")
+            if title and chat["title_source"] == "manual":
+                raise ValueError("The chat was already named by you.")
+            if title:
+                history = [{"role": "user", "content": title_for["text"][:400]}]
+            else:
+                history = [{"role": x["role"], "content": x["text"]} for x in chat["messages"] if not x.get("demo", False)]
+                history.append({"role": "user", "content": text})
             input_bound = len((instructions + json.dumps(history) + (json.dumps(TOOL) if auto_search else "")).encode("utf-8")) + 2048
-            output_bound = config["max_output_tokens"]
-            if input_bound + output_bound > workspace["limits"]["max_tokens"]:
+            output_bound = min(64, config["max_output_tokens"] - title_for["output_tokens"]) if title else config["max_output_tokens"]
+            used_tokens = title_for["input_tokens"] + title_for["output_tokens"] if title else 0
+            if output_bound <= 0 or input_bound + output_bound + used_tokens > workspace["limits"]["max_tokens"]:
                 raise ValueError("This conversation exceeds your token limit. Start a new chat or adjust the limit.")
             if local and input_bound + output_bound > config["ollama_context_tokens"]:
                 raise ValueError("This conversation exceeds the local worker's conservative context allowance. Start a new chat, lower the output limit or increase context size in Settings.")
@@ -250,10 +275,13 @@ class Provider:
             daily = sum(x["cost"] for x in state["ledger"] if datetime.fromisoformat(x["at"]).astimezone(self.timezone).date() == now.date())
             monthly = sum(x["cost"] for x in state["ledger"] if datetime.fromisoformat(x["at"]).astimezone(self.timezone).strftime("%Y-%m") == now.strftime("%Y-%m"))
             limits = workspace["limits"]
-            if not local and (limits["run_usd"] <= 0 or limits["daily_usd"] <= 0 or limits["monthly_usd"] <= 0 or reserve > limits["run_usd"] or daily + reserve > limits["daily_usd"] or monthly + reserve > limits["monthly_usd"]):
+            used_cost = title_for["cost"] if title else 0
+            if not local and (limits["run_usd"] <= 0 or limits["daily_usd"] <= 0 or limits["monthly_usd"] <= 0 or used_cost + reserve > limits["run_usd"] or daily + reserve > limits["daily_usd"] or monthly + reserve > limits["monthly_usd"]):
                 raise ValueError("This request would exceed your spending limit. Adjust limits in Settings.")
             request_id = uuid.uuid4().hex
-            state["ledger"].append({"id": request_id, "at": self.stamp(), "model": config["model"], "protocol": config["protocol"], "cost": reserve, "status": "reserved"})
+            state["ledger"].append({"id": request_id, "at": self.stamp(), "model": config["model"], "protocol": config["protocol"],
+                                    "thread_id": chat_id, "kind": "title" if title else "chat",
+                                    "parent_id": title_for["request_id"] if title else None, "cost": reserve, "status": "reserved"})
         payload = {"model": config["model"], "store": False}
         search_result = None
         if config["base_url"] == "https://api.openai.com/v1":
@@ -268,14 +296,14 @@ class Provider:
                 payload["tools"] = [TOOL]
             path = "/api/chat"
         elif config["protocol"] == "responses":
-            payload.update({"instructions": INSTRUCTIONS, "input": history, "max_output_tokens": output_bound})
+            payload.update({"instructions": instructions, "input": history, "max_output_tokens": output_bound})
             path = "/responses"
         else:
             cap_name = "max_completion_tokens" if config["base_url"] == "https://api.openai.com/v1" else "max_tokens"
-            payload.update({"messages": [{"role": "system", "content": INSTRUCTIONS}, *history], cap_name: output_bound})
+            payload.update({"messages": [{"role": "system", "content": instructions}, *history], cap_name: output_bound})
             path = "/chat/completions"
         try:
-            if local:
+            if local and not title:
                 metadata = network(config, None, "POST", "/api/show", {"model": config["model"]})
                 if (not is_local_model({**metadata, "name": config["model"]})
                         or not isinstance(metadata.get("capabilities"), list)
@@ -296,6 +324,7 @@ class Provider:
                 raise ValueError("Provider did not return valid token usage; charges need reconciliation.")
             input_tokens, output_tokens = (raw_usage[k] for k in fields)
             cost = (input_tokens * config["input_usd_per_million"] + output_tokens * config["output_usd_per_million"]) / 1000000
+            title_ready = False
             with self.transaction(with_db=True) as (state, db):
                 entry = next(x for x in state["ledger"] if x["id"] == request_id)
                 entry.update({"status": "settled", "cost": cost, "input_tokens": input_tokens, "output_tokens": output_tokens})
@@ -322,18 +351,33 @@ class Provider:
                     reply = ""
                 # Persist the actual exchange and accounting atomically.
                 workspace = json.loads(db.execute("SELECT value FROM workspace WHERE id=1").fetchone()[0])
+                chat = next((item for item in workspace["chats"] if item["id"] == chat_id), None)
                 if reply:
-                    workspace["messages"].extend([{"id": uuid.uuid4().hex, "role": "user", "text": text, "demo": False},
-                        {"id": uuid.uuid4().hex, "role": "assistant", "text": reply, "demo": False, "model": config["model"], "cost": cost, "input_tokens": input_tokens, "output_tokens": output_tokens}])
-                    if search_result:
-                        workspace["messages"][-1]["web_search"] = search_result
+                    if title:
+                        if chat and chat["title_source"] != "manual":
+                            generated = " ".join(reply.strip().strip('"\'').split())[:80]
+                            if generated:
+                                chat.update(title=generated, title_source="generated")
+                    elif chat:
+                        first_exchange = not chat["messages"]
+                        chat["messages"].extend([{"id": uuid.uuid4().hex, "role": "user", "text": text, "demo": False},
+                            {"id": uuid.uuid4().hex, "role": "assistant", "text": reply, "demo": False, "model": config["model"], "cost": cost, "input_tokens": input_tokens, "output_tokens": output_tokens}])
+                        chat["updated_at"] = self.stamp()
+                        if search_result:
+                            chat["messages"][-1]["web_search"] = search_result
+                        if first_exchange and not chat.get("title_attempted"):
+                            chat["title_attempted"] = True
+                            if chat["title_source"] != "manual":
+                                chat["title"] = " ".join(text.split())[:80] or "New chat"
+                                title_ready = True
                     db.execute("UPDATE workspace SET value=? WHERE id=1", (json.dumps(workspace),))
             if not reply:
                 raise ValueError("Provider returned no text. Usage was recorded; try a larger output limit or another chat model.")
             if not local and (input_tokens > input_bound or output_tokens > output_bound or cost > reserve):
                 with self.transaction() as state:
                     state["config"]["pricing_verified"] = False
-            return reply
+            return {"reply": reply, "text": text, "config": config, "key": key, "request_id": request_id,
+                    "cost": cost, "input_tokens": input_tokens, "output_tokens": output_tokens, "title_ready": title_ready}
         except Exception as error:
             with self.transaction() as state:
                 entry = next(x for x in state["ledger"] if x["id"] == request_id)

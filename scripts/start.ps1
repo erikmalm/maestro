@@ -13,7 +13,7 @@ if ($dataAbsolute -eq $repoAbsolute -or $dataAbsolute.StartsWith($repoAbsolute +
 $previewUrl = 'http://127.0.0.1:8765'
 try {
     $health = Invoke-RestMethod -Uri "$previewUrl/health" -TimeoutSec 2
-    if ($health.application -eq 'maestro' -and $health.mode -eq 'preview') {
+    if ($health.application -eq 'maestro' -and $health.mode -in @('local', 'preview')) {
         Write-Output "Maestro is already running at $previewUrl"
         if (-not $NoBrowser) { Start-Process $previewUrl }
         return
@@ -45,18 +45,39 @@ try {
     New-Item -ItemType Directory -Force -Path $dataDirectory | Out-Null
     $env:MAESTRO_DATA_DIR = $dataDirectory
     $env:MAESTRO_PORT = '8765'
-    $serverProcess = Start-Process -FilePath $pythonPath -ArgumentList @('-m', 'uvicorn', 'backend.app:app', '--host', '127.0.0.1', '--port', '8765', '--no-access-log') -WorkingDirectory $repoDirectory -WindowStyle Hidden -PassThru -RedirectStandardOutput (Join-Path $dataDirectory 'server.stdout.log') -RedirectStandardError (Join-Path $dataDirectory 'server.stderr.log')
-    Set-Content -LiteralPath (Join-Path $dataDirectory 'server.pid') -Value $serverProcess.Id
-    $ready = $false
-    for ($attempt = 0; $attempt -lt 30; $attempt++) {
-        try {
-            $health = Invoke-RestMethod -Uri "$previewUrl/health" -TimeoutSec 1
-            if ($health.application -eq 'maestro') { $ready = $true; break }
-        } catch { Start-Sleep -Milliseconds 200 }
-        if ($serverProcess.HasExited) { throw "Maestro could not start. Check $dataDirectory\server.stderr.log" }
+    $pidPath = Join-Path $dataDirectory 'server.pid'
+    $serverProcess = $null
+    try {
+        $serverProcess = Start-Process -FilePath $pythonPath -ArgumentList @('-m', 'uvicorn', 'backend.app:app', '--host', '127.0.0.1', '--port', '8765', '--no-access-log') -WorkingDirectory $repoDirectory -WindowStyle Hidden -PassThru -RedirectStandardOutput (Join-Path $dataDirectory 'server.stdout.log') -RedirectStandardError (Join-Path $dataDirectory 'server.stderr.log')
+        $ready = $false
+        for ($attempt = 0; $attempt -lt 30; $attempt++) {
+            if ($serverProcess.HasExited) { throw "Maestro could not start. Check $dataDirectory\server.stderr.log" }
+            try {
+                $health = Invoke-RestMethod -Uri "$previewUrl/health" -TimeoutSec 1
+                if ($health.application -eq 'maestro' -and $health.mode -in @('local', 'preview') -and -not $serverProcess.HasExited) { $ready = $true; break }
+            } catch { Start-Sleep -Milliseconds 200 }
+        }
+        if (-not $ready) { throw "Maestro did not become ready. Check $dataDirectory\server.stderr.log" }
+        Set-Content -LiteralPath $pidPath -Value $serverProcess.Id
+    } catch {
+        $startupError = $_
+        if ($serverProcess) {
+            # The Windows venv launcher owns a child Python process; stop its tree.
+            try {
+                if (-not $serverProcess.HasExited) {
+                    taskkill.exe /PID $serverProcess.Id /T /F 2>$null | Out-Null
+                    if ($LASTEXITCODE -ne 0) { Write-Warning "Could not stop the launched Maestro process tree (PID $($serverProcess.Id))." }
+                }
+            } catch { Write-Warning "Could not stop the launched Maestro process tree (PID $($serverProcess.Id))." }
+            try {
+                if ((Test-Path -LiteralPath $pidPath) -and ([string](Get-Content -Raw -LiteralPath $pidPath)).Trim() -eq [string]$serverProcess.Id) {
+                    Remove-Item -LiteralPath $pidPath
+                }
+            } catch { }
+        }
+        throw $startupError
     }
-    if (-not $ready) { throw "Maestro did not become ready. Check $dataDirectory\server.stderr.log" }
     Write-Output "Maestro is running at $previewUrl"
-    Write-Output 'Choose Ollama or an API provider and a model in Settings to use live chat. Background orchestration is paused.'
+    Write-Output 'Choose Ollama or an API provider and a model in Settings to use chat. Tasks are managed manually.'
     if (-not $NoBrowser) { Start-Process $previewUrl }
 } finally { Pop-Location }

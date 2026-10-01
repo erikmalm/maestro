@@ -12,7 +12,7 @@ import httpx
 from fastapi.testclient import TestClient
 
 from backend import app as backend, credentials
-from backend.provider import DEFAULT, Provider
+from backend.provider import DEFAULT, Provider, TITLE_INSTRUCTIONS
 
 
 class ProviderTests(unittest.TestCase):
@@ -48,6 +48,8 @@ class ProviderTests(unittest.TestCase):
         self.assertEqual(request.headers["Authorization"], "Bearer " + self.key)
         if request.method == "GET":
             return httpx.Response(200, json={"data": [{"id": "synthetic-chat-model"}]})
+        if json.loads(request.content).get("instructions") == TITLE_INSTRUCTIONS:
+            return httpx.Response(200, json={"output": [{"type": "message", "content": [{"type": "output_text", "text": "Synthetic chat title"}]}], "usage": {"input_tokens": 100, "output_tokens": 5}})
         return httpx.Response(200, json={"status": "completed", "output": [{"type": "message", "content": [{"type": "output_text", "text": "Synthetic provider answer"}]}], "usage": {"input_tokens": 1000, "output_tokens": 200}})
 
     def mock_http(self, handler=None):
@@ -62,8 +64,8 @@ class ProviderTests(unittest.TestCase):
             first = self.client.post("/api/chat", headers=self.headers, json={"text": "Remember the synthetic codeword."})
             self.assertEqual(first.status_code, 200, first.text)
             self.assertEqual(first.json()["messages"][-1]["text"], "Synthetic provider answer")
-            self.assertAlmostEqual(first.json()["usage"]["today_usd"], 0.0014)
-            self.assertEqual(first.json()["usage"]["input_tokens"], 1000)
+            self.assertAlmostEqual(first.json()["usage"]["today_usd"], 0.00151)
+            self.assertEqual(first.json()["usage"]["input_tokens"], 1100)
             second = self.client.post("/api/chat", headers=self.headers, json={"text": "What was it?"})
             self.assertEqual(second.status_code, 200)
         sent = json.loads(self.requests[-1].content)
@@ -74,12 +76,14 @@ class ProviderTests(unittest.TestCase):
         self.assertEqual(sent["input"][0]["content"], "Remember the synthetic codeword.")
         restored = self.client.get("/api/workspace").json()
         self.assertEqual(len(restored["messages"]), 4)
-        self.assertAlmostEqual(restored["usage"]["month_usd"], 0.0028)
+        self.assertAlmostEqual(restored["usage"]["month_usd"], 0.00291)
         self.assertNotIn(self.key, json.dumps(restored))
         self.assertNotIn(self.key.encode(), backend.DATABASE.read_bytes())
-        cleared = self.client.delete("/api/chat", headers=self.headers).json()
-        self.assertEqual(cleared["messages"], [])
-        self.assertEqual(cleared["usage"], restored["usage"])
+        new_chat = self.client.post("/api/chats", headers=self.headers).json()
+        self.assertEqual(new_chat["messages"], [])
+        self.assertEqual(new_chat["usage"], restored["usage"])
+        self.assertEqual(len(new_chat["chats"]), 2)
+        self.assertEqual(self.client.get("/api/workspace", params={"chat_id": restored["active_chat_id"]}).json()["messages"], restored["messages"])
 
     def test_no_credentials_and_zero_budget_cannot_dispatch(self):
         self.client.delete("/api/provider/key", headers=self.headers)
@@ -164,15 +168,16 @@ class ProviderTests(unittest.TestCase):
         def handler(request):
             payload = json.loads(request.content)
             self.assertEqual(request.url.path, "/v1/chat/completions")
-            self.assertEqual(payload["max_tokens"], 1024)
+            title = payload["messages"][0]["content"] == TITLE_INSTRUCTIONS
+            self.assertEqual(payload["max_tokens"], 64 if title else 1024)
             self.assertNotIn("options", payload)
             self.assertNotIn("keep_alive", payload)
             self.assertNotIn("service_tier", payload)  # Compatible providers need not implement OpenAI tiers.
-            return httpx.Response(200, json={"choices": [{"message": {"content": "Compatible model reply"}}], "usage": {"prompt_tokens": 80, "completion_tokens": 20}})
+            return httpx.Response(200, json={"choices": [{"message": {"content": "Compatible chat" if title else "Compatible model reply"}}], "usage": {"prompt_tokens": 20 if title else 80, "completion_tokens": 5 if title else 20}})
         with self.mock_http(handler):
             result = self.client.post("/api/chat", headers=self.headers, json={"text": "Hello"})
         self.assertEqual(result.status_code, 200, result.text)
-        self.assertEqual(result.json()["usage"]["input_tokens"], 80)
+        self.assertEqual(result.json()["usage"]["input_tokens"], 100)
 
     def test_openai_requests_use_standard_pricing_tier(self):
         official = "https://api.openai.com/v1"
@@ -199,11 +204,12 @@ class ProviderTests(unittest.TestCase):
             thread.start()
             self.assertTrue(entered.wait(3))
             self.assertEqual(self.client.post("/api/chat", headers=self.headers, json={"text": "Second"}).status_code, 409)
-            self.assertEqual(self.client.delete("/api/chat", headers=self.headers).status_code, 409)
+            chat_id = self.client.get("/api/workspace").json()["active_chat_id"]
+            self.assertEqual(self.client.delete(f"/api/chats/{chat_id}", headers=self.headers).status_code, 409)
             release.set()
             thread.join(3)
         self.assertEqual(result[0].status_code, 200)
-        self.assertEqual(len(self.requests), 1)
+        self.assertEqual(len(self.requests), 2)
 
 
 @unittest.skipUnless(os.name == "nt", "Windows credential integration")
