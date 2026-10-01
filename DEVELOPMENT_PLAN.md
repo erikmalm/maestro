@@ -1,6 +1,6 @@
 # Maestro development plan
 
-Plan date: 2026-10-01. Status: documentation and an interactive local UI preview are implemented. Live provider calls and the full agent runtime remain planned. The [architecture draft](docs/ARCHITECTURE.md) separates the current implementation from the proposed system.
+Plan date: 2026-10-01. Status: documentation, the local UI and an opt-in background reflection adapter are implemented. Provider calls are tested with mocks; live chat, the full agent runtime and code-improvement proposals remain planned. The [architecture draft](docs/ARCHITECTURE.md) separates the current implementation from the proposed system.
 
 ## 1. Product goal
 
@@ -20,6 +20,7 @@ The first version supports one user on one computer, with Windows as the first s
 | Persistent usage control | Today's estimated cost and tokens on every screen; open details and edit limits without leaving the current work. |
 | Agents | Versioned role prompts, provider/model, output contract, permitted tools, context scope, and per-agent limits. |
 | Memory | Search and inspect records; provenance, proposed entries, corrections, deletion, recall controls, and private export. |
+| Improvements (planned) | Evidence-backed code proposals; motivation, expected behavior, scope, validation, cost, decisions, linked patches/PRs and post-release outcomes. |
 | Settings | Provider credentials, model, data location, limits, integration scope, sharing policy, and local backup/restore. |
 
 The Runs view exposes decisions and observable actions, rather than requiring access to a model's hidden reasoning. Local state must survive a browser refresh and application restart.
@@ -180,6 +181,30 @@ Improvement cycle: collect feedback, record a concrete lesson, propose a prompt/
 
 Memory extraction, compaction, embeddings, and evaluations are subject to the same call gate and usage ledger. No unbounded idle-time reflection jobs. Add backup/restore before relying on memory as durable project knowledge; backups remain outside the checkout.
 
+## 7a. Code improvement proposals and evolution
+
+Maestro should be able to ask for changes to its own application code, with a concise motivation and explanation grounded in observed failures, repeated user corrections, measurable inefficiency or an unmet requirement. Keep this distinct from a proposed memory/prompt lesson. Generating a code proposal alone does not execute code, publish anything or change the running version. This capability is planned, not supplied by the current lesson-only reflection schema.
+
+Each private `ImprovementProposal` records:
+
+- Stable ID, evidence references, observed problem and relevant repository/base commit.
+- Motivation, proposed behavior, likely components/files and expected benefit.
+- Acceptance criteria, baseline comparison, regression checks and result measurements.
+- Implementation scope, cost estimate/allowance, risks, migration needs and rollback plan.
+- Decision history, linked coding task, branch/PR, tested commit and activation/outcome records.
+
+Planned lifecycle: `proposed` → `approved` → `implementing` → `validating` → `draft_pr` → `awaiting_activation` → `observing` → `verified`. Alternative terminal states include `declined`, `superseded`, `stopped` and `not_improved`; a failed check can return to implementation only within the same task allowance. An approved proposal is an instruction to prepare its scoped change, not permission to merge, install or restart Maestro.
+
+1. **Observe and propose:** watch eligible completed runs, explicitly selected feedback and permitted evaluation results in the background. State concrete evidence, the proposed fix and how improvement would be measured. Deduplicate using the problem/evidence and code version; retain declined proposals so the same evidence does not cause repeated requests.
+2. **Decide and assign:** default to a private proposal inbox with Approve, Decline and Request revision. Existing authorization for user-assigned coding tasks and draft PRs remains valid within the configured repository scope. An optional automatic-draft policy may authorize proposal preparation without repeated prompts; never infer it merely from enabling lesson reflection.
+3. **Prepare and iterate:** create an isolated worktree pinned to the reviewed base commit. Give the coding agent only the approved scope and selected context. Reproduce the problem, implement the smallest useful change, run meaningful checks and compare with the unchanged version. Focused revisions share the original spend/token/time limits; stop on no progress or exhausted limits.
+4. **Review and publish:** record actual checks and any unresolved limitations. Public PR content and fixtures must be explicitly public-safe; full private evidence stays local. A reviewer checks the change and its evidence, but the model's agreement cannot substitute for passing checks. Retries update the same branch/PR. Security-sensitive paths require their configured scope; the candidate cannot authorize itself, weaken its execution controls or revise the acceptance criteria to award itself success.
+5. **Activate and observe:** after the user's merge/activation decision, associate the installed commit with the proposal and measure the expected effect. Record improvement, regression or insufficient evidence. Retain the previous version and a tested recovery approach, including data-migration compatibility. Separate side-effect-free tests from executing real integrations.
+
+The local Improvements view will keep motivation and expected benefit prominent, with evidence, patch, checks, estimated/actual cost and history available on expansion. Configure proposal-only versus automatic draft preparation, cadence, eligible sources, per-cycle/day spending, revision limits and a small concurrent-proposal limit (initially one). All model/reviewer/evaluation calls count toward the same real-usage gate; background detection does no paid work without eligible evidence and allowance. Neither the repository nor its PRs serve as personal memory storage.
+
+The next implementation slice is a private proposal record/API and UI with structured explanations and decision controls. Approval can create a persistent to-do before automated coding is available; the UI must identify that limitation. Extend the provider output with an optional structured code proposal only after this schema and its source-sharing rules exist. Actual patch generation, validation, PR submission and activation tracking follow as distinct capabilities.
+
 ## 8. Credentials, privacy, and integrations
 
 Bind the initial service to loopback only. Require a local session, validate Host and Origin headers, enforce CSRF protection for changes, and allow only configured local frontend origins. A local website must not let unrelated websites read memory or change settings. Remote/LAN access requires a separate authentication and transport design.
@@ -261,6 +286,12 @@ Add selected-repository configuration, secure GitHub credentials, coding worktre
 
 Acceptance: a synthetic coding task creates a reviewable draft PR only in an allowed repository; secrets/private workspace content block publication; retries update the existing PR; the PR states behavior and checks; scope prevents unauthorized workflow/privileged changes; Maestro does not merge or deploy without separate authorization.
 
+### M3b - Code improvement proposals and measured evolution
+
+Start the proposal inbox independently of automated coding: private structured proposals, evidence and code-version references, motivation, expected benefit, measurable acceptance criteria, decision history and conversion into an ordinary to-do. Connect approved proposals to M3a's coding workflow when that runtime is ready. Add opt-in automatic draft preparation, bounded revision, baseline comparisons and post-activation outcome records.
+
+Acceptance: synthetic observed failures produce understandable proposals; duplicate/declined ideas are not repeated on unchanged evidence; proposal creation alone causes no code execution or publication; approval creates exactly one coding task across retries/restart; the candidate reproduces and fixes an issue without weakening budget/privacy checks; tests and costs are visible; a draft PR excludes private evidence; the running installation stays on its current version until activation is authorized; failed evaluations or exhausted limits stop work; the installed version's outcome and rollback approach are recorded.
+
 ### M4 - Persistent memory and feedback
 
 Add scoped search/recall, explicit remember/forget, reviewable inferred records, correction precedence, local prompt revisions, evaluation/rollback, and backup/restore.
@@ -287,4 +318,4 @@ Use mock providers and synthetic content in automated checks. Cover lifecycle tr
 
 Keep any live provider smoke tests opt-in with an explicit small budget and local credentials. Record dependency versions and setup instructions at M1; update milestone status only when its acceptance checks pass.
 
-Next step: inspect the local UI preview, refine its layout and workflow, then finish M1 with secure provider settings and bounded live chat. Build the durable task runner, specialist orchestration, and GitHub PR connector on that foundation.
+Next step: add the private code-improvement proposal inbox and decisions as the first M3b slice, while completing M1's secure provider setup and live chat. Build the durable task runner, specialist orchestration and GitHub PR connector before enabling automatic code preparation. Connect proposals to that runner, then add baseline evaluation and tracked activation outcomes.

@@ -42,6 +42,7 @@ The persistent header shows reflection cost/tokens separately from demo usage. T
 | Run browser | Browse queued and active tasks, delegation trees, actions, review feedback, results, costs, and stop reasons. |
 | GitHub collaboration | Turn authorized coding tasks into draft PRs in selected repositories, with reviewable changes and validation. |
 | Refinement | Review a result against the task's criteria and iterate within enforced limits. |
+| Code improvement proposals | Explain evidence-backed changes to Maestro's own code, prepare scoped patches and tests, and submit reviewable draft PRs under the configured policy. |
 | Memory | Keep useful preferences, project context, decisions, and lessons across sessions; inspect, correct, and forget them. |
 | Integrations | Retrieve financial documentation through a locally configured MarketPulse connector, then add other scoped tools. |
 | Settings | Configure a provider, API key, model, spending limits, agent profiles, memory policy, and integrations. |
@@ -101,6 +102,16 @@ OpenAI is the first provider adapter, currently used only for reflection. Provid
 Each task will share one budget across the coordinator, workers, reviewers, retries, and memory updates. The backend will enforce limits on spend, model calls, tokens, review passes, delegation depth, concurrent agents, and elapsed time. Daily and monthly spending ceilings apply across runs. The run browser will show usage, reservations for in-flight requests, and stop reasons; an emergency stop will block new work.
 
 Improvement means learning from feedback, preserving useful context, and proposing better prompts/workflows. Changes are versioned, evaluated, and reversible. Background work is opt-in and uses the same budgets. Authorized coding tasks may create isolated branches and submit draft PRs to allowed repositories after validation and secret scanning. You control merging; the running application does not rewrite itself automatically.
+
+### Proposed improvements to Maestro's own code
+
+Planned next layer: Maestro can identify a concrete limitation and ask for a code change with motivation and an explanation. A proposal records the observed problem, private evidence references, likely components, intended behavior, expected benefit, acceptance checks, estimated implementation cost and rollback approach. A concise rationale is sufficient; hidden model reasoning is not required.
+
+For example, a synthetic proposal might say: "Interrupted jobs currently need manual recovery. Add resumable checkpoints for read-only tasks so completed steps can be reused. Verify recovery after a forced restart and ensure actions are not duplicated. Keep changes within the job runner; leave spending limits unchanged."
+
+The initial policy is **propose for review**. Approval creates a bounded coding task. With a configured policy authorizing preparation and draft PRs, Maestro can prepare the change without asking again for each routine step. Implementation uses an isolated worktree and compares the candidate against the unchanged code. Failed checks trigger focused revisions within the existing allowance. A draft PR explains the behavior change and validation using public-safe material; personal evidence and discussion remain local. Merging and activating a new version are separate decisions.
+
+After activation, Maestro checks whether the expected improvement occurred, records the result and can propose a follow-up. It does not repeatedly submit the same idea: proposals retain their decision history and code version. UI controls will cover proposal-only or automatic draft preparation, background cadence, spending limits, maximum concurrent proposals and pause. This code-proposal pipeline is a design requirement; the current Reflection page produces lessons and has no code execution or GitHub tool access. See [the planned lifecycle](DEVELOPMENT_PLAN.md#7a-code-improvement-proposals-and-evolution).
 
 ## Planned local setup
 

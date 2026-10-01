@@ -6,7 +6,7 @@ Status: first implementation draft. The local UI and bounded background reflecti
 
 Keep the main screen focused on conversation and a short task list. A compact usage control stays in the header on every page and opens detailed usage plus budget settings without leaving the current work. The desktop sidebar offers Workspace, Tasks, Runs, Agents, Memory, Integrations, and Settings; mobile uses collapsible navigation.
 
-The header shows estimated spend and tokens for today. Its detail view will separate input/output tokens, reserved spend, settled estimates, daily/monthly totals, and per-run/agent usage. Users change spending, token, refinement, and time limits locally. The preview uses labelled synthetic usage; no sample amount represents a provider bill.
+The header shows estimated spend and tokens for today, separating demo usage from real reflection usage. Its detail view will separate input/output tokens, reserved spend, settled estimates, daily/monthly totals, and per-run/agent usage. Users change spending, token, refinement, and time limits locally. No sample demo amount represents a provider bill. A planned Improvements view will show explanations and decisions for code-change proposals.
 
 ## System boundaries
 
@@ -128,12 +128,39 @@ GitHub tools receive code and public-safe task metadata, never unrestricted conv
 
 Assigned coding self-improvements can use this workflow. Prompt/memory improvements stay local and reversible; agents cannot automatically replace the running application. The current preview has no GitHub submission endpoint. This UI change is itself delivered as a draft PR through the development session's existing GitHub connection.
 
+## Proposed code improvement pipeline
+
+Planned: an observer can propose changes to Maestro's application code with motivation and explanation. The existing reflection worker only produces lessons; it does not implement this pipeline or hold coding/GitHub tools.
+
+```mermaid
+flowchart LR
+    Evidence[Eligible outcomes and feedback] --> Proposal[Private proposal with rationale and criteria]
+    Proposal --> Policy[User decision or configured draft policy]
+    Policy --> Task[Bounded coding task]
+    Task --> Worktree[Isolated candidate version]
+    Worktree --> Evaluate[Baseline and regression checks]
+    Evaluate -->|Focused revision within limits| Worktree
+    Evaluate -->|Checks pass and public-safe diff| PR[Draft PR with explanation]
+    PR --> Activate[User merge and activation decision]
+    Activate --> Observe[Measure outcome on installed version]
+    Observe -->|New evidence| Proposal
+```
+
+Store proposals, raw evidence, decisions and outcome records in private local storage. The proposal includes target/base commit, observed problem, expected behavior/benefit, likely components, measurable acceptance criteria, cost allowance, risks and rollback plan. Link it to a stable coding task and draft PR; replay cannot duplicate actions. Code-context sharing is explicitly scoped and public publication requires separate public-safe material.
+
+The observer is an advisory component. A task broker applies the configured policy and existing repository authorization before coding tools become available. The coding worker operates in an isolated worktree; validation compares the reviewed candidate commit with its base and uses fixed acceptance criteria. Candidate code never runs inside the active orchestrator or receives its full credentials/private workspace for testing. Command/path permissions and credential/data isolation must be enforced by the runner; a worktree alone is not a sandbox.
+
+The initial policy proposes changes for review; an opt-in automatic-draft policy can authorize preparation and PR submission within fixed scope and allowance. The agent may explain a need for broader scope, but cannot grant itself that scope or change spending controls. Merge and activation remain separate actions. Restart and migrations need their own tested recovery approach. Mark a proposal verified only when its recorded checks and post-activation measurements support the expected benefit.
+
+First slice: proposal storage/API/UI and conversion of an approved proposal into one persisted to-do. This can precede the coding runtime. Later slices connect isolated execution, tests, PR publication and release/outcome tracking. The UI must report which stages actually work.
+
 ## Build sequence
 
 1. **Visual preview:** inspect layout, task/chat flow, usage visibility, local limits, and responsive behavior without keys or charges.
 2. **M1:** modular backend, migrations, secure provider settings, bounded live chat and streamed usage.
 3. **M2-M3:** durable queue, specialist runner, cancellation, reservations, bounded review, and replayable events.
 4. **M3a:** scoped coding worktrees and GitHub draft PR submission.
-5. **M4-M5:** scoped memory recall/improvement and selected MarketPulse document access.
+5. **M3b:** private code proposal inbox first; then evidence-backed patches, evaluations and tracked activation outcomes through M3a.
+6. **M4-M5:** scoped memory recall/improvement and selected MarketPulse document access.
 
 Detailed acceptance criteria are in [the development plan](../DEVELOPMENT_PLAN.md).
