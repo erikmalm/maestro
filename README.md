@@ -15,9 +15,9 @@ Open [http://127.0.0.1:8765](http://127.0.0.1:8765). Stop with `.\scripts\stop.p
 ## Connect and chat
 
 1. Open **Settings**. Keep the OpenAI base URL, or enter a compatible HTTPS endpoint/local loopback server and choose its API protocol.
-2. Enter the API key and **Save connection**. Default storage is Windows Credential Manager. Uncheck persistence to keep a new key only in server memory.
-3. **Test connection** fetches the provider's model list without generating a response. Select/type the desired model ID. Models listed by an API are not necessarily chat-capable.
-4. Enter verified input/output prices in USD per million tokens, confirm pricing, and save. Zero prices are valid only for genuinely free inference.
+2. Enter the API key and **Connect and load models**. This saves the key and fetches the model list without generating a response. Default storage is Windows Credential Manager. Uncheck persistence to keep a new key only in server memory.
+3. Select/type the desired model ID. The key authorizes your account/project; the model is chosen separately for each chat request. Models listed by an API are not necessarily chat-capable.
+4. Selecting the exact `gpt-6-luna`, `gpt-6.1-sol` or `gpt-6-astra` ID fills standard OpenAI prices when the dated snapshot is at most 30 days old. For other models/providers or an older snapshot, enter verified input/output prices in USD per million tokens and enable **Use these prices for cost estimates**. Save the connection. Saved prices remain in effect until updated; zero prices are valid only for genuinely free inference.
 5. Return to **Workspace**, send a message, and inspect the answer, token counts and estimated cost. Successful model-list access alone does not verify generation.
 
 OpenAI uses the Responses API. The Chat Completions option supports compatible providers; compatibility and model access depend on that provider. Chat uses actual provider responses and has no canned fallback. Missing settings, unsupported models, exhausted limits and provider errors produce explicit errors. The first version waits for a complete response rather than streaming it.

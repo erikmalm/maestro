@@ -90,6 +90,20 @@ class ProviderTests(unittest.TestCase):
             self.assertEqual(self.client.post("/api/chat", headers=self.headers, json={"text": "Synthetic test"}).status_code, 409)
         self.assertEqual(self.requests, [])
 
+    def test_model_list_survives_model_price_and_protocol_changes(self):
+        with self.mock_http():
+            tested = self.client.post("/api/provider/test", headers=self.headers).json()
+        saved = self.client.put("/api/provider", headers=self.headers, json={
+            "config": {**self.config, "model": "another-chat-model", "protocol": "chat_completions",
+                       "input_usd_per_million": 3, "max_output_tokens": 2048}, "api_key": "", "persist": False})
+        self.assertEqual(saved.status_code, 200)
+        self.assertEqual(saved.json()["models"], tested["models"])
+        self.assertEqual(saved.json()["tested_at"], tested["tested_at"])
+        # Replacing the key must discard the old key's model-list verification.
+        self.setup_provider()
+        self.assertEqual(self.client.get("/api/provider").json()["models"], [])
+        self.assertIsNone(self.client.get("/api/provider").json()["tested_at"])
+
     def test_provider_auth_error_is_redacted_and_does_not_reserve_charge(self):
         with self.mock_http(lambda request: httpx.Response(401, json={"error": self.key})):
             response = self.client.post("/api/chat", headers=self.headers, json={"text": "Synthetic test"})
@@ -128,11 +142,23 @@ class ProviderTests(unittest.TestCase):
             payload = json.loads(request.content)
             self.assertEqual(request.url.path, "/v1/chat/completions")
             self.assertEqual(payload["max_tokens"], 1024)
+            self.assertNotIn("service_tier", payload)  # Compatible providers need not implement OpenAI tiers.
             return httpx.Response(200, json={"choices": [{"message": {"content": "Compatible model reply"}}], "usage": {"prompt_tokens": 80, "completion_tokens": 20}})
         with self.mock_http(handler):
             result = self.client.post("/api/chat", headers=self.headers, json={"text": "Hello"})
         self.assertEqual(result.status_code, 200, result.text)
         self.assertEqual(result.json()["usage"]["input_tokens"], 80)
+
+    def test_openai_requests_use_standard_pricing_tier(self):
+        official = "https://api.openai.com/v1"
+        try:
+            self.setup_provider({**self.config, "base_url": official})
+            with self.mock_http():
+                result = self.client.post("/api/chat", headers=self.headers, json={"text": "Synthetic tier check"})
+            self.assertEqual(result.status_code, 200, result.text)
+            self.assertEqual(json.loads(self.requests[-1].content)["service_tier"], "default")
+        finally:
+            credentials.session_keys.pop(official, None)
 
     def test_concurrent_request_cannot_dispatch_or_clear_chat(self):
         entered, release = threading.Event(), threading.Event()

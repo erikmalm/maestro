@@ -3,6 +3,25 @@ import { Check, LoaderCircle, ShieldCheck } from "lucide-react";
 import * as api from "./api";
 import type { ProviderConfig, ProviderStatus } from "./api";
 
+// Standard text rates, checked against https://developers.openai.com/api/docs/pricing.
+// Expired or unlisted rates require manual confirmation; never infer model prices from an ID.
+const OPENAI_PRICES_CHECKED = "2026-10-01";
+const OPENAI_PRICES: Record<
+  string,
+  { input: number; output: number; label: string }
+> = {
+  "gpt-6-luna": { input: 0.1, output: 0.5, label: "GPT-6 Luna · economical" },
+  "gpt-6.1-sol": { input: 2, output: 10, label: "GPT-6.1 Sol · balanced" },
+  "gpt-6-astra": { input: 10, output: 50, label: "GPT-6 Astra · highest cost" },
+};
+function openAIPrices(model: string) {
+  return Object.hasOwn(OPENAI_PRICES, model) ? OPENAI_PRICES[model] : undefined;
+}
+function pricesAreCurrent() {
+  const age = Date.now() - Date.parse(OPENAI_PRICES_CHECKED);
+  return age >= 0 && age <= 30 * 86400000;
+}
+
 export default function ProviderSetup({
   onChange,
 }: {
@@ -69,6 +88,24 @@ export default function ProviderSetup({
     !!status &&
     (JSON.stringify(config) !== JSON.stringify(status.config) ||
       apiKey.length > 0);
+  const isOpenAI =
+    config?.base_url.replace(/\/+$/, "") === "https://api.openai.com/v1";
+  const pricesCurrent = pricesAreCurrent();
+  const preset = isOpenAI && config ? openAIPrices(config.model) : undefined;
+  function selectModel(model: string) {
+    if (!config) return;
+    const prices =
+      isOpenAI && pricesAreCurrent() ? openAIPrices(model) : undefined;
+    setConfig({
+      ...config,
+      model,
+      ...(prices ? { protocol: "responses" as const } : {}),
+      input_usd_per_million: prices?.input ?? 0,
+      output_usd_per_million: prices?.output ?? 0,
+      pricing_verified: !!prices,
+    });
+    setNotice("");
+  }
   const field = <K extends keyof ProviderConfig>(
     key: K,
     value: ProviderConfig[K],
@@ -95,7 +132,9 @@ export default function ProviderSetup({
       <div className="reflection-title">
         <div>
           <h2>Model connection</h2>
-          <p>Choose the API endpoint and model used for chat.</p>
+          <p>
+            Your API key gives access. Your model choice determines who replies.
+          </p>
         </div>
         <span className="badge neutral">
           {status?.credentials_present ? "API key configured" : "No API key"}
@@ -126,6 +165,13 @@ export default function ProviderSetup({
             );
           }}
         >
+          <p className="reflection-note">
+            An OpenAI key can access multiple models; it is not attached to one.
+            Connect to load your model list, choose a chat model, then save.
+            {status.credentials_present &&
+              !config.model &&
+              " Your key is saved, but no chat model is selected yet."}
+          </p>
           <label>
             API base URL
             <input
@@ -165,7 +211,7 @@ export default function ProviderSetup({
                 maxLength={200}
                 list="provider-models"
                 value={config.model}
-                onChange={(event) => field("model", event.target.value)}
+                onChange={(event) => selectModel(event.target.value)}
                 placeholder="Enter a model ID"
               />
               <datalist id="provider-models">
@@ -181,14 +227,21 @@ export default function ProviderSetup({
               <select
                 aria-label="Available models"
                 value={status.models.includes(config.model) ? config.model : ""}
-                onChange={(event) => field("model", event.target.value)}
+                onChange={(event) => selectModel(event.target.value)}
               >
                 <option value="">Choose a model from this connection</option>
-                {status.models.map((model) => (
-                  <option key={model} value={model}>
-                    {model}
-                  </option>
-                ))}
+                {[...status.models]
+                  .sort(
+                    (a, b) =>
+                      Number(!!(isOpenAI && openAIPrices(b))) -
+                        Number(!!(isOpenAI && openAIPrices(a))) ||
+                      a.localeCompare(b),
+                  )
+                  .map((model) => (
+                    <option key={model} value={model}>
+                      {isOpenAI ? (openAIPrices(model)?.label ?? model) : model}
+                    </option>
+                  ))}
               </select>
             </label>
           )}
@@ -257,13 +310,23 @@ export default function ProviderSetup({
                 field("pricing_verified", event.target.checked)
               }
             />
-            I verified these prices for this model
+            Use these prices for cost estimates
           </label>
           <p className="reflection-note">
             Costs use provider-reported token counts and your saved prices. They
             are estimates; provider billing may include discounts or other
             charges.
-            {config.base_url === "https://api.openai.com/v1" && (
+            {preset &&
+              pricesCurrent &&
+              config.input_usd_per_million === preset.input &&
+              config.output_usd_per_million === preset.output && (
+                <>
+                  {" "}
+                  Standard OpenAI rates filled automatically; checked{" "}
+                  {OPENAI_PRICES_CHECKED}.
+                </>
+              )}
+            {isOpenAI && (
               <>
                 {" "}
                 <a
@@ -302,17 +365,25 @@ export default function ProviderSetup({
             <button
               type="button"
               className="button secondary"
-              disabled={!!busy || dirty}
-              onClick={() =>
+              disabled={!!busy}
+              onClick={() => {
+                const submittedKey = apiKey;
+                setApiKey("");
                 void act(
                   "test",
-                  api.testProvider,
-                  "Model-list request succeeded. Send a chat message to verify generation.",
-                )
-              }
+                  async () => {
+                    if (dirty)
+                      update(
+                        await api.saveProvider(config, submittedKey, persist),
+                      );
+                    return api.testProvider();
+                  },
+                  "API key accepted. Choose a chat model and save; sending a message verifies generation.",
+                );
+              }}
             >
               {busy === "test" && <LoaderCircle size={15} className="spin" />}
-              Test connection
+              Connect and load models
             </button>
             <button
               type="button"
@@ -332,7 +403,7 @@ export default function ProviderSetup({
           </div>
           <p className="reflection-note">
             {dirty
-              ? "Save your changes before testing."
+              ? "Save to apply your model and cost settings. Connect and load models also saves your changes."
               : status.tested_at
                 ? `Model-list access checked ${new Date(status.tested_at).toLocaleString()}.`
                 : "Connection has not been tested."}{" "}

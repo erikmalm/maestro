@@ -97,9 +97,13 @@ class Provider:
     def configure(self, config, key, persist):
         config["base_url"] = validate_url(config["base_url"])
         with self.transaction() as state:
+            # Model-list access depends on the endpoint/key, not the chat model or API format.
+            connection_changed = bool(key) or config["base_url"] != state["config"]["base_url"]
             if key:
                 credentials.save(config["base_url"], key, persist)
-            state.update({"config": config, "models": [], "tested_at": None})
+            state["config"] = config
+            if connection_changed:
+                state.update({"models": [], "tested_at": None})
         return self.status()
 
     def test(self):
@@ -169,6 +173,8 @@ class Provider:
             request_id = uuid.uuid4().hex
             state["ledger"].append({"id": request_id, "at": self.stamp(), "model": config["model"], "cost": reserve, "status": "reserved"})
         payload = {"model": config["model"], "store": False}
+        if config["base_url"] == "https://api.openai.com/v1":
+            payload["service_tier"] = "default"  # Match the standard price estimates, independent of project defaults.
         if config["protocol"] == "responses":
             payload.update({"instructions": INSTRUCTIONS, "input": history, "max_output_tokens": output_bound})
             path = "/responses"

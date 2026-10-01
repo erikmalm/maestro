@@ -79,15 +79,12 @@ test("connection setup, HTTP chat, conversation context and usage", async ({
     .getByLabel("Save a new key in Windows Credential Manager")
     .uncheck();
   await page
-    .getByRole("button", { name: "Save connection", exact: true })
+    .getByRole("button", { name: "Connect and load models", exact: true })
     .click();
   await expect(page.getByLabel("API key", { exact: true })).toHaveValue("");
-  await page
-    .getByRole("button", { name: "Test connection", exact: true })
-    .click();
   await expect(
     page.getByText(
-      "Model-list request succeeded. Send a chat message to verify generation.",
+      "API key accepted. Choose a chat model and save; sending a message verifies generation.",
     ),
   ).toBeVisible();
   await expect(page.locator("#provider-models option")).toHaveAttribute(
@@ -99,7 +96,7 @@ test("connection setup, HTTP chat, conversation context and usage", async ({
     .selectOption("synthetic-browser-model");
   await page.getByLabel("Input USD / 1M tokens", { exact: true }).fill("1");
   await page.getByLabel("Output USD / 1M tokens", { exact: true }).fill("2");
-  await page.getByLabel("I verified these prices for this model").check();
+  await page.getByLabel("Use these prices for cost estimates").check();
   await page
     .getByRole("button", { name: "Save connection", exact: true })
     .click();
@@ -109,6 +106,9 @@ test("connection setup, HTTP chat, conversation context and usage", async ({
     "synthetic-browser-model",
   );
   await expect(page.getByLabel("API key", { exact: true })).toHaveValue("");
+  await expect(
+    page.getByLabel("Available models", { exact: true }),
+  ).toHaveValue("synthetic-browser-model");
   await mkdir(artifacts, { recursive: true });
   await page.screenshot({
     path: join(artifacts, "maestro-provider-settings.png"),
@@ -167,6 +167,73 @@ test("connection setup, HTTP chat, conversation context and usage", async ({
   expect(
     await page.evaluate(() => JSON.stringify([localStorage, sessionStorage])),
   ).not.toContain("synthetic-browser-key");
+});
+
+test("OpenAI model choice loads prices without a paid request", async ({
+  page,
+}) => {
+  const config = {
+    base_url: "https://api.openai.com/v1",
+    protocol: "responses",
+    model: "",
+    input_usd_per_million: 0,
+    output_usd_per_million: 0,
+    pricing_verified: false,
+    max_output_tokens: 1024,
+  };
+  await page.route("**/api/provider", (route) =>
+    route.fulfill({
+      json: {
+        config,
+        credentials_present: true,
+        credential_source: "session",
+        models: ["gpt-6-luna", "specialized-image-model", "constructor"],
+        tested_at: new Date().toISOString(),
+      },
+    }),
+  );
+  await page.goto("/");
+  // Keep the dated price fixture within its documented 30-day freshness window.
+  await page.clock.setFixedTime(new Date("2026-10-02T12:00:00Z"));
+  await page.getByRole("button", { name: "Settings", exact: true }).click();
+  await page
+    .getByLabel("Available models", { exact: true })
+    .selectOption("gpt-6-luna");
+  await expect(
+    page.getByLabel("Input USD / 1M tokens", { exact: true }),
+  ).toHaveValue("0.1");
+  await expect(
+    page.getByLabel("Output USD / 1M tokens", { exact: true }),
+  ).toHaveValue("0.5");
+  await expect(
+    page.getByLabel("Use these prices for cost estimates"),
+  ).toBeChecked();
+  await expect(
+    page.getByText(/Standard OpenAI rates filled automatically/),
+  ).toBeVisible();
+  await page
+    .getByLabel("Available models", { exact: true })
+    .selectOption("specialized-image-model");
+  await expect(
+    page.getByLabel("Use these prices for cost estimates"),
+  ).not.toBeChecked();
+  await expect(
+    page.getByLabel("Input USD / 1M tokens", { exact: true }),
+  ).toHaveValue("0");
+  await page
+    .getByLabel("Available models", { exact: true })
+    .selectOption("constructor");
+  await expect(
+    page.getByLabel("Use these prices for cost estimates"),
+  ).not.toBeChecked();
+  // Stale price snapshots must not silently enable chat with outdated estimates.
+  await page.clock.setFixedTime(new Date("2026-12-01T12:00:00Z"));
+  await page
+    .getByLabel("Available models", { exact: true })
+    .selectOption("gpt-6-luna");
+  await expect(
+    page.getByLabel("Use these prices for cost estimates"),
+  ).not.toBeChecked();
 });
 
 test("mobile chat, settings and navigation fit the viewport", async ({
