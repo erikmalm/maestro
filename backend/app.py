@@ -131,14 +131,16 @@ def read_workspace() -> dict:
 
 def snapshot(state: dict, chat_id: str | None = None) -> dict:
     chat = selected_chat(state, chat_id)
+    service = provider()
+    provider_state = service.read_state()
     return {
         **{key: state[key] for key in ("tasks", "limits")},
         "chats": [{key: item[key] for key in ("id", "title", "created_at", "updated_at")}
                   for item in sorted(state["chats"], key=lambda item: item["updated_at"], reverse=True)],
         "active_chat_id": chat["id"] if chat else None,
         "messages": chat["messages"] if chat else [],
-        "usage": Provider(DATABASE, TIMEZONE).usage(),
-        "provider": Provider(DATABASE, TIMEZONE).status(),
+        "usage": service.usage(provider_state),
+        "provider": service.status(provider_state),
         "web_search": WebSearch(DATABASE, TIMEZONE).summary(),
         "capabilities": {"mode": "local", "live_ai": True, "task_execution": False, "delegation": False, "github_pr": False, "secure_credentials": os.name == "nt"},
     }
@@ -211,6 +213,14 @@ class WebSearchSetup(StrictModel):
 
 def provider():
     return Provider(DATABASE, TIMEZONE)
+
+
+@contextmanager
+def conflict_errors():
+    try:
+        yield
+    except ValueError as error:
+        raise HTTPException(409, str(error)) from None
 
 
 @asynccontextmanager
@@ -312,65 +322,52 @@ def get_web_search():
 
 @app.put("/api/web-search")
 def configure_web_search(entry: WebSearchSetup):
-    try:
+    with conflict_errors():
         if entry.config.enabled:
             config = provider().read_state()["config"]
             if config["protocol"] != "ollama" or config["ollama_context_tokens"] < 8192:
                 raise ValueError("Automatic search needs local Ollama and at least 8192 context tokens. Update Local worker settings first.")
         return WebSearch(DATABASE, TIMEZONE).configure(entry.config.model_dump(), entry.api_key, entry.persist)
-    except ValueError as error:
-        raise HTTPException(409, str(error)) from None
 
 
 @app.post("/api/web-search/test")
 def test_web_search():
     service = WebSearch(DATABASE, TIMEZONE)
-    try:
+    with conflict_errors():
         service.search("Ollama official web search documentation", test=True)
         return service.status()
-    except ValueError as error:
-        raise HTTPException(409, str(error)) from None
 
 
 @app.delete("/api/web-search/key")
 def delete_web_search_key():
-    try:
+    with conflict_errors():
         return WebSearch(DATABASE, TIMEZONE).delete_key()
-    except ValueError as error:
-        raise HTTPException(409, str(error)) from None
 
 
 @app.put("/api/provider")
 def configure_provider(entry: ProviderSetup):
-    try:
+    with conflict_errors():
         return provider().configure(entry.config.model_dump(), entry.api_key, entry.persist)
-    except ValueError as error:
-        raise HTTPException(409, str(error)) from None
 
 
 @app.post("/api/provider/test")
 def test_provider():
-    try:
+    with conflict_errors():
         return provider().test()
-    except ValueError as error:
-        raise HTTPException(409, str(error)) from None
 
 
 @app.delete("/api/provider/key")
 def remove_provider_key():
-    try:
-        credentials.delete(provider().status()["config"]["base_url"])
-        return provider().status()
-    except ValueError as error:
-        raise HTTPException(409, str(error)) from None
+    with conflict_errors():
+        service = provider()
+        credentials.delete(service.read_state()["config"]["base_url"])
+        return service.status()
 
 
 @app.post("/api/provider/charges/{entry_id}/reconcile")
 def reconcile_provider_charge(entry_id: str, entry: ChargeInput):
-    try:
+    with conflict_errors():
         provider().reconcile(entry_id, entry.billed_usd)
-    except ValueError as error:
-        raise HTTPException(409, str(error)) from None
     return snapshot(read_workspace())
 
 
@@ -406,10 +403,8 @@ def chat(entry: TextInput):
             target = create_chat_record()
             state["chats"].append(target)
         chat_id = target["id"]
-    try:
+    with conflict_errors():
         provider().chat(entry.text, chat_id)
-    except ValueError as error:
-        raise HTTPException(409, str(error)) from None
     state = read_workspace()
     return snapshot(state, chat_id if any(item["id"] == chat_id for item in state["chats"]) else None)
 

@@ -137,8 +137,8 @@ class Provider:
             yield (state, db) if with_db else state
             db.execute("INSERT INTO provider_state VALUES(1,?) ON CONFLICT(id) DO UPDATE SET value=excluded.value", (json.dumps(state),))
 
-    def status(self):
-        state = self.read_state()
+    def status(self, state=None):
+        state = self.read_state() if state is None else state
         required = state["config"]["protocol"] != "ollama"
         key, source = credentials.read(state["config"]["base_url"]) if required else (None, "not_required")
         return {"config": state["config"], "credentials_present": bool(key), "credential_source": source,
@@ -152,8 +152,9 @@ class Provider:
                     state = json.loads(row[0])
                     state["config"] = {**DEFAULT, **state["config"]}
                     return state
-            except sqlite3.OperationalError:
-                pass
+            except sqlite3.OperationalError as error:
+                if str(error) != "no such table: provider_state":
+                    raise
         return {"config": DEFAULT.copy(), "models": [], "tested_at": None, "ledger": []}
 
     def configure(self, config, key, persist):
@@ -196,8 +197,8 @@ class Provider:
             state.update({"models": models, "tested_at": self.stamp()})
         return self.status()
 
-    def usage(self):
-        entries = self.read_state()["ledger"]
+    def usage(self, state=None):
+        entries = (self.read_state() if state is None else state)["ledger"]
         now = datetime.now(self.timezone)
         today = [x for x in entries if datetime.fromisoformat(x["at"]).astimezone(self.timezone).date() == now.date()]
         month = [x for x in entries if datetime.fromisoformat(x["at"]).astimezone(self.timezone).strftime("%Y-%m") == now.strftime("%Y-%m")]
@@ -224,7 +225,7 @@ class Provider:
         if result["title_ready"]:
             try:
                 self.generate("", chat_id, title_for=result)
-            except ValueError:
+            except Exception:
                 # Naming is optional. Keep the completed reply and any recorded charges.
                 pass
         return result["reply"]
@@ -233,7 +234,7 @@ class Provider:
         """Reply and title generation use one provider adapter, reservation gate and ledger."""
         title = title_for is not None
         # Reserve before dispatch under the same SQLite lock used for tasks and limits.
-        with self.transaction() as state, closing(sqlite3.connect(self.database)) as db:
+        with self.transaction(with_db=True) as (state, db):
             config = title_for["config"] if title else state["config"].copy()
             if title and state["config"] != config:
                 raise ValueError("Model settings changed; the first-message title was skipped.")
@@ -242,8 +243,7 @@ class Provider:
             instructions = TITLE_INSTRUCTIONS if title else INSTRUCTIONS + (SEARCH_INSTRUCTIONS if auto_search else "")
             if auto_search and config["ollama_context_tokens"] < 8192:
                 raise ValueError("Automatic web search needs at least 8192 context tokens. Update Local worker settings or disable search.")
-            key, _ = ((title_for["key"], "request snapshot") if title else
-                      ((None, "not_required") if local else credentials.read(config["base_url"])))
+            key = title_for["key"] if title else (None if local else credentials.read(config["base_url"])[0])
             if not config["model"]:
                 raise ValueError("Choose a chat model in Settings before chatting.")
             if not local and not key:
@@ -314,15 +314,14 @@ class Provider:
             data = network(config, key, "POST", path, payload)
             if auto_search:
                 data, search_result = self.search_turn(config, payload, data, request_id, workspace["limits"])
-            raw_usage = data if local else data.get("usage", {})
-            fields = ("prompt_eval_count", "eval_count") if local else (("input_tokens", "output_tokens") if config["protocol"] == "responses" else ("prompt_tokens", "completion_tokens"))
-            if local and data.get("done") is not True:
-                raise ValueError("Ollama did not complete the response. Try a shorter reply or check the model.")
-            if not isinstance(raw_usage, dict) or any(type(raw_usage.get(k)) is not int or raw_usage[k] < 0 for k in fields):
-                if local:
-                    raise ValueError("Ollama did not return valid token usage. Check the local model before retrying.")
-                raise ValueError("Provider did not return valid token usage; charges need reconciliation.")
-            input_tokens, output_tokens = (raw_usage[k] for k in fields)
+            if local:
+                input_tokens, output_tokens = local_usage(data)
+            else:
+                raw_usage = data.get("usage", {})
+                fields = ("input_tokens", "output_tokens") if config["protocol"] == "responses" else ("prompt_tokens", "completion_tokens")
+                if not isinstance(raw_usage, dict) or any(type(raw_usage.get(k)) is not int or raw_usage[k] < 0 for k in fields):
+                    raise ValueError("Provider did not return valid token usage; charges need reconciliation.")
+                input_tokens, output_tokens = (raw_usage[k] for k in fields)
             cost = (input_tokens * config["input_usd_per_million"] + output_tokens * config["output_usd_per_million"]) / 1000000
             title_ready = False
             with self.transaction(with_db=True) as (state, db):

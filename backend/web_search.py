@@ -64,8 +64,9 @@ class WebSearch:
                 row = db.execute("SELECT value FROM web_search_state WHERE id=1").fetchone()
                 if row:
                     return json.loads(row[0])
-            except sqlite3.OperationalError:
-                pass
+            except sqlite3.OperationalError as error:
+                if str(error) != "no such table: web_search_state":
+                    raise
         return {"config": DEFAULT.copy(), "tested_at": None, "paused_until": None, "ledger": []}
 
     @contextmanager

@@ -94,14 +94,18 @@ function LimitsForm({
   onSave: (limits: Limits) => void;
   busy: boolean;
 }) {
-  const [draft, setDraft] = useState(limits);
-  useEffect(() => setDraft(limits), [limits]);
   return (
     <form
       className="limits-form"
       onSubmit={(event) => {
         event.preventDefault();
-        onSave(draft);
+        const data = new FormData(event.currentTarget);
+        onSave({
+          run_usd: Number(data.get("run_usd")),
+          daily_usd: Number(data.get("daily_usd")),
+          monthly_usd: Number(data.get("monthly_usd")),
+          max_tokens: Number(data.get("max_tokens")),
+        });
       }}
     >
       <div className="form-section-label">SPENDING LIMITS · USD</div>
@@ -121,10 +125,8 @@ function LimitsForm({
               min="0"
               max={field.max}
               step="0.01"
-              value={draft[field.key]}
-              onChange={(event) =>
-                setDraft({ ...draft, [field.key]: Number(event.target.value) })
-              }
+              name={field.key}
+              defaultValue={limits[field.key]}
             />
           </label>
         ))}
@@ -137,10 +139,8 @@ function LimitsForm({
           min="0"
           max="10000000"
           step="1"
-          value={draft.max_tokens}
-          onChange={(event) =>
-            setDraft({ ...draft, max_tokens: Number(event.target.value) })
-          }
+          name="max_tokens"
+          defaultValue={limits.max_tokens}
         />
       </label>
       <p className="form-note">
@@ -172,18 +172,18 @@ function UsageDetails({ workspace }: { workspace: Workspace }) {
         </strong>
       </div>
       <div className="usage-breakdown">
-        <div>
-          <span>Input tokens</span>
-          <strong>{usage.input_tokens.toLocaleString()}</strong>
-        </div>
-        <div>
-          <span>Output tokens</span>
-          <strong>{usage.output_tokens.toLocaleString()}</strong>
-        </div>
-        <div>
-          <span>API requests</span>
-          <strong>{usage.calls}</strong>
-        </div>
+        {(
+          [
+            ["Input tokens", usage.input_tokens],
+            ["Output tokens", usage.output_tokens],
+            ["API requests", usage.calls],
+          ] as const
+        ).map(([label, value]) => (
+          <div key={label}>
+            <span>{label}</span>
+            <strong>{value.toLocaleString()}</strong>
+          </div>
+        ))}
       </div>
       <div className="usage-month">
         <span>Estimated month to date</span>
@@ -255,10 +255,6 @@ export default function App() {
   const [toast, setToast] = useState("");
   const [error, setError] = useState("");
   const [chat, setChat] = useState("");
-  const [chatTitle, setChatTitle] = useState("");
-  const [taskTitle, setTaskTitle] = useState("");
-  const [taskDetails, setTaskDetails] = useState("");
-  const [priority, setPriority] = useState("normal");
   const [mobileNav, setMobileNav] = useState(false);
   const navigationDrawer = useRef<HTMLElement>(null);
   const navigationMenu = useRef<HTMLButtonElement>(null);
@@ -384,24 +380,24 @@ export default function App() {
     setPage(next);
     setMobileNav(false);
   }
-  function openTask() {
-    setTaskTitle("");
-    setTaskDetails("");
-    setPriority("normal");
-    setPanel("task");
-  }
   async function switchChat(action: () => Promise<Workspace>) {
     if (await perform("select-chat", action, undefined, true)) {
       setChat("");
       navigate("workspace");
     }
   }
-  async function createTask(event: FormEvent) {
+  async function createTask(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    const data = new FormData(event.currentTarget);
     if (
       await perform(
         "task",
-        () => api.addTask(taskTitle, taskDetails, priority),
+        () =>
+          api.addTask(
+            String(data.get("title")),
+            String(data.get("details")),
+            String(data.get("priority")),
+          ),
         "Task saved locally.",
       )
     )
@@ -410,6 +406,7 @@ export default function App() {
   async function submitChat(event: { preventDefault(): void }) {
     event.preventDefault();
     if (!chat.trim() || busy) return;
+    const submitted = chat;
     if (
       await perform("chat", async () => {
         let id = workspace?.active_chat_id;
@@ -420,10 +417,10 @@ export default function App() {
         }
         if (!id)
           throw new Error("Could not create a conversation. Please try again.");
-        return api.sendMessage(chat, id);
+        return api.sendMessage(submitted, id);
       })
     )
-      setChat("");
+      setChat((draft) => (draft === submitted ? "" : draft));
   }
   async function saveLimits(limits: Limits) {
     if (await perform("limits", () => api.saveLimits(limits), "Limits saved."))
@@ -594,10 +591,7 @@ export default function App() {
                     className="icon-button"
                     aria-label="Rename chat"
                     disabled={!!busy}
-                    onClick={() => {
-                      setChatTitle(activeChat.title);
-                      setPanel("rename-chat");
-                    }}
+                    onClick={() => setPanel("rename-chat")}
                   >
                     <Pencil size={17} />
                   </button>
@@ -741,7 +735,10 @@ export default function App() {
                   {workspace.tasks.length - openTasks.length} completed
                 </p>
               </div>
-              <button className="button primary" onClick={openTask}>
+              <button
+                className="button primary"
+                onClick={() => setPanel("task")}
+              >
                 <Plus size={16} /> New task
               </button>
             </div>
@@ -832,7 +829,10 @@ export default function App() {
                 ))}
               </div>
               <div className="settings-side">
-                <ProviderSetup onChange={refreshWorkspace} />
+                <ProviderSetup
+                  initialStatus={workspace.provider}
+                  onChange={refreshWorkspace}
+                />
                 <OllamaSearchSetup
                   provider={workspace.provider}
                   onChange={refreshWorkspace}
@@ -851,29 +851,15 @@ export default function App() {
           >
             <label>
               What would you like to do?
-              <input
-                autoFocus
-                required
-                maxLength={200}
-                value={taskTitle}
-                onChange={(event) => setTaskTitle(event.target.value)}
-              />
+              <input autoFocus required maxLength={200} name="title" />
             </label>
             <label>
               Context & completion criteria
-              <textarea
-                rows={4}
-                maxLength={3000}
-                value={taskDetails}
-                onChange={(event) => setTaskDetails(event.target.value)}
-              />
+              <textarea rows={4} maxLength={3000} name="details" />
             </label>
             <label>
               Priority
-              <select
-                value={priority}
-                onChange={(event) => setPriority(event.target.value)}
-              >
+              <select name="priority" defaultValue="normal">
                 <option value="normal">Normal</option>
                 <option value="high">High</option>
               </select>
@@ -916,10 +902,12 @@ export default function App() {
             className="entry-form"
             onSubmit={async (event) => {
               event.preventDefault();
+              const data = new FormData(event.currentTarget);
               if (
                 await perform(
                   "rename-chat",
-                  () => api.renameChat(activeChat.id, chatTitle),
+                  () =>
+                    api.renameChat(activeChat.id, String(data.get("title"))),
                   undefined,
                   true,
                 )
@@ -933,15 +921,13 @@ export default function App() {
                 autoFocus
                 required
                 maxLength={120}
-                value={chatTitle}
-                onChange={(event) => setChatTitle(event.target.value)}
+                name="title"
+                defaultValue={activeChat.title}
+                pattern=".*\S.*"
               />
             </label>
             <div className="form-actions">
-              <button
-                className="button primary"
-                disabled={!!busy || !chatTitle.trim()}
-              >
+              <button className="button primary" disabled={!!busy}>
                 Save title
               </button>
             </div>

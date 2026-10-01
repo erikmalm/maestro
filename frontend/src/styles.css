@@ -614,7 +614,6 @@ textarea {
 .entry-form textarea,
 .entry-form select,
 .reflection-box input:not([type="checkbox"]),
-.reflection-box textarea,
 .reflection-box select {
   width: 100%;
   min-width: 0;

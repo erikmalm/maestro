@@ -66,14 +66,18 @@ try {
             try {
                 if (-not $serverProcess.HasExited) {
                     taskkill.exe /PID $serverProcess.Id /T /F 2>$null | Out-Null
-                    if ($LASTEXITCODE -ne 0) { Write-Warning "Could not stop the launched Maestro process tree (PID $($serverProcess.Id))." }
-                }
-            } catch { Write-Warning "Could not stop the launched Maestro process tree (PID $($serverProcess.Id))." }
-            try {
-                if ((Test-Path -LiteralPath $pidPath) -and ([string](Get-Content -Raw -LiteralPath $pidPath)).Trim() -eq [string]$serverProcess.Id) {
-                    Remove-Item -LiteralPath $pidPath
                 }
             } catch { }
+            if (-not $serverProcess.HasExited) { Write-Warning "Could not stop the launched Maestro process tree (PID $($serverProcess.Id))." }
+            try {
+                $pidExists = Test-Path -LiteralPath $pidPath
+                $ownsPidFile = $pidExists -and ([string](Get-Content -Raw -LiteralPath $pidPath)).Trim() -eq [string]$serverProcess.Id
+                if ($serverProcess.HasExited) {
+                    if ($ownsPidFile) { Remove-Item -LiteralPath $pidPath }
+                } elseif (-not $pidExists) {
+                    New-Item -ItemType File -Path $pidPath -Value $serverProcess.Id | Out-Null
+                }
+            } catch { Write-Warning "Could not update the launched Maestro process record (PID $($serverProcess.Id))." }
         }
         throw $startupError
     }

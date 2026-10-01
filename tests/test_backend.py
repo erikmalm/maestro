@@ -12,7 +12,8 @@ from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 from backend import app as backend
-from backend.provider import DEFAULT
+from backend.provider import DEFAULT, Provider
+from backend.web_search import DEFAULT as SEARCH_DEFAULT, WebSearch
 
 
 class WorkspaceTests(unittest.TestCase):
@@ -114,6 +115,38 @@ class WorkspaceTests(unittest.TestCase):
         with closing(sqlite3.connect(backend.DATABASE)) as db:
             self.assertEqual(db.execute("SELECT value FROM provider_state WHERE id=1").fetchone()[0], private_state)
             self.assertEqual(json.loads(db.execute("SELECT value FROM workspace WHERE id=1").fetchone()[0]), backend.seed_workspace())
+
+    def test_state_readers_only_use_defaults_for_missing_tables(self):
+        provider = Provider(backend.DATABASE, backend.TIMEZONE)
+        search = WebSearch(backend.DATABASE, backend.TIMEZONE)
+        for reader, config in ((provider, DEFAULT), (search, SEARCH_DEFAULT)):
+            self.assertEqual(reader.read_state()["config"], config)
+            self.assertEqual(reader.read_state()["ledger"], [])
+        stamp = backend.now()
+        provider_state = {"config": {**DEFAULT, "model": "saved-paid-model"}, "models": [], "tested_at": stamp,
+                          "ledger": [{"id": "paid-call", "at": stamp, "cost": 0.12, "input_tokens": 15, "output_tokens": 5, "status": "settled"}]}
+        search_state = {"config": {**SEARCH_DEFAULT, "daily_limit": 7}, "tested_at": stamp, "paused_until": None,
+                        "ledger": [{"id": "search", "at": stamp, "status": "completed"}]}
+        with closing(sqlite3.connect(backend.DATABASE)) as db, db:
+            for table, state in (("provider_state", provider_state), ("web_search_state", search_state)):
+                db.execute(f"CREATE TABLE {table} (id INTEGER PRIMARY KEY, value TEXT NOT NULL)")
+                db.execute(f"INSERT INTO {table} VALUES (1, ?)", (json.dumps(state),))
+        real_connect = sqlite3.connect
+        def no_wait_connect(*args, **kwargs):
+            return real_connect(*args, **{**kwargs, "timeout": 0})
+        with closing(real_connect(backend.DATABASE)) as writer:
+            writer.execute("BEGIN EXCLUSIVE")
+            try:
+                with patch.object(backend.sqlite3, "connect", side_effect=no_wait_connect):
+                    for read in (provider.read_state, provider.usage, search.read_state, search.summary):
+                        with self.assertRaisesRegex(sqlite3.OperationalError, "locked"):
+                            read()
+            finally:
+                writer.rollback()
+        self.assertEqual(provider.read_state(), provider_state)
+        self.assertEqual(search.read_state(), search_state)
+        self.assertAlmostEqual(provider.usage()["today_usd"], 0.12)
+        self.assertEqual(search.summary()["searches_today"], 1)
 
     def test_concurrent_legacy_reads_migrate_one_conversation(self):
         legacy = {"tasks": [], "messages": [{"id": "old-live", "role": "user", "text": "Preserve this history"}],

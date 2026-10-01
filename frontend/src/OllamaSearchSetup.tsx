@@ -29,7 +29,10 @@ export default function OllamaSearchSetup({
     void api
       .loadWebSearch()
       .then((next) => {
-        if (active) update(next);
+        if (active) {
+          setStatus(next);
+          setConfig(next.config);
+        }
       })
       .catch((reason: unknown) => {
         if (active)

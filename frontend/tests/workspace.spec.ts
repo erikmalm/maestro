@@ -149,6 +149,21 @@ test("connection setup, named persistent chats, isolated context and usage", asy
   await page
     .getByRole("button", { name: "Save connection", exact: true })
     .click();
+  // Saving or testing the provider refreshes workspace accounting, not unsaved limit fields.
+  await page.getByLabel("Per day", { exact: true }).fill("7");
+  const refreshed = page.waitForResponse(
+    (response) => response.url().includes("/api/workspace") && response.ok(),
+  );
+  await page
+    .getByRole("button", { name: "Connect and load models", exact: true })
+    .click();
+  await refreshed;
+  await expect(
+    page.getByText(
+      "API key accepted. Choose a chat model and save; sending a message verifies generation.",
+    ),
+  ).toBeVisible();
+  await expect(page.getByLabel("Per day", { exact: true })).toHaveValue("7");
   await page.reload();
   await page.getByRole("button", { name: "Settings", exact: true }).click();
   await expect(page.getByLabel("Model ID", { exact: true })).toHaveValue(
@@ -188,11 +203,30 @@ test("connection setup, named persistent chats, isolated context and usage", asy
   const juniperId = new URL(page.url()).searchParams.get("chat");
   expect(juniperId).toBeTruthy();
   expect((await firstSend).postDataJSON().chat_id).toBe(juniperId);
+  let releaseReply!: () => void;
+  const replyHeld = new Promise<void>((resolve) => {
+    releaseReply = resolve;
+  });
+  await page.route("**/api/chat", async (route) => {
+    await replyHeld;
+    await route.continue();
+  });
   await page.getByLabel("Message Maestro").fill("What was the codeword?");
   await page.getByRole("button", { name: "Send message" }).click();
   await expect(
+    page.getByRole("button", { name: "Send message" }),
+  ).toBeDisabled();
+  await page
+    .getByLabel("Message Maestro")
+    .fill("Draft written while awaiting the reply");
+  releaseReply();
+  await expect(
     page.getByText(/Earlier message: Remember the codeword JUNIPER/),
   ).toBeVisible();
+  await expect(page.getByLabel("Message Maestro")).toHaveValue(
+    "Draft written while awaiting the reply",
+  );
+  await page.unroute("**/api/chat");
   await page.reload();
   await expect(
     page.getByText(/Earlier message: Remember the codeword JUNIPER/),
@@ -347,17 +381,23 @@ test("OpenAI model choice loads prices without a paid request", async ({
     pricing_verified: false,
     max_output_tokens: 1024,
   };
-  await page.route("**/api/provider", (route) =>
-    route.fulfill({
+  await page.route("**/api/workspace*", async (route) => {
+    const response = await route.fetch();
+    const workspace = await response.json();
+    await route.fulfill({
+      response,
       json: {
-        config,
-        credentials_present: true,
-        credential_source: "session",
-        models: ["gpt-6-luna", "specialized-image-model", "constructor"],
-        tested_at: new Date().toISOString(),
+        ...workspace,
+        provider: {
+          config,
+          credentials_present: true,
+          credential_source: "session",
+          models: ["gpt-6-luna", "specialized-image-model", "constructor"],
+          tested_at: new Date().toISOString(),
+        },
       },
-    }),
-  );
+    });
+  });
   await page.goto("/");
   // Keep the dated price fixture within its documented 30-day freshness window.
   await page.clock.setFixedTime(new Date("2026-10-02T12:00:00Z"));

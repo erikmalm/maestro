@@ -152,7 +152,6 @@ export type ProviderStatus = {
   models: string[];
   tested_at: string | null;
 };
-export const loadProvider = () => request<ProviderStatus>("/provider");
 export const saveProvider = (
   config: ProviderConfig,
   api_key: string,

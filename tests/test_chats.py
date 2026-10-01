@@ -1,5 +1,5 @@
 """Persistent chat isolation and bounded, accounted naming with synthetic models."""
-from contextlib import closing
+from contextlib import closing, contextmanager
 from pathlib import Path
 import json
 import sqlite3
@@ -239,6 +239,52 @@ class ChatTests(unittest.TestCase):
             self.assertEqual(self.send(chat_id, "Continue after reconciliation").status_code, 200)
         self.assertEqual(sum(self.is_title(payload) for _, payload in self.requests), 1)
         self.assertAlmostEqual(self.workspace()["usage"]["today_usd"], 0.00128)
+
+    def test_title_reservation_lock_failure_keeps_paid_reply_successful_once(self):
+        self.configure({**DEFAULT, "base_url": "https://synthetic.example/v1", "model": "synthetic-paid",
+                        "input_usd_per_million": 1, "output_usd_per_million": 2, "pricing_verified": True})
+        chat_id = self.create_chat()
+        real_transaction, real_connect = Provider.transaction, sqlite3.connect
+        transaction_count = 0
+        def no_wait_connect(*args, **kwargs):
+            return real_connect(*args, **{**kwargs, "timeout": 0})
+        @contextmanager
+        def block_title_reservation(service, with_db=False):
+            nonlocal transaction_count
+            transaction_count += 1
+            if transaction_count == 3:  # Main reservation and settlement already committed.
+                with closing(real_connect(backend.DATABASE)) as writer:
+                    writer.execute("BEGIN IMMEDIATE")
+                    try:
+                        with patch("backend.provider.sqlite3.connect", side_effect=no_wait_connect):
+                            with real_transaction(service, with_db) as state:
+                                yield state
+                    finally:
+                        writer.rollback()
+            else:
+                with real_transaction(service, with_db) as state:
+                    yield state
+        with self.mock_http(), patch.object(Provider, "transaction", block_title_reservation):
+            result = self.send(chat_id, "Preserve this paid reply")
+            self.assertEqual(result.status_code, 200, result.text)
+            self.assertEqual(transaction_count, 3)
+            self.assertEqual(result.json()["messages"][-1]["text"], "Synthetic useful reply")
+            self.assertEqual(result.json()["chats"][0]["title"], "Preserve this paid reply")
+            usage = result.json()["usage"]
+            self.assertEqual((usage["input_tokens"], usage["output_tokens"], usage["calls"]), (100, 20, 1))
+            self.assertAlmostEqual(usage["today_usd"], 0.00014)
+            self.assertEqual(usage["reserved_usd"], 0)
+            self.assertEqual(usage["uncertain"], [])
+            ledger = Provider(backend.DATABASE, backend.TIMEZONE).read_state()["ledger"]
+            self.assertEqual([(entry["kind"], entry["status"]) for entry in ledger], [("chat", "settled")])
+            self.assertEqual(len(self.requests), 1)
+            Provider(backend.DATABASE, backend.TIMEZONE).recover()
+            self.assertEqual(self.send(chat_id, "Continue after naming failed").status_code, 200)
+        self.assertFalse(any(self.is_title(payload) for _, payload in self.requests))
+        messages = self.workspace(chat_id)["messages"]
+        self.assertEqual(sum(message["text"] == "Preserve this paid reply" for message in messages), 1)
+        self.assertEqual(len(messages), 4)
+        self.assertAlmostEqual(self.workspace()["usage"]["today_usd"], 0.00028)
 
     def test_local_title_failure_is_not_retried_after_restart(self):
         chat_id = self.create_chat()
