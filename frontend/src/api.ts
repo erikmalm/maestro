@@ -27,6 +27,11 @@ export type Message = {
   cost?: number;
   input_tokens?: number;
   output_tokens?: number;
+  web_search?: {
+    query: string;
+    at: string;
+    sources: { title: string; url: string }[];
+  };
 };
 export type Limits = {
   run_usd: number;
@@ -52,6 +57,7 @@ export type Workspace = {
     uncertain: { id: string; at: string; reserved_usd: number }[];
   };
   provider: ProviderStatus;
+  web_search: WebSearchSummary;
   capabilities: {
     mode: "local";
     live_ai: boolean;
@@ -145,6 +151,34 @@ export const reconcileProviderCharge = (id: string, billed_usd: number) =>
   request<Workspace>(`/provider/charges/${id}/reconcile`, "POST", {
     billed_usd,
   });
+
+export type WebSearchConfig = {
+  enabled: boolean;
+  daily_limit: number;
+  max_results: number;
+};
+export type WebSearchSummary = {
+  config: WebSearchConfig;
+  searches_today: number;
+  remaining_today: number;
+  paused_until: string | null;
+};
+export type WebSearchStatus = WebSearchSummary & {
+  credentials_present: boolean;
+  credential_source: string;
+  tested_at: string | null;
+};
+export const loadWebSearch = () => request<WebSearchStatus>("/web-search");
+export const saveWebSearch = (
+  config: WebSearchConfig,
+  api_key: string,
+  persist: boolean,
+) =>
+  request<WebSearchStatus>("/web-search", "PUT", { config, api_key, persist });
+export const testWebSearch = () =>
+  request<WebSearchStatus>("/web-search/test", "POST", {});
+export const deleteWebSearchKey = () =>
+  request<WebSearchStatus>("/web-search/key", "DELETE");
 
 export type ReflectionConfig = {
   enabled: boolean;

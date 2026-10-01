@@ -54,6 +54,12 @@ Start with one explicitly queued text-only to-do, its own private task context a
 
 ## Current preview versus full runtime
 
+### Optional hosted search (implemented)
+
+The local chat adapter offers a single `web_search` tool when a verified search key and explicit automatic-search setting are present. A tool-capable local model chooses a query; the backend validates the single allowed call, contacts only `https://ollama.com/api/web_search`, and passes fitted, untrusted excerpts to one final generation with tools removed. Queries and actual source links persist privately beside the answer. Both local model calls share an output allowance and cumulative token gate. Known first-call usage remains recorded if search or final generation fails.
+
+Search has a separate private attempt ledger and endpoint-scoped OS/session credential. Daily attempt caps, one in-flight search, five-second spacing, response-size limits and provider cooldowns apply to tests and chat. The single chat reservation remains active throughout planning/search/answer, preventing concurrent chat dispatch. Search does not fetch result pages, use provider inference credentials, enable cloud model inference or retry automatically. The public API exposes counts/readiness, never the key; search billing is unknown rather than included in zero local inference cost. Real local tool selection is proven using synthetic hosted results; an actual key test remains required to establish hosted access.
+
 | Layer | Implemented preview | Next extension |
 | --- | --- | --- |
 | UI | React/TypeScript, responsive CSS, task/chat flow, run timelines, memory list, budget dialogs | Live streaming/status and per-agent usage drilldown |

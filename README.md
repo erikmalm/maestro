@@ -39,6 +39,21 @@ Conversation history is sent with later messages. **New chat** clears history wh
 
 The next proposed increment is a separate Maestro background task process using the same Ollama server. It should prove one queued text-only to-do completing with the browser closed, with persistent progress, pause and shared generation limits, before enabling iterative review or integrations. See the [process boundaries](docs/ARCHITECTURE.md#background-task-process-planned).
 
+## Optional automatic web search
+
+Ollama web search is a hosted tool, separate from local model inference. Creating an Ollama API key does not automatically add it to chat. Maestro explicitly offers one search tool to a compatible local model; when the model requests it, the backend calls the fixed hosted search API and supplies bounded excerpts for one final local reply. Result websites are not crawled or fetched by Maestro. See [Ollama's web search API](https://docs.ollama.com/capabilities/web-search).
+
+1. In **Settings**, select your local Ollama model, expand **Local worker settings**, set context size to at least **8192**, and save the model connection.
+2. In **Optional web search**, enter the Ollama search API key. Leave **Save search key in Windows Credential Manager** checked for persistence outside Git, or uncheck it for server-memory storage.
+3. Set a **Daily search cap** (default 20; 0 stops search) and **Results per search** (1-3). Click **Test search connection**. It saves the key if necessary and sends one fixed public query, which counts against the cap. Testing keeps automatic search disabled.
+4. After a successful test, check **Let Maestro decide when to search** and **Save search settings**. Chat will show the actual query and numbered source links when search is used. The key remains separate from the local model connection.
+
+Automatic search sends the model's chosen query to Ollama.com; queries can contain terms from the conversation. The key is sent only to the hosted search endpoint and never to the local model. Local models must report tool support. Maestro permits at most one search and two local model calls per message, sharing the reply token allowance and recording both calls' actual usage. Ordinary replies can complete without search. Failed searches show explicit errors and preserve known model usage; they do not silently generate a purported search answer.
+
+Search attempts, including tests, failures and interrupted requests, count toward the daily cap. Requests are at least five seconds apart, have a 30-second search timeout and no automatic retry. Rate-limit responses pause further searches and respect `Retry-After` (60 seconds if absent). These controls use the hosted service normally and do not evade site or service restrictions. Search counts and cooldowns are visible in Settings/usage; the search API supplies no billing feed, so search fees are not included in the local model's $0 inference figure. [Ollama's announcement](https://ollama.com/blog/web-search) describes free searches and subscription rate limits without a numerical quota or per-search price.
+
+Rejected key/account access disables automatic search until the key is successfully retested and search is explicitly enabled again. Ordinary local chat remains available.
+
 ## Usage and limits
 
 The header shows today's tokens and estimated USD. Each answer shows its model, input/output tokens and estimated cost. Usage details include day/month totals and reserved/uncertain charges.
@@ -50,6 +65,8 @@ Paid API requests with unknown usage retain a reservation and block further chat
 ## Private credentials and data
 
 Keys never go into Git, the workspace database, browser storage, prompts, read API responses or logs. The password field clears on submission. Persisted keys are scoped to the exact provider endpoint in Windows Credential Manager. Session-only keys disappear when the server stops; previously saved credentials remain until removed. A server-environment OpenAI key can also be used and is controlled outside the UI.
+
+The Ollama search key uses its own credential scope for `https://ollama.com/api/web_search`. Removing it disables automatic search and leaves the local model connection intact.
 
 Tasks, conversations, model settings and accounting live in `%LOCALAPPDATA%\Maestro\preview`, outside the checkout. An alternative `MAESTRO_DATA_DIR` must also resolve outside it. A public repository contains only reusable source, documentation and synthetic fixtures.
 
@@ -65,6 +82,6 @@ npm run build
 npm run test:ui
 ```
 
-Browser tests exercise setup/chat/history/usage against synthetic API and Ollama servers in a temporary workspace. Windows credential tests use a synthetic key and remove it afterward. Automated checks require no personal credentials or paid calls. A real LLM check requires either a running local Ollama model or a configured provider key, model and prices.
+Browser tests exercise setup/chat/history/usage and automatic search with source persistence against synthetic API/Ollama/search services in a temporary workspace. Windows credential tests use a synthetic key and remove it afterward. Automated checks require no personal credentials or paid calls. Real local tool selection and final generation are verified with synthetic hosted search results; hosted authentication must be verified with the user's key through **Test search connection**. A real LLM check requires either a running local Ollama model or a configured provider key, model and prices.
 
 The broader [development plan](DEVELOPMENT_PLAN.md) and [architecture](docs/ARCHITECTURE.md) describe planned capabilities. They are not acceptance evidence for the current chat milestone.

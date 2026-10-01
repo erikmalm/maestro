@@ -34,6 +34,7 @@ import {
 import * as api from "./api";
 import type { Limits, Run, Task, Workspace } from "./api";
 import ProviderSetup from "./ProviderSetup";
+import OllamaSearchSetup from "./OllamaSearchSetup";
 
 type Page =
   | "workspace"
@@ -48,6 +49,14 @@ const money = (value: number) =>
   `$${value.toFixed(value > 0 && value < 0.01 ? 4 : 2)}`;
 const tokens = (value: number) =>
   value >= 1000 ? `${(value / 1000).toFixed(1)}k` : String(value);
+function sourceURL(value: string) {
+  try {
+    const url = new URL(value);
+    return ["https:", "http:"].includes(url.protocol) ? url.href : null;
+  } catch {
+    return null;
+  }
+}
 const navigation = [
   { id: "workspace", name: "Workspace", icon: MessageCircle },
   { id: "tasks", name: "Tasks", icon: CheckSquare },
@@ -244,6 +253,21 @@ function UsageDetails({ workspace }: { workspace: Workspace }) {
           {money(usage.month_usd)} <span>/ {money(limits.monthly_usd)}</span>
         </strong>
       </div>
+      {workspace.web_search && (
+        <>
+          <div className="usage-month">
+            <span>Web searches today</span>
+            <strong>
+              {workspace.web_search.searches_today}{" "}
+              <span>/ {workspace.web_search.config.daily_limit}</span>
+            </strong>
+          </div>
+          <p className="preview-note">
+            Search fees are not reported and are separate from LLM USD
+            estimates.
+          </p>
+        </>
+      )}
       <p className="preview-note">
         <CircleHelp size={15} /> Tokens come from provider responses. USD uses
         your configured prices; cache discounts are not included. Reserved or
@@ -748,6 +772,33 @@ export default function App() {
                             {money(message.cost)} estimated
                           </small>
                         )}
+                        {message.web_search && (
+                          <div className="message-sources">
+                            <p>Search query: {message.web_search.query}</p>
+                            <ol>
+                              {message.web_search.sources.map(
+                                (source, index) => {
+                                  const url = sourceURL(source.url);
+                                  return (
+                                    <li key={index}>
+                                      {url ? (
+                                        <a
+                                          href={url}
+                                          target="_blank"
+                                          rel="noopener noreferrer"
+                                        >
+                                          {source.title || source.url}
+                                        </a>
+                                      ) : (
+                                        source.title
+                                      )}
+                                    </li>
+                                  );
+                                },
+                              )}
+                            </ol>
+                          </div>
+                        )}
                       </div>
                     </div>
                   ))}
@@ -804,6 +855,15 @@ export default function App() {
                   <ShieldCheck size={12} /> Chat is saved locally and sent to
                   your configured model provider when you send a message.
                 </p>
+                {workspace.provider.config.protocol === "ollama" &&
+                  workspace.web_search?.config.enabled && (
+                    <p className="composer-note">
+                      Automatic web search · one search maximum per message ·{" "}
+                      {workspace.web_search.searches_today} /{" "}
+                      {workspace.web_search.config.daily_limit} today. Queries
+                      go to Ollama.com.
+                    </p>
+                  )}
               </div>
             </section>
             <aside className="focus-pane">
@@ -1277,6 +1337,15 @@ export default function App() {
                   <ProviderSetup
                     onChange={() => {
                       void api.loadWorkspace().then(setWorkspace);
+                    }}
+                  />
+                  <OllamaSearchSetup
+                    provider={workspace.provider}
+                    onChange={() => {
+                      void api
+                        .loadWorkspace()
+                        .then(setWorkspace)
+                        .catch((reason: Error) => setError(reason.message));
                     }}
                   />
                   <div className="settings-hint">

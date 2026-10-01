@@ -2,6 +2,8 @@
 
 Plan date: 2026-10-01. Local Ollama setup, real two-turn chat, token accounting and persistent history are verified. Local inference requires no API key or model pricing. Optional paid API setup and accounting also have synthetic integration coverage. Background reflection and agent execution remain paused while delivery proceeds in small functional increments. The [architecture draft](docs/ARCHITECTURE.md) describes the broader proposed system.
 
+Optional automatic hosted Ollama search now has separate key setup/testing, a strict daily attempt cap and one-search-per-message execution with saved citations. Real local tool selection/final generation is verified using synthetic search results; hosted access still requires the user's successful key test. This feature does not enable the broader background task runner.
+
 ## 1. Product goal
 
 Build a locally bootable personal AI coordinator with a web interface for conversation, to-dos, agent orchestration, and a persistent private memory bank. A task should be able to progress through planning, delegation, review, and refinement with visible progress and enforced resource limits.

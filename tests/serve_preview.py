@@ -6,8 +6,10 @@ import sys
 import tempfile
 import json
 import threading
+from datetime import timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+import httpx
 import uvicorn
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -17,6 +19,7 @@ with tempfile.TemporaryDirectory(prefix="maestro-browser-") as directory:
     os.environ["MAESTRO_PORT"] = "8777"
     os.environ.pop("OPENAI_API_KEY", None)  # Browser checks must never inherit a paid provider credential.
     from backend import app as backend, credentials
+    from backend.web_search import ENDPOINT, WebSearch
 
     # Synthetic HTTP provider, so browser tests exercise the full network path without a paid LLM.
     class FixtureProvider(BaseHTTPRequestHandler):
@@ -50,7 +53,17 @@ with tempfile.TemporaryDirectory(prefix="maestro-browser-") as directory:
                     return self.reply(400, {"error": "Unexpected local credential"})
                 request = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
                 if self.path == "/api/show":
-                    return self.reply(200, {"details": {"format": "gguf"}, "capabilities": ["completion"]})
+                    return self.reply(200, {"details": {"format": "gguf"}, "capabilities": ["completion", "tools"]})
+                current = next(message["content"] for message in reversed(request["messages"]) if message["role"] == "user")
+                if request.get("tools") and current == "Find current Ollama web search documentation":
+                    return self.reply(200, {"done": True, "message": {"role": "assistant", "content": "",
+                        "tool_calls": [{"function": {"name": "web_search", "arguments": {"query": "Ollama official web search documentation"}}}]},
+                        "prompt_eval_count": 100, "eval_count": 10})
+                if request["messages"][-1]["role"] == "tool":
+                    if request.get("tools"):
+                        return self.reply(400, {"error": "Unexpected second tool round"})
+                    return self.reply(200, {"done": True, "message": {"role": "assistant", "content": "Synthetic search-assisted answer [1]"},
+                        "prompt_eval_count": 100, "eval_count": 20})
                 history = [message for message in request["messages"] if message["role"] != "system"]
                 reply = "Synthetic Ollama received: " + history[-1]["content"]
                 if len(history) > 1:
@@ -72,6 +85,33 @@ with tempfile.TemporaryDirectory(prefix="maestro-browser-") as directory:
     credentials.read = lambda url: (credentials.session_keys.get(url), "session" if url in credentials.session_keys else "missing")
     credentials.save = lambda url, key, persist: credentials.session_keys.update({url: key})
     credentials.delete = lambda url: credentials.session_keys.pop(url, None)
+
+    original_client = httpx.Client
+
+    class SearchFixtureTransport(httpx.BaseTransport):
+        def __init__(self):
+            self.local = httpx.HTTPTransport(trust_env=False)
+
+        def handle_request(self, request):
+            if str(request.url) == ENDPOINT:
+                assert request.headers.get("Authorization") == "Bearer synthetic-browser-search-key"
+                body = json.loads(request.read())
+                assert set(body) == {"query", "max_results"}
+                # Let the browser immediately proceed after its first synthetic connection test.
+                service = WebSearch(backend.DATABASE, backend.TIMEZONE)
+                with service.transaction() as state:
+                    if len(state["ledger"]) == 1:
+                        state["ledger"][-1]["at"] = (service.now() - timedelta(seconds=6)).isoformat()
+                return httpx.Response(200, json={"results": [{"title": "Ollama web search documentation",
+                    "url": "https://docs.ollama.com/capabilities/web-search", "content": "Synthetic hosted search evidence."}]})
+            if request.url.host != "127.0.0.1" or request.url.port != fake.server_port:
+                raise httpx.ConnectError("Browser fixture blocks all real provider traffic", request=request)
+            return self.local.handle_request(request)
+
+        def close(self):
+            self.local.close()
+
+    httpx.Client = lambda **kwargs: original_client(transport=SearchFixtureTransport(), **kwargs)
 
     @backend.app.get("/api/provider-fixture")
     def fixture_url():

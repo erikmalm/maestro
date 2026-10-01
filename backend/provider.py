@@ -9,6 +9,7 @@ from urllib.parse import urlsplit
 import httpx
 
 from backend import credentials
+from backend.web_search import WebSearch, TOOL, SEARCH_INSTRUCTIONS, fit_sources
 
 DEFAULT = {"base_url": "https://api.openai.com/v1", "protocol": "responses", "model": "",
            "input_usd_per_million": 0.0, "output_usd_per_million": 0.0,
@@ -107,6 +108,15 @@ def network(config, key, method, path, payload=None):
         raise ValueError("Provider returned an invalid response.") from None
 
 
+def local_usage(data):
+    if data.get("done") is not True:
+        raise ValueError("Ollama did not complete the response. Try a shorter reply or check the model.")
+    fields = ("prompt_eval_count", "eval_count")
+    if any(type(data.get(field)) is not int or data[field] < 0 for field in fields):
+        raise ValueError("Ollama did not return valid token usage. Check the local model before retrying.")
+    return tuple(data[field] for field in fields)
+
+
 class Provider:
     def __init__(self, database, timezone):
         self.database, self.timezone = database, timezone
@@ -192,7 +202,7 @@ class Provider:
         month = [x for x in entries if datetime.fromisoformat(x["at"]).astimezone(self.timezone).strftime("%Y-%m") == now.strftime("%Y-%m")]
         return {"today_usd": sum(x["cost"] for x in today), "month_usd": sum(x["cost"] for x in month),
                 "input_tokens": sum(x.get("input_tokens", 0) for x in today), "output_tokens": sum(x.get("output_tokens", 0) for x in today),
-                "calls": len(today), "reserved_usd": sum(x["cost"] for x in entries if x["status"] in ("reserved", "uncertain")),
+                "calls": sum(x.get("model_calls", 1) for x in today), "reserved_usd": sum(x["cost"] for x in entries if x["status"] in ("reserved", "uncertain")),
                 "uncertain": [{"id": x["id"], "at": x["at"], "reserved_usd": x["cost"]} for x in entries if x["status"] == "uncertain"]}
 
     def recover(self):
@@ -213,6 +223,10 @@ class Provider:
         with self.transaction() as state, closing(sqlite3.connect(self.database)) as db:
             config = state["config"].copy()
             local = config["protocol"] == "ollama"
+            auto_search = local and WebSearch(self.database, self.timezone).read_state()["config"]["enabled"]
+            instructions = INSTRUCTIONS + (SEARCH_INSTRUCTIONS if auto_search else "")
+            if auto_search and config["ollama_context_tokens"] < 8192:
+                raise ValueError("Automatic web search needs at least 8192 context tokens. Update Local worker settings or disable search.")
             key, _ = (None, "not_required") if local else credentials.read(config["base_url"])
             if not config["model"]:
                 raise ValueError("Choose a chat model in Settings before chatting.")
@@ -225,7 +239,7 @@ class Provider:
             workspace = json.loads(db.execute("SELECT value FROM workspace WHERE id=1").fetchone()[0])
             history = [{"role": x["role"], "content": x["text"]} for x in workspace["messages"] if not x.get("demo", False)]
             history.append({"role": "user", "content": text})
-            input_bound = len((INSTRUCTIONS + json.dumps(history)).encode("utf-8")) + 2048
+            input_bound = len((instructions + json.dumps(history) + (json.dumps(TOOL) if auto_search else "")).encode("utf-8")) + 2048
             output_bound = config["max_output_tokens"]
             if input_bound + output_bound > workspace["limits"]["max_tokens"]:
                 raise ValueError("This conversation exceeds your token limit. Start a new chat or adjust the limit.")
@@ -241,14 +255,17 @@ class Provider:
             request_id = uuid.uuid4().hex
             state["ledger"].append({"id": request_id, "at": self.stamp(), "model": config["model"], "protocol": config["protocol"], "cost": reserve, "status": "reserved"})
         payload = {"model": config["model"], "store": False}
+        search_result = None
         if config["base_url"] == "https://api.openai.com/v1":
             payload["service_tier"] = "default"  # Match the standard price estimates, independent of project defaults.
         if local:
             options = {"num_predict": output_bound, "num_ctx": config["ollama_context_tokens"],
                        "num_thread": config["ollama_threads"]}
             keep_alive = config["ollama_keep_alive_minutes"]
-            payload = {"model": config["model"], "messages": [{"role": "system", "content": INSTRUCTIONS}, *history],
+            payload = {"model": config["model"], "messages": [{"role": "system", "content": instructions}, *history],
                        "stream": False, "options": options, "keep_alive": f"{keep_alive}m" if keep_alive else 0}
+            if auto_search:
+                payload["tools"] = [TOOL]
             path = "/api/chat"
         elif config["protocol"] == "responses":
             payload.update({"instructions": INSTRUCTIONS, "input": history, "max_output_tokens": output_bound})
@@ -264,7 +281,11 @@ class Provider:
                         or not isinstance(metadata.get("capabilities"), list)
                         or "completion" not in metadata["capabilities"]):
                     raise ProviderFailure("Choose an installed local chat model. Ollama cloud models are disabled in local mode.", False)
+                if auto_search and "tools" not in metadata["capabilities"]:
+                    raise ProviderFailure("This local model does not support automatic search tools. Choose a tool-capable model or disable search.", False)
             data = network(config, key, "POST", path, payload)
+            if auto_search:
+                data, search_result = self.search_turn(config, payload, data, request_id, workspace["limits"])
             raw_usage = data if local else data.get("usage", {})
             fields = ("prompt_eval_count", "eval_count") if local else (("input_tokens", "output_tokens") if config["protocol"] == "responses" else ("prompt_tokens", "completion_tokens"))
             if local and data.get("done") is not True:
@@ -304,6 +325,8 @@ class Provider:
                 if reply:
                     workspace["messages"].extend([{"id": uuid.uuid4().hex, "role": "user", "text": text, "demo": False},
                         {"id": uuid.uuid4().hex, "role": "assistant", "text": reply, "demo": False, "model": config["model"], "cost": cost, "input_tokens": input_tokens, "output_tokens": output_tokens}])
+                    if search_result:
+                        workspace["messages"][-1]["web_search"] = search_result
                     db.execute("UPDATE workspace SET value=? WHERE id=1", (json.dumps(workspace),))
             if not reply:
                 raise ValueError("Provider returned no text. Usage was recorded; try a larger output limit or another chat model.")
@@ -322,3 +345,53 @@ class Provider:
             if isinstance(error, ValueError):
                 raise
             raise ValueError("Provider returned an unusable response. Check usage before retrying.") from None
+
+    def search_turn(self, config, payload, data, request_id, limits):
+        first_input, first_output = local_usage(data)
+        with self.transaction() as state:
+            entry = next(x for x in state["ledger"] if x["id"] == request_id)
+            entry.update(input_tokens=first_input, output_tokens=first_output, model_calls=1)
+        message = data.get("message", {})
+        calls = message.get("tool_calls", []) if isinstance(message, dict) else []
+        if not calls:
+            return data, None
+        if not isinstance(calls, list) or len(calls) != 1 or not isinstance(calls[0], dict):
+            raise ValueError("Only one web search is allowed per message. The model requested too many tools.")
+        function = calls[0].get("function")
+        args = function.get("arguments") if isinstance(function, dict) else None
+        if (not isinstance(function, dict) or function.get("name") != "web_search"
+                or not isinstance(args, dict) or set(args) != {"query"}
+                or not isinstance(args["query"], str) or not 1 <= len(args["query"].strip()) <= 512):
+            raise ValueError("The model returned an unsupported search tool or query. No tool was executed.")
+        remaining = config["max_output_tokens"] - first_output
+        if remaining <= 0:
+            raise ValueError("The model used the reply token allowance before search. Increase the output limit.")
+        assistant = {"role": "assistant", "content": message.get("content", "") if isinstance(message.get("content", ""), str) else "",
+                     "tool_calls": [{"function": {"name": "web_search", "arguments": args}}]}
+        final_messages = [*payload["messages"], assistant, {"role": "tool", "tool_name": "web_search", "content": ""}]
+        base_bound = len(json.dumps(final_messages, ensure_ascii=False).encode("utf-8")) + 2048
+        source_budget = min(4096, config["ollama_context_tokens"] - base_bound - remaining,
+                            limits["max_tokens"] - first_input - first_output - base_bound - remaining)
+        if source_budget < 512:
+            raise ValueError("Search results would exceed the conversation or token allowance. Start a new chat or increase the local context/token limit.")
+        result = WebSearch(self.database, self.timezone).search(args["query"])
+        fitted = fit_sources(result["sources"], source_budget)
+        final_messages[-1]["content"] = json.dumps(fitted, ensure_ascii=False)
+        final_bound = len(json.dumps(final_messages, ensure_ascii=False).encode("utf-8")) + 2048
+        with self.transaction(with_db=True) as (state, db):
+            current_limits = json.loads(db.execute("SELECT value FROM workspace WHERE id=1").fetchone()[0])["limits"]
+            if (final_bound + remaining > config["ollama_context_tokens"]
+                    or first_input + first_output + final_bound + remaining > current_limits["max_tokens"]):
+                raise ValueError("The search-assisted answer would exceed your token/context limit. No further model call was made.")
+            next(x for x in state["ledger"] if x["id"] == request_id)["model_calls"] = 2
+        final_payload = {**payload, "messages": final_messages, "options": {**payload["options"], "num_predict": remaining}}
+        final_payload.pop("tools", None)  # No second search/tool round, regardless of model output.
+        final = network(config, None, "POST", "/api/chat", final_payload)
+        second_input, second_output = local_usage(final)
+        final["prompt_eval_count"], final["eval_count"] = first_input + second_input, first_output + second_output
+        with self.transaction() as state:
+            next(x for x in state["ledger"] if x["id"] == request_id).update(input_tokens=final["prompt_eval_count"], output_tokens=final["eval_count"])
+        if isinstance(final.get("message"), dict) and final["message"].get("tool_calls"):
+            raise ValueError("The one-search-per-message limit was reached. No additional tool was executed; usage was recorded.")
+        return final, {"query": result["query"], "at": result["at"],
+                       "sources": [{"title": item["title"], "url": item["url"]} for item in fitted]}

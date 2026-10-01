@@ -2658,6 +2658,22 @@ button svg {
   font-size: 11px;
   color: #77717f;
 }
+.message-sources {
+  margin-top: 12px;
+  font-size: 12px;
+  line-height: 1.6;
+}
+.message-sources p {
+  margin: 0;
+}
+.message-sources ol {
+  margin: 5px 0 0;
+  padding-left: 20px;
+}
+.message-sources a {
+  color: #6b4caf;
+  overflow-wrap: anywhere;
+}
 .settings-layout {
   grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
 }

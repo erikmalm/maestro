@@ -21,6 +21,7 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 from backend.reflection import ReflectionEngine
 from backend.provider import Provider
 from backend import credentials
+from backend.web_search import WebSearch
 
 ROOT = Path(__file__).resolve().parent.parent
 DATA_DIR = Path(os.environ.get("MAESTRO_DATA_DIR") or Path(os.environ.get("LOCALAPPDATA", Path.home() / ".local" / "share")) / "Maestro" / "preview").expanduser().resolve()
@@ -104,6 +105,7 @@ def snapshot(state: dict) -> dict:
         },
         "usage": Provider(DATABASE, TIMEZONE).usage(),
         "provider": Provider(DATABASE, TIMEZONE).status(),
+        "web_search": WebSearch(DATABASE, TIMEZONE).summary(),
         "capabilities": {"mode": "local", "live_ai": True, "github_pr": False, "secure_credentials": os.name == "nt"},
     }
 
@@ -189,6 +191,18 @@ class ProviderSetup(StrictModel):
     persist: bool = True
 
 
+class WebSearchConfig(StrictModel):
+    enabled: bool = False
+    daily_limit: int = Field(default=20, ge=0, le=200)
+    max_results: int = Field(default=3, ge=1, le=3)
+
+
+class WebSearchSetup(StrictModel):
+    config: WebSearchConfig
+    api_key: str = Field(default="", max_length=4096, repr=False)
+    persist: bool = True
+
+
 def provider():
     return Provider(DATABASE, TIMEZONE)
 
@@ -202,6 +216,7 @@ async def lifespan(application):
     engine = reflection_engine()
     engine.configure({**engine.status()["config"], "enabled": False})
     provider().recover()
+    WebSearch(DATABASE, TIMEZONE).recover()
     yield  # Background orchestration is paused for the live-chat milestone.
 
 
@@ -288,6 +303,41 @@ def run_reflection():
 @app.get("/api/provider")
 def get_provider():
     return provider().status()
+
+
+@app.get("/api/web-search")
+def get_web_search():
+    return WebSearch(DATABASE, TIMEZONE).status()
+
+
+@app.put("/api/web-search")
+def configure_web_search(entry: WebSearchSetup):
+    try:
+        if entry.config.enabled:
+            config = provider().read_state()["config"]
+            if config["protocol"] != "ollama" or config["ollama_context_tokens"] < 8192:
+                raise ValueError("Automatic search needs local Ollama and at least 8192 context tokens. Update Local worker settings first.")
+        return WebSearch(DATABASE, TIMEZONE).configure(entry.config.model_dump(), entry.api_key, entry.persist)
+    except ValueError as error:
+        raise HTTPException(409, str(error)) from None
+
+
+@app.post("/api/web-search/test")
+def test_web_search():
+    service = WebSearch(DATABASE, TIMEZONE)
+    try:
+        service.search("Ollama official web search documentation", test=True)
+        return service.status()
+    except ValueError as error:
+        raise HTTPException(409, str(error)) from None
+
+
+@app.delete("/api/web-search/key")
+def delete_web_search_key():
+    try:
+        return WebSearch(DATABASE, TIMEZONE).delete_key()
+    except ValueError as error:
+        raise HTTPException(409, str(error)) from None
 
 
 @app.put("/api/provider")
