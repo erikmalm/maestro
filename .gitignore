@@ -1,0 +1,65 @@
+# Credentials and machine-specific configuration
+.env
+.env.*
+!.env.example
+*.local.env
+config.local.*
+settings.local.*
+secrets/
+credentials/
+*.pem
+*.key
+*.p12
+*.pfx
+
+# Personal workspace and runtime artifacts (default storage is outside the repo)
+/.maestro/
+/.private/
+/private/
+/data/
+/runtime/
+/storage/
+/memory/
+/conversations/
+/workspace/
+/uploads/
+/attachments/
+/artifacts/
+/logs/
+/exports/
+/backups/
+/traces/
+*.db
+*.db-*
+*.sqlite
+*.sqlite-*
+*.sqlite3
+*.sqlite3-*
+*.log
+
+# Python
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+*.egg-info/
+
+# Frontend and build output
+node_modules/
+dist/
+build/
+coverage/
+playwright-report/
+test-results/
+
+# Editor and operating system files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+Desktop.ini
