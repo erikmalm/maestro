@@ -23,6 +23,21 @@ Chat history stays separate while usage and limits are shared. A first successfu
 
 The current generation path supports one request at a time. API restart recovery assumes that the API process owns all generation. These are useful foundations for a task runtime, but neither establishes delegation.
 
+## Podman deployment backlog
+
+All tasks below are planned. The first deployment target is one Maestro container serving FastAPI and the built frontend, with a private data volume and the existing Windows Ollama service. Deployment can proceed alongside the functional build sequence below. Moving inference into a container follows a measured need and verified GPU access.
+
+| ID | Task | Acceptance | Depends on |
+| --- | --- | --- | --- |
+| POD-01 | Build a reproducible application image. | A multi-stage build uses locked dependencies and runs the built app as a non-root user. A `.containerignore` excludes credentials, private data and local build artifacts. The image serves the frontend without checkout mounts or Node in the runtime. | None |
+| POD-02 | Verify and configure host Ollama access. | The Podman container can list installed models and generate through the Windows Ollama service. A narrowly configured trusted endpoint works at setup and dispatch; arbitrary remote Ollama endpoints, credential forwarding and cloud fallback remain rejected. Verify the required Windows/WSL networking before changing host service bindings. | POD-01 |
+| POD-03 | Preserve the local browser boundary. | Bind the API for container port forwarding and publish it only on host loopback. Existing Host, Origin, session and CSRF checks pass; neither Maestro nor Ollama needs LAN exposure. | POD-01 |
+| POD-04 | Persist, migrate and restore the private workspace. | A consistent SQLite backup imports into a writable private volume with correct permissions. Chats, tasks, archived records and accounting survive container recreation and a restore rehearsal. Document endpoint adjustments, migration and rollback; credentials remain outside the database and image. | POD-01 |
+| POD-05 | Adapt credential storage and settings UI. | Define supported session-only and externally managed secret modes for provider and search keys. Expose actual storage capabilities; forms use a supported default and accurate labels. Rotation, removal and restart behavior match the chosen mechanism, including read-only mounted secrets. Windows Credential Manager continues to work in the native runtime. | POD-01 |
+| POD-06 | Implement container lifecycle and exclusive workspace ownership. | Start, stop, readiness, restart and update/rollback commands identify the owned container. Run one API worker/replica and prevent simultaneous Windows/container ownership of the same database. Interruption recovery preserves recorded usage and uncertain charges; missing Ollama produces a recoverable connection error. Keep this ownership rule until the durable-worker lease design is implemented. | POD-03, POD-04 |
+| POD-07 | Set and observe deployment resource limits. | Record effective WSL memory/GPU availability and explicit CPU/RAM limits for the Maestro container. Keep inference resource policy separate because Ollama remains on the host. Health checks and bounded logs diagnose startup, storage and provider failures without exposing keys or conversation content. | POD-01 |
+| POD-08 | Verify the container path and publish its runbook. | Isolated Podman fixtures exercise the served frontend, provider/search setup, local access checks, credential redaction, recreation persistence, interruption recovery and restore. Automated checks use synthetic services and no personal keys or paid calls. Document build, start/stop, secret setup, backup and update/rollback. | POD-02 through POD-07 |
+
 ## 1. Separate generation from chat
 
 Create one generation service that accepts an explicit model profile and selected context per call. Extract the existing reservations, provider dispatch, search behavior and usage settlement into that service. Keep history selection in the chat layer and capture configuration/pricing per request.
@@ -52,6 +67,14 @@ Add named local/remote model profiles after the task path works. Each profile re
 
 Keep context sharing explicit. A task using a remote profile must not receive local-only source material or derived summaries. Credentials remain endpoint-scoped and never enter task prompts, memory or the database.
 
+Record these model-specific tasks within this milestone:
+
+| ID | Task | Acceptance | Depends on |
+| --- | --- | --- | --- |
+| MODEL-01 | Discover and validate installed models. | Refresh the installed-model list separately from loaded-model status. Check completion/tool capabilities needed by the task, detect missing or changed model versions, and show an actionable error without automatic downloads or cloud fallback. | Shared generation service; saved profiles |
+| MODEL-02 | Define model switching and memory policy. | Chat, tasks, search and titles share one generation slot. Begin with one resident model, profile-specific context limits and a deliberate idle-unload policy. Avoid unloading an in-flight model; document the effect of server-wide Ollama settings on other clients. Test switching, cancellation and failure without losing accounting or leaving a slot reserved. | Durable task ownership; saved profiles |
+| MODEL-03 | Benchmark role suitability and memory use. | Use fixed public task inputs to compare the installed `qwen2.5:7b` and `devstral-small-2:24b` candidates. Record cold/warm latency, switching time, token throughput, RAM/VRAM, GPU/CPU placement and task quality at 4K and 8K context. Include ordinary chat at 4K and search-capable operation at 8K; the existing search flow requires at least 8K. Set defaults from measurements before automatic routing. | MODEL-01, MODEL-02 |
+
 Acceptance: synthetic tasks dispatch to distinct configured profiles, retain separate context, obey the shared ledger and reject disallowed remote sharing. A local task can run without cloud inference calls.
 
 ## 4. Delegate and review within one allowance
@@ -72,6 +95,8 @@ Acceptance: a synthetic task delegates an assignment to another profile, receive
 
 **Coding tasks:** add isolated worktrees in explicitly selected repositories, meaningful checks and public-safe draft PRs. Keep private task evidence local. Repository access and draft preparation do not authorize merging, deploying or replacing the running application. Execution controls and credential isolation need enforcement beyond merely using a worktree.
 
+**EXEC-01 — Isolate future coding execution:** give coding attempts their own selected repository mounts, credentials, tool/network scope, resource/time limits and cleanup. Application-container deployment does not complete this task; execution containers must enforce the task's permissions independently.
+
 **Code improvements:** use concrete task failures and user feedback to propose an explained change with measurable criteria. Start with a private proposal that the user can turn into an ordinary task. Later connect it to isolated coding, baseline/regression checks, a draft PR and measured post-activation outcomes. Keep revision and evaluation within fixed allowances; do not rebuild a reflection system before task outcomes exist.
 
 **Automation and polish:** add opt-in schedules, replayable live status and streaming when they improve the working task path. Scheduled work uses the same limits and crash recovery. Remote access needs its own authentication design.
@@ -82,4 +107,4 @@ Use synthetic models and public-safe fixtures for automated checks; CI requires 
 
 Live checks remain deliberate and bounded: a running local model for generation, or an explicitly configured remote profile and allowance. A model-list response does not prove generation; simulated results do not prove delegation; a reviewer accepting a proposal does not prove an improvement.
 
-The next acceptance target is one real durable task using the same generation and accounting path as chat. Complete that before expanding the model profile and delegation system.
+The next functional acceptance target is one real durable task using the same generation and accounting path as chat. Complete that before expanding the model profile and delegation system. The Podman backlog provides a separate deployment acceptance path while preserving the single-owner runtime.
