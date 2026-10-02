@@ -1,8 +1,8 @@
 # Maestro development plan
 
-Plan date: 2026-10-01. The current product supports real chat, persistent history, manual to-dos, provider setup and usage accounting. Local Ollama generation and two-turn context have been verified. Optional remote API setup/accounting and bounded hosted Ollama search have synthetic integration coverage. Hosted search access requires a successful test with the user's key.
+Plan date: 2026-10-02. The current product supports real chat, persistent history, manual to-dos, provider setup and usage accounting. This branch adds explicit private memory and shared local generation. Local Ollama generation has been verified; remote API/accounting and bounded hosted search have synthetic integration coverage. Hosted search requires a successful test with the user's key.
 
-There is one active provider connection with separate local chat/orchestrator model defaults and per-message choices. Orchestrator mode supports planning conversations. Maestro cannot execute a to-do, delegate work, choose models for specialist tasks or recall private memory automatically. Demo dashboards, simulated runs and the reflection prototype have been removed from the active application. The [architecture](docs/ARCHITECTURE.md) describes the actual runtime and its next boundaries.
+There is one active connection with saved model preferences and per-message local choices. The chat UI always uses the chat role; the API retains a planning/orchestrator preference. Explicit saved memory is recalled in relevant local chats. Maestro cannot execute a to-do, delegate work, route specialist tasks or reflect in the background yet. The [architecture](docs/ARCHITECTURE.md) and [memory/reflection design](docs/MEMORY_AND_REFLECTION.md) distinguish working behavior from upcoming increments.
 
 ## Product goal
 
@@ -18,6 +18,7 @@ The first supported setup is one user on one Windows computer. Deliver each capa
 - **Tasks:** manual create, complete/reopen and delete operations without model calls.
 - **Settings and usage:** one connection with chat/orchestrator model preferences, per-message local choices, OS/session/mounted credentials, search setup, output/context controls, spend/token limits, actual model usage and uncertain-charge reconciliation.
 - **Private storage:** SQLite outside Git; real conversations and accounting survive restart. Previous live history migrates into one conversation. Earlier prototype-only records remain archived privately, with simulated messages excluded from active chat.
+- **Private memory:** explicit save/edit/forget in Settings, workspace/conversation scopes and bounded lexical recall. Memory and derived replies stay local; relevant IDs are recorded. No automatic extraction or idle inference.
 
 Chat history stays separate while usage and limits are shared. A first successful reply may trigger one bounded title call using the original model, a short first-message excerpt, no tools and the remaining request allowance. A first-message title is the fallback; manual names always win.
 
@@ -42,7 +43,7 @@ Host model discovery and a bounded `qwen2.5:7b` reply have also been verified th
 
 ## 1. Separate generation from chat
 
-Create one generation service that accepts an explicit model profile and selected context per call. Extract the existing reservations, provider dispatch, search behavior and usage settlement into that service. Keep history selection in the chat layer and capture configuration/pricing per request.
+Implemented foundation: `Provider.generate_context` accepts explicit bounded instructions/messages and an installed local model through the same reservation, dispatch and settlement path as chat. It snapshots configuration, forces model unloading and excludes search, automatic recall, titles and chat mutations. Named profiles and durable attempt ownership remain future extensions; background callers must initialize the workspace first.
 
 Acceptance:
 
@@ -51,6 +52,8 @@ Acceptance:
 - Every call reserves and settles through the same ledger, with no duplicate accounting or bypass of limits.
 
 ## 2. Complete one durable task
+
+Background reflection can proceed first through REF-01–04 in the [memory design](docs/MEMORY_AND_REFLECTION.md#recorded-next-tasks), using chat corrections and a worker inside the sole API process. It does not depend on task execution. The separate task-worker design below still requires ownership-aware recovery before cross-process dispatch.
 
 Add one separate task worker using local Ollama and the shared generation service. A manually queued text-only task has selected context, completion criteria, a persisted attempt and a saved result. It can run with the browser closed. Start with one generation slot and show persisted status in Tasks.
 
@@ -75,7 +78,7 @@ Record these model-specific tasks within this milestone:
 | --- | --- | --- | --- |
 | MODEL-01 | Discover and validate installed models. | Refresh the installed-model list separately from loaded-model status. Check completion/tool capabilities needed by the task, detect missing or changed model versions, and show an actionable error without automatic downloads or cloud fallback. | Shared generation service; saved profiles |
 | MODEL-02 | Define model switching and memory policy. | Chat, tasks, search and titles share one generation slot. Begin with one resident model, profile-specific context limits and a deliberate idle-unload policy. Avoid unloading an in-flight model; document the effect of server-wide Ollama settings on other clients. Test switching, cancellation and failure without losing accounting or leaving a slot reserved. | Durable task ownership; saved profiles |
-| MODEL-03 | Benchmark role suitability and memory use. | Use fixed public task inputs to compare the installed `qwen2.5:7b` and `devstral-small-2:24b` candidates. Record cold/warm latency, switching time, token throughput, RAM/VRAM, GPU/CPU placement and task quality at 4K and 8K context. Include ordinary chat at 4K and search-capable operation at 8K; the existing search flow requires at least 8K. Set defaults from measurements before automatic routing. | MODEL-01, MODEL-02 |
+| MODEL-03 | Benchmark role suitability and memory use. | A preliminary [4K memory probe](docs/LOCAL_MODELS.md) compares Qwen, gpt-oss and Devstral. Extend it with repeated realistic tasks, warm/switch latency, complete RAM/VRAM and 4K/8K context measurements. Include chat and 8K search; set defaults from measured quality/responsiveness before routing. | MODEL-01, MODEL-02 |
 
 Acceptance: synthetic tasks dispatch to distinct configured profiles, retain separate context, obey the shared ledger and reject disallowed remote sharing. A local task can run without cloud inference calls.
 
@@ -91,7 +94,7 @@ Acceptance: a synthetic task delegates an assignment to another profile, receive
 
 **Projects:** group existing chats and tasks when shared project context becomes useful. Add project behavior with its UI rather than introducing unused records or navigation now.
 
-**Private memory:** add inspectable remember/forget, scoped recall and provenance before inferred memory or automatic curation. Corrections take precedence, deletion removes live derived indexes, and summaries inherit source-sharing restrictions. Evaluate prompt or memory changes against a baseline before promoting them; keep rollback available. All curation calls use the shared usage gate.
+**Background reflection:** explicit memory and scoped local recall are implemented. Next, REF-01 adds durable evidence/jobs, source versions and deletion/forget invalidation; REF-02 adds a single idle worker with an independent installed-model choice and call/token/time bounds; REF-03 proposes evidence-backed candidates; REF-04 evaluates usefulness and selective promotion. Detailed acceptance checks are in [MEMORY_AND_REFLECTION.md](docs/MEMORY_AND_REFLECTION.md#recorded-next-tasks). Chat corrections provide an initial source before task execution exists. Keep inferred candidates inspectable and all calls in the shared gate.
 
 **Scoped integrations:** start with read-only retrieval from a user-selected MarketPulse API, export or document directory. Inspect its actual contract during that increment. Enforce source/path scope and show citations, dates and unavailable evidence. External writes require a configured action scope and stable action identity so restart cannot duplicate them.
 
@@ -99,7 +102,7 @@ Acceptance: a synthetic task delegates an assignment to another profile, receive
 
 **EXEC-01 — Isolate future coding execution:** give coding attempts their own selected repository mounts, credentials, tool/network scope, resource/time limits and cleanup. Application-container deployment does not complete this task; execution containers must enforce the task's permissions independently.
 
-**Code improvements:** use concrete task failures and user feedback to propose an explained change with measurable criteria. Start with a private proposal that the user can turn into an ordinary task. Later connect it to isolated coding, baseline/regression checks, a draft PR and measured post-activation outcomes. Keep revision and evaluation within fixed allowances; do not rebuild a reflection system before task outcomes exist.
+**Code improvements:** use concrete failures and user feedback to propose a change with measurable criteria. Start with a private proposal the user can turn into a task. Later connect it to isolated coding, baseline/regression checks, a draft PR and post-activation outcomes. Keep revision/evaluation within fixed allowances; tie code-change reflection to verified task outcomes.
 
 **Automation and polish:** add opt-in schedules, replayable live status and streaming when they improve the working task path. Scheduled work uses the same limits and crash recovery. Remote access needs its own authentication design.
 
@@ -109,4 +112,4 @@ Use synthetic models and public-safe fixtures for automated checks; CI requires 
 
 Live checks remain deliberate and bounded: a running local model for generation, or an explicitly configured remote profile and allowance. A model-list response does not prove generation; simulated results do not prove delegation; a reviewer accepting a proposal does not prove an improvement.
 
-The next functional acceptance target is one real durable task using the same generation and accounting path as chat. Complete that before expanding the model profile and delegation system. The Podman backlog provides a separate deployment acceptance path while preserving the single-owner runtime.
+The next memory acceptance target is a bounded durable reflection job from a user correction, with source invalidation and restart recovery. One real durable task remains the execution target before expanding profiles/delegation. Both reuse chat's generation/accounting path. Podman checks preserve the single-owner runtime.

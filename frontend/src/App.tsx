@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import type { FormEvent, ReactNode } from "react";
 import Reply from "./Reply";
+import MemorySetup from "./MemorySetup";
 import {
   ArrowRight,
   Check,
@@ -693,6 +694,14 @@ export default function App() {
                         output tokens · {money(message.cost)} estimated
                       </small>
                     )}
+                    {!!message.memory_ids?.length && (
+                      <small className="message-usage">
+                        Used {message.memory_ids.length} saved{" "}
+                        {message.memory_ids.length === 1
+                          ? "memory"
+                          : "memories"}
+                      </small>
+                    )}
                     {message.web_search && (
                       <div className="message-sources">
                         <p>Search query: {message.web_search.query}</p>
@@ -937,6 +946,12 @@ export default function App() {
                 ))}
               </div>
               <div className="settings-side">
+                <MemorySetup
+                  memories={workspace.memories ?? []}
+                  chats={workspace.chats}
+                  chatId={workspace.active_chat_id}
+                  onChange={refreshWorkspace}
+                />
                 <ProviderSetup
                   initialStatus={workspace.provider}
                   onChange={refreshWorkspace}

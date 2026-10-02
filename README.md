@@ -2,7 +2,7 @@
 
 A local web interface for persistent chats with your chosen model, usage tracking and to-dos. Workspace, Tasks and Settings expose the working core: live conversation, manual task management and provider configuration.
 
-Maestro saves one provider connection with a chat model and a separate orchestrator preference. The chat window supports per-message model choices and formatted Markdown replies. Autonomous orchestration, task execution and delegation remain future work. Optional Ollama web search is the only model-selected tool. The [development plan](DEVELOPMENT_PLAN.md) describes the next functional increments.
+Maestro saves one provider connection with a chat model and a separate orchestrator preference. Chat supports per-message model choices, Markdown and explicit private memory. Background reflection, task execution and delegation remain future work. Optional Ollama web search is the only model-selected tool. The [development plan](DEVELOPMENT_PLAN.md) and [memory/reflection architecture](docs/MEMORY_AND_REFLECTION.md) describe the next increments.
 
 ## Run locally
 
@@ -65,6 +65,12 @@ Automatic search sends the model's chosen query to Ollama.com; queries can conta
 Search attempts, including tests, failures and interrupted requests, count toward the daily cap. Requests are at least five seconds apart, have a 30-second search timeout and no automatic retry. Rate-limit responses pause further searches and respect `Retry-After` (60 seconds if absent). These controls use the hosted service normally and do not evade site or service restrictions. Search counts and cooldowns are visible in Settings/usage; the search API supplies no billing feed, so search fees are not included in the local model's $0 inference figure. [Ollama's announcement](https://ollama.com/blog/web-search) describes free searches and subscription rate limits without a numerical quota or per-search price.
 
 Rejected key/account access disables automatic search until the key is successfully retested and search is explicitly enabled again. Ordinary local chat remains available.
+
+## Private memory
+
+In **Settings → Private memory**, save a fact/preference for all local chats or just the current conversation. You can edit or forget it later. Relevant records are recalled by keyword overlap, with a small context allowance, for local Ollama chat when hosted search is inactive. Saving memory makes no model call.
+
+Memories and replies derived from them stay local: start a new conversation before switching that history to a remote provider or active hosted search. Chat deletion removes its scoped/source-linked memory; unlinked workspace records remain. Forgetting affects future recall and retains earlier messages/backups. No background reflection or automatic memory extraction runs yet. See the [architecture and recorded tasks](docs/MEMORY_AND_REFLECTION.md) and [installed-model assessment](docs/LOCAL_MODELS.md).
 
 ## Usage and limits
 

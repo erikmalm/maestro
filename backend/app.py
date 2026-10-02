@@ -21,8 +21,9 @@ from pydantic import BaseModel, ConfigDict, Field
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 from backend.provider import Provider
 from backend import credentials
-from backend.web_search import WebSearch
+from backend.web_search import WebSearch, ENDPOINT as SEARCH_ENDPOINT
 from backend.storage import workspace_owner
+from backend.memory import MemoryStore
 
 ROOT = Path(__file__).resolve().parent.parent
 DATA_DIR = Path(os.environ.get("MAESTRO_DATA_DIR") or Path(os.environ.get("LOCALAPPDATA", Path.home() / ".local" / "share")) / "Maestro" / "preview").expanduser().resolve()
@@ -102,7 +103,7 @@ def selected_chat(state: dict, chat_id: str | None = None) -> dict | None:
 
 
 @contextmanager
-def workspace_transaction():
+def workspace_transaction(with_db=False):
     with closing(sqlite3.connect(DATABASE, timeout=10)) as connection, connection:
         connection.execute("PRAGMA secure_delete=ON")
         connection.execute("CREATE TABLE IF NOT EXISTS workspace (id INTEGER PRIMARY KEY CHECK (id=1), value TEXT NOT NULL)")
@@ -110,7 +111,7 @@ def workspace_transaction():
         row = connection.execute("SELECT value FROM workspace WHERE id=1").fetchone()
         state = json.loads(row[0]) if row else seed_workspace()
         migrate_workspace(state)
-        yield state
+        yield (state, connection) if with_db else state
         connection.execute("INSERT INTO workspace VALUES (1, ?) ON CONFLICT(id) DO UPDATE SET value=excluded.value", (json.dumps(state),))
 
 
@@ -146,6 +147,7 @@ def snapshot(state: dict, chat_id: str | None = None) -> dict:
         "usage": service.usage(provider_state),
         "provider": service.status(provider_state),
         "web_search": WebSearch(DATABASE, TIMEZONE).status(),
+        "memories": MemoryStore(DATABASE, TIMEZONE).list(),
         "capabilities": {"mode": "local", "live_ai": True, "task_execution": False, "delegation": False, "github_pr": False, "secure_credentials": os.name == "nt"},
     }
 
@@ -162,6 +164,16 @@ class TaskInput(StrictModel):
 
 class DoneInput(StrictModel):
     done: bool
+
+
+class MemoryContent(StrictModel):
+    content: str = Field(min_length=1, max_length=1000)
+
+
+class MemoryInput(MemoryContent):
+    scope: Literal["workspace", "conversation"] = "workspace"
+    chat_id: str | None = Field(default=None, min_length=1, max_length=100)
+    source_message_id: str | None = Field(default=None, min_length=1, max_length=100)
 
 
 class TextInput(StrictModel):
@@ -235,6 +247,7 @@ async def lifespan(application):
     with workspace_owner(DATABASE.parent):
         provider().recover()
         WebSearch(DATABASE, TIMEZONE).recover()
+        MemoryStore(DATABASE, TIMEZONE).initialize()
         yield
 
 
@@ -310,13 +323,50 @@ def rename_chat(chat_id: str, entry: ChatTitleInput):
 @app.delete("/api/chats/{chat_id}")
 def delete_chat(chat_id: str):
     # The workspace and provider reservation share this immediate SQLite lock.
-    with workspace_transaction() as state:
+    with workspace_transaction(with_db=True) as (state, db):
         selected_chat(state, chat_id)
         if any(entry["status"] == "reserved" and entry.get("thread_id") == chat_id
                for entry in provider().read_state()["ledger"]):
             raise HTTPException(409, "Wait for this chat's current request to finish before deleting it.")
         state["chats"] = [chat for chat in state["chats"] if chat["id"] != chat_id]
-        return snapshot(state)
+        MemoryStore(DATABASE, TIMEZONE).delete_chat(chat_id, db=db)
+    return snapshot(state)
+
+
+def safe_memory_content(content):
+    # Explicit saves still must not turn configured credentials into model context.
+    for endpoint in (provider().read_state()["config"]["base_url"], SEARCH_ENDPOINT):
+        try:
+            key = credentials.read(endpoint)[0]
+        except ValueError:
+            continue
+        if key and key in content:
+            raise ValueError("Remove credentials from the memory before saving.")
+    return content
+
+
+@app.get("/api/memory")
+def get_memories():
+    return MemoryStore(DATABASE, TIMEZONE).list()
+
+
+@app.post("/api/memory")
+def remember(entry: MemoryInput):
+    with conflict_errors():
+        return MemoryStore(DATABASE, TIMEZONE).remember(safe_memory_content(entry.content), entry.scope, entry.chat_id, entry.source_message_id)
+
+
+@app.patch("/api/memory/{memory_id}")
+def correct_memory(memory_id: str, entry: MemoryContent):
+    with conflict_errors():
+        return MemoryStore(DATABASE, TIMEZONE).update(memory_id, safe_memory_content(entry.content))
+
+
+@app.delete("/api/memory/{memory_id}")
+def forget_memory(memory_id: str):
+    with conflict_errors():
+        MemoryStore(DATABASE, TIMEZONE).forget(memory_id)
+    return {"deleted": True}
 
 
 @app.get("/api/provider")

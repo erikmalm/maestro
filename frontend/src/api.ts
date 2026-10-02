@@ -12,6 +12,7 @@ export type Message = {
   text: string;
   model?: string;
   kind?: "chat" | "orchestrator";
+  memory_ids?: string[];
   cost?: number;
   input_tokens?: number;
   output_tokens?: number;
@@ -38,6 +39,7 @@ export type Workspace = {
   chats: Chat[];
   active_chat_id: string | null;
   messages: Message[];
+  memories?: Memory[];
   limits: Limits;
   usage: {
     today_usd: number;
@@ -204,3 +206,28 @@ export const testWebSearch = () =>
   request<WebSearchStatus>("/web-search/test", "POST", {});
 export const deleteWebSearchKey = () =>
   request<WebSearchStatus>("/web-search/key", "DELETE");
+
+export type Memory = {
+  id: string;
+  content: string;
+  scope: "workspace" | "conversation";
+  chat_id: string | null;
+  source_message_id: string | null;
+  origin: "explicit";
+  created_at: string;
+  updated_at: string;
+};
+export const remember = (
+  content: string,
+  scope: Memory["scope"],
+  chat_id: string | null,
+) =>
+  request<Memory>("/memory", "POST", {
+    content,
+    scope,
+    chat_id: scope === "conversation" ? chat_id : null,
+  });
+export const correctMemory = (id: string, content: string) =>
+  request<Memory>(`/memory/${encodeURIComponent(id)}`, "PATCH", { content });
+export const forgetMemory = (id: string) =>
+  request<{ deleted: boolean }>(`/memory/${encodeURIComponent(id)}`, "DELETE");

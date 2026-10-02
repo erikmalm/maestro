@@ -751,6 +751,7 @@ textarea {
 .entry-form textarea,
 .entry-form select,
 .reflection-box input:not([type="checkbox"]),
+.reflection-box textarea,
 .reflection-box select {
   width: 100%;
   min-width: 0;
@@ -760,6 +761,25 @@ textarea {
   border-radius: 6px;
   padding: 10px;
   font-size: 14px;
+}
+.memory-entry {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  border-top: 1px solid var(--line);
+  padding: 14px 0;
+}
+.memory-entry > div {
+  flex: 1;
+  min-width: 0;
+}
+.memory-entry p {
+  margin: 0 0 6px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.memory-entry small {
+  color: var(--muted);
 }
 .form-section-label {
   color: var(--muted);

@@ -66,7 +66,8 @@ class WorkspaceTests(unittest.TestCase):
         self.assertEqual(result["messages"], [])
         self.assertEqual(result["usage"]["calls"], 0)
         self.assertEqual(result["usage"]["today_usd"], 0)
-        for key in ("runs", "memories", "demo_usage", "legacy_preview"):
+        self.assertEqual(result["memories"], [])
+        for key in ("runs", "demo_usage", "legacy_preview"):
             self.assertNotIn(key, result)
         self.assertEqual(set(result["limits"]), {"run_usd", "daily_usd", "monthly_usd", "max_tokens"})
         self.assertTrue(result["capabilities"]["live_ai"])
@@ -282,7 +283,7 @@ class WorkspaceTests(unittest.TestCase):
         self.assertEqual(state["legacy_preview"]["messages"][0]["text"], "Synthetic canned reply")
 
     def test_removed_prototype_routes_are_unavailable(self):
-        for path in ("/api/tasks/example/preview", "/api/memory", "/api/reflection/run", "/api/reflection/feedback"):
+        for path in ("/api/tasks/example/preview", "/api/reflection/run", "/api/reflection/feedback"):
             response = self.client.post(path, headers=self.headers, json={})
             self.assertIn(response.status_code, (404, 405))
 
