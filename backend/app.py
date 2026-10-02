@@ -24,6 +24,7 @@ from backend import credentials
 from backend.web_search import WebSearch, ENDPOINT as SEARCH_ENDPOINT
 from backend.storage import workspace_owner
 from backend.memory import MemoryStore
+from backend.work_config import WorkConfig, config_value
 
 ROOT = Path(__file__).resolve().parent.parent
 DATA_DIR = Path(os.environ.get("MAESTRO_DATA_DIR") or Path(os.environ.get("LOCALAPPDATA", Path.home() / ".local" / "share")) / "Maestro" / "preview").expanduser().resolve()
@@ -148,6 +149,7 @@ def snapshot(state: dict, chat_id: str | None = None) -> dict:
         "provider": service.status(provider_state),
         "web_search": WebSearch(DATABASE, TIMEZONE).status(),
         "memories": MemoryStore(DATABASE, TIMEZONE).list(),
+        "work": work_status(state),
         "capabilities": {"mode": "local", "live_ai": True, "task_execution": False, "delegation": False, "github_pr": False, "secure_credentials": os.name == "nt"},
     }
 
@@ -333,15 +335,15 @@ def delete_chat(chat_id: str):
     return snapshot(state)
 
 
-def safe_memory_content(content):
-    # Explicit saves still must not turn configured credentials into model context.
+def safe_private_content(content):
+    # Memory and model choices must not turn configured credentials into context.
     for endpoint in (provider().read_state()["config"]["base_url"], SEARCH_ENDPOINT):
         try:
             key = credentials.read(endpoint)[0]
         except ValueError:
             continue
         if key and key in content:
-            raise ValueError("Remove credentials from the memory before saving.")
+            raise ValueError("Remove credentials before saving.")
     return content
 
 
@@ -353,13 +355,13 @@ def get_memories():
 @app.post("/api/memory")
 def remember(entry: MemoryInput):
     with conflict_errors():
-        return MemoryStore(DATABASE, TIMEZONE).remember(safe_memory_content(entry.content), entry.scope, entry.chat_id, entry.source_message_id)
+        return MemoryStore(DATABASE, TIMEZONE).remember(safe_private_content(entry.content), entry.scope, entry.chat_id, entry.source_message_id)
 
 
 @app.patch("/api/memory/{memory_id}")
 def correct_memory(memory_id: str, entry: MemoryContent):
     with conflict_errors():
-        return MemoryStore(DATABASE, TIMEZONE).update(memory_id, safe_memory_content(entry.content))
+        return MemoryStore(DATABASE, TIMEZONE).update(memory_id, safe_private_content(entry.content))
 
 
 @app.delete("/api/memory/{memory_id}")
@@ -367,6 +369,27 @@ def forget_memory(memory_id: str):
     with conflict_errors():
         MemoryStore(DATABASE, TIMEZONE).forget(memory_id)
     return {"deleted": True}
+
+
+def work_status(state):
+    return {"config": config_value(state), "worker_available": False}
+
+
+@app.get("/api/work-config")
+def get_work_config():
+    return work_status(read_workspace())
+
+
+@app.put("/api/work-config")
+def put_work_config(entry: WorkConfig):
+    with conflict_errors():
+        if entry.enabled:
+            raise ValueError("Background reflection is not available yet. Keep it disabled while saving its configuration.")
+        for model in (entry.reflection_model, entry.memory_model, entry.coding_model):
+            safe_private_content(model)
+        with workspace_transaction() as state:
+            state["work_config"] = entry.model_dump()
+    return work_status(state)
 
 
 @app.get("/api/provider")

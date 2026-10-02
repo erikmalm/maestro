@@ -8,7 +8,7 @@ Settings provides **save, edit and forget** for explicit facts or preferences. `
 
 Records have an ID, content, workspace/conversation scope, optional chat/user-message provenance, explicit origin and timestamps. Conversation records require an existing chat. Source-linked records require a real user message; assistant claims cannot serve as their source. Workspace records without a chat reference survive chat deletion. Deleting a chat removes scoped and source-linked memories in the same transaction.
 
-Recall uses Unicode word overlap with basic English/Swedish stopwords. It selects at most five relevant records with 1,000 combined characters, from workspace memory and the requested conversation. The store permits 200 records of 1,000 characters each. Lowest-ranked records are omitted when they cannot fit context/token limits. Keyword recall can miss paraphrases; measure those misses before adding FTS or embeddings.
+Recall uses Unicode word overlap with basic English/Swedish stopwords. It selects relevant workspace/current-conversation records within saved count/character allowances, capped at five records and 1,000 combined characters. Setting either allowance to zero disables recall without deleting memory. The store permits 200 records of 1,000 characters each. Lowest-ranked records are omitted when they cannot fit context/token limits. Keyword recall can miss paraphrases; measure misses before adding FTS or embeddings.
 
 Only normal local Ollama chat receives memory, when automatic hosted search is inactive. Memory enters the prompt as quoted, untrusted supplemental data; it grants no tools or permissions. Current user instructions take precedence. The reply records supplied memory IDs and the UI displays their count; this identifies context supplied, not proof the model used every entry.
 
@@ -18,7 +18,25 @@ Memory-derived history also remains local: conversations containing these IDs ca
 
 Editing replaces a record for future recall. Separate contradictory records are not merged: correct or forget the old record. Forget removes the live row with SQLite secure deletion enabled, but cannot retract a dispatched prompt or erase earlier replies, snapshots or backups. Source text editing is unsupported; versioning must precede it. Reads exclude missing, empty or non-user sources without modifying the database.
 
-`Provider.generate_context(instructions, messages, model, max_output_tokens)` accepts explicit local-only context through the existing dispatch, limits, reservation gate and accounting. It captures configuration, validates an installed completion model, disables tools/search/chat persistence and forces `keep_alive=0`. Output defaults to 512 tokens, capped by requested/configured limits. It adds no worker, queue or independently configured reflection model yet. A caller must initialize the workspace before calling it.
+`Provider.generate_context(instructions, messages, model, max_output_tokens, kind)` accepts explicit local-only reflection, memory-extraction or coding context through existing dispatch, limits, reservation and accounting. It captures configuration, validates an installed completion model, disables tools/search/chat persistence and forces `keep_alive=0`. Reflection/memory outputs use the saved cap (default 512); explicit requests and provider limits can reduce it. Coding uses the request/provider cap, with a 1,024-token ceiling for this text-only foundation. A caller must initialize the workspace first. This does not execute coding tools or queue work.
+
+## Saved configuration
+
+**Settings → Task models & reflection** saves private `work_config` alongside the workspace in SQLite. `GET/PUT /api/work-config` exposes this validated configuration; defaults on existing workspaces require no migration/write. Chat and orchestrator choices remain in provider settings. Task choices survive changing the chat provider, but dispatch requires the current connection to be Local Ollama; no remote fallback is permitted.
+
+For each task kind, an explicit per-call model wins, then the saved model, then the recommended installed tag, then the local chat default. Blank selections mean recommended installed model: `gpt-oss:20b` for reflection, `qwen2.5:7b` for extraction, `devstral-small-2:24b` for coding. Recommendations use the discovered installed list, and every dispatch verifies model capability. Explicit missing tags fail with an actionable error; the system does not silently replace them or download models.
+
+| Setting | Default | Current effect |
+| --- | --- | --- |
+| Reflection/memory/coding model | Recommended installed tag or chat fallback | Selected for explicit-context generation of that kind. |
+| Reflection output tokens | 512 | Caps reflection and memory-extraction output alongside provider/request limits. |
+| Memories per reply / context characters | 5 / 1,000 | Bounds local recall; either zero disables it. |
+| Debounce / chat idle time | 60 / 30 seconds | Saved policy for the future worker. |
+| Daily reflection jobs / total tokens | 10 / 10,000 | Saved policy; daily worker reservations/enforcement remain upcoming. |
+| Job timeout | 180 seconds | Saved worker deadline; the current HTTP timeout does not enforce a whole-job deadline. |
+| Background reflection enabled | False | Enabling is rejected while no worker is available. |
+
+One shared generation slot and post-task model unloading are fixed safety boundaries. Local context size, CPU threads and chat keep-loaded duration remain in **Model connection → Local worker settings**. Saved policy is not a running scheduler. [Windows background operation](WINDOWS_BACKGROUND.md) explains locking, sleep and launcher lifetime.
 
 ## Intended background path
 

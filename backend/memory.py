@@ -122,17 +122,17 @@ class MemoryStore:
             db.execute("PRAGMA secure_delete=ON")
             db.execute("DELETE FROM private_memories WHERE chat_id=?", (chat_id,))
 
-    def recall(self, query, chat_id, local=True):
-        if not local or not (query_terms := terms(query)):
+    def recall(self, query, chat_id, local=True, limit=MAX_RECALL, max_characters=MAX_CONTENT):
+        if not local or limit <= 0 or max_characters <= 0 or not (query_terms := terms(query)):
             return []
         ranked = [(len(query_terms & terms(record["content"])), record) for record in self.list(chat_id)
                   if record["scope"] == "workspace" or record["chat_id"] == chat_id]
         ranked.sort(key=lambda item: (-item[0], item[1]["id"]))
-        selected, remaining = [], MAX_CONTENT
+        selected, remaining = [], min(max_characters, MAX_CONTENT)
         for relevance, record in ranked:
             if relevance and len(record["content"]) <= remaining:
                 selected.append(record)
                 remaining -= len(record["content"])
-                if len(selected) == MAX_RECALL:
+                if len(selected) == min(limit, MAX_RECALL):
                     break
         return selected

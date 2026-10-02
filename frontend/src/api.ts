@@ -40,6 +40,7 @@ export type Workspace = {
   active_chat_id: string | null;
   messages: Message[];
   memories?: Memory[];
+  work?: WorkStatus;
   limits: Limits;
   usage: {
     today_usd: number;
@@ -231,3 +232,24 @@ export const correctMemory = (id: string, content: string) =>
   request<Memory>(`/memory/${encodeURIComponent(id)}`, "PATCH", { content });
 export const forgetMemory = (id: string) =>
   request<{ deleted: boolean }>(`/memory/${encodeURIComponent(id)}`, "DELETE");
+
+export type WorkConfig = {
+  reflection_model: string;
+  memory_model: string;
+  coding_model: string;
+  enabled: boolean;
+  debounce_seconds: number;
+  idle_seconds: number;
+  max_output_tokens: number;
+  max_jobs_per_day: number;
+  max_tokens_per_day: number;
+  timeout_seconds: number;
+  memory_recall_count: number;
+  memory_recall_characters: number;
+};
+export type WorkStatus = {
+  config: WorkConfig;
+  worker_available: boolean;
+};
+export const saveWorkConfig = (config: WorkConfig) =>
+  request<WorkStatus>("/work-config", "PUT", config);

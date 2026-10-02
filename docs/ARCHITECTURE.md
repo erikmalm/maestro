@@ -30,7 +30,7 @@ flowchart LR
 
 The built frontend is served by FastAPI on one loopback origin. Workspace contains chat, Tasks contains manual to-dos, and Settings configures the active model, credentials, search and limits. The header and usage view report actual model usage and estimated spend.
 
-`backend/app.py` owns session/CSRF protection, request validation, chat/task/memory CRUD and workspace snapshots. `backend/provider.py` owns the single provider configuration, shared generation dispatch and reservation ledger. `backend/memory.py` owns explicit records and read-only lexical recall. `backend/web_search.py` owns search credentials, readiness and attempt limits. Workspace and status reads avoid writes after migration. SQLite updates use immediate transactions; provider requests run outside database locks. This is a single-server runtime, not yet a multi-process queue.
+`backend/app.py` owns session/CSRF protection, request validation, chat/task/memory CRUD and workspace snapshots. `backend/provider.py` owns the single provider connection, shared generation and reservation ledger. `backend/work_config.py` validates private task-model/worker policy settings; `backend/memory.py` owns explicit records and read-only recall. `backend/web_search.py` owns search readiness and limits. Reads avoid writes after initialization. SQLite writes use immediate transactions; generation runs outside locks. This is a single-server runtime, not a multi-process queue.
 
 Ollama uses its native loopback API, accepts installed local models and has no cloud fallback. Other adapters use Responses or Chat Completions. The UI always uses the chat role, with a model-name picker and saved Qwen preference when available. The API retains an orchestrator model preference, but no execution or reflection worker. Chat sends the selected conversation and optional local memory; the frontend progressively reveals the completed backend reply and renders safe Markdown.
 
@@ -74,6 +74,7 @@ Earlier prototype-only records remain archived in the private database, and old 
 | `POST /api/tasks`, `PATCH /api/tasks/{id}`, `DELETE /api/tasks/{id}` | Manual task persistence. |
 | `POST /api/chat` | Generate a reply for the submitted `chat_id` and persist it in that conversation. |
 | `GET /api/memory`, `POST /api/memory`, `PATCH /api/memory/{id}`, `DELETE /api/memory/{id}` | Inspect, save, edit or forget explicit private memory; snapshots also include records. |
+| `GET /api/work-config`, `PUT /api/work-config` | Saved task models, recall allowances and future reflection policy; saving does not start a worker. |
 | `GET /api/provider`, `PUT /api/provider`, `POST /api/provider/test`, `DELETE /api/provider/key` | Active connection settings, model-list access and credential removal. |
 | `POST /api/provider/charges/{id}/reconcile` | Settle a provider-verified uncertain amount. |
 | `GET /api/web-search`, `PUT /api/web-search`, `POST /api/web-search/test`, `DELETE /api/web-search/key` | Search readiness, settings and separate credential lifecycle. |

@@ -19,6 +19,7 @@ The first supported setup is one user on one Windows computer. Deliver each capa
 - **Settings and usage:** one connection with chat/orchestrator model preferences, per-message local choices, OS/session/mounted credentials, search setup, output/context controls, spend/token limits, actual model usage and uncertain-charge reconciliation.
 - **Private storage:** SQLite outside Git; real conversations and accounting survive restart. Previous live history migrates into one conversation. Earlier prototype-only records remain archived privately, with simulated messages excluded from active chat.
 - **Private memory:** explicit save/edit/forget in Settings, workspace/conversation scopes and bounded lexical recall. Memory and derived replies stay local; relevant IDs are recorded. No automatic extraction or idle inference.
+- **Task configuration:** independent saved reflection/extraction/coding models, live output/recall caps and future worker timing/budgets. Enabling reflection awaits the durable worker; see [saved configuration](docs/MEMORY_AND_REFLECTION.md#saved-configuration).
 
 Chat history stays separate while usage and limits are shared. A first successful reply may trigger one bounded title call using the original model, a short first-message excerpt, no tools and the remaining request allowance. A first-message title is the fallback; manual names always win.
 

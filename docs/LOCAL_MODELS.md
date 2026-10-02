@@ -1,6 +1,6 @@
 # Local model suitability
 
-Assessment date: 2026-10-02. The installed models cover lightweight chat/extraction, reasoning and coding. No new model is needed for the first memory/reflection increment. Keep Qwen as chat default, evaluate gpt-oss for reflection and use Devstral for coding on demand. These are recommendations; automatic routing is not implemented.
+Assessment date: 2026-10-02. Installed models cover lightweight chat/extraction, reasoning and coding. No new model is needed for the first increment. Keep Qwen as chat default, evaluate gpt-oss for reflection and use Devstral for coding on demand. **Task models & reflection** now saves independent choices; blank choices use these tags when discovered installed, otherwise the local chat default. Explicit-context calls select by task kind, but autonomous task dispatch is not implemented.
 
 ## Installed models and primary evidence
 

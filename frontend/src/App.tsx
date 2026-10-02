@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import type { FormEvent, ReactNode } from "react";
 import Reply from "./Reply";
 import MemorySetup from "./MemorySetup";
+import WorkSetup from "./WorkSetup";
 import {
   ArrowRight,
   Check,
@@ -946,6 +947,13 @@ export default function App() {
                 ))}
               </div>
               <div className="settings-side">
+                {workspace.work && (
+                  <WorkSetup
+                    initialStatus={workspace.work}
+                    provider={workspace.provider}
+                    onChange={refreshWorkspace}
+                  />
+                )}
                 <MemorySetup
                   memories={workspace.memories ?? []}
                   chats={workspace.chats}

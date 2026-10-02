@@ -70,7 +70,9 @@ Rejected key/account access disables automatic search until the key is successfu
 
 In **Settings → Private memory**, save a fact/preference for all local chats or just the current conversation. You can edit or forget it later. Relevant records are recalled by keyword overlap, with a small context allowance, for local Ollama chat when hosted search is inactive. Saving memory makes no model call.
 
-Memories and replies derived from them stay local: start a new conversation before switching that history to a remote provider or active hosted search. Chat deletion removes its scoped/source-linked memory; unlinked workspace records remain. Forgetting affects future recall and retains earlier messages/backups. No background reflection or automatic memory extraction runs yet. See the [architecture and recorded tasks](docs/MEMORY_AND_REFLECTION.md) and [installed-model assessment](docs/LOCAL_MODELS.md).
+Memories and replies derived from them stay local: start a new conversation before switching that history to a remote provider or active hosted search. Chat deletion removes its scoped/source-linked memory; unlinked workspace records remain. Forgetting affects future recall and retains earlier messages/backups. No background reflection or automatic extraction runs yet.
+
+**Settings → Task models & reflection** saves separate reflection, extraction and coding models, output/recall bounds, and future worker budgets/timing. Blank model choices use the recommended installed model or chat fallback. Saving does not start a worker. See the [configuration and recorded tasks](docs/MEMORY_AND_REFLECTION.md#saved-configuration), [model assessment](docs/LOCAL_MODELS.md) and [Windows lock/sleep guidance](docs/WINDOWS_BACKGROUND.md).
 
 ## Usage and limits
 
