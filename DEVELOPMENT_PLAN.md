@@ -1,250 +1,110 @@
 # Maestro development plan
 
-Plan date: 2026-10-01. Status: documentation complete; application implementation has not started. Decisions below are the proposed baseline and will be refined during implementation.
-
-## 1. Product goal
-
-Build a locally bootable personal AI coordinator with a web interface for conversation, to-dos, agent orchestration, and a persistent private memory bank. A task should be able to progress through planning, delegation, review, and refinement with visible progress and enforced resource limits.
-
-The repository will be public. Credentials and all personal workspace data must remain local, outside its checkout. MarketPulse is an intended documentation source; its API, authentication, and document format have not been inspected or assumed.
-
-The first version supports one user on one computer, with Windows as the first supported operating system. Remote hosting, multiple users, unrestricted shell agents, autonomous financial transactions, and automatic application-code rewriting are outside the initial scope.
-
-## 2. User interface
-
-| View | Main controls and information |
-| --- | --- |
-| Chat | Streaming discussion, relevant memory/source references, and conversion of a message into a to-do. |
-| Tasks | Inbox and status board; priority, project, due date, completion criteria, assignment, run/cancel, and execution policy. |
-| Runs | Coordinator and agent tree; action timeline, concise progress summaries, tool calls, review passes, artifacts, usage, and stop reasons. |
-| Agents | Versioned role prompts, provider/model, output contract, permitted tools, context scope, and per-agent limits. |
-| Memory | Search and inspect records; provenance, proposed entries, corrections, deletion, recall controls, and private export. |
-| Settings | Provider credentials, model, data location, limits, integration scope, sharing policy, and local backup/restore. |
-
-The Runs view exposes decisions and observable actions, rather than requiring access to a model's hidden reasoning. Local state must survive a browser refresh and application restart.
-
-## 3. Proposed architecture
-
-```mermaid
-flowchart TD
-    U[Local browser] --> B[Local backend]
-    B --> Q[Persisted task queue]
-    Q --> C[Coordinator]
-    C --> G[Budget and permission checks]
-    G --> A[Specialist workers and reviewer]
-    A --> P[Server-side provider adapters]
-    P --> L[Selected cloud or local model]
-    A --> T[Scoped tool adapters]
-    T --> MP[Configured MarketPulse source]
-    B --> S[Private SQLite workspace]
-    Q --> S
-    C --> S
-    A --> S
-    B --> K[OS credential store]
-```
-
-| Component | Proposed choice | Purpose |
-| --- | --- | --- |
-| Web interface | React, TypeScript, Vite | Chat, task board, and run inspection. |
-| Local API and runner | Python, FastAPI, asynchronous workers | Keep permissions, provider calls, and execution limits in one controlled backend. |
-| Storage | SQLite with migrations and FTS5 | Persist tasks, chat, runs, memory, and local text search. |
-| Live updates | Server-Sent Events plus normal HTTP requests | Stream chat and task events; replay persisted events after reconnect. |
-| Queue | SQLite jobs, leases, and bounded in-process workers | Avoid a separate message broker for a single-user installation. |
-| Providers | OpenAI Responses adapter first, mock adapter for tests | Stream output, execute typed tool requests, capture usage, and isolate provider-specific behavior. |
-| Credentials | OS credential store; session environment fallback | Keep keys separate from the workspace database and source tree. |
-| Tool interfaces | Typed internal adapters initially | Add optional MCP support later where a connector benefits from it. |
-| Development setup | uv for Python; a pinned Node package manager and lockfile | Reproducible dependency installation. |
-
-These are project choices, not requirements imposed by a provider. [FastAPI](https://fastapi.tiangolo.com/), [Vite](https://vite.dev/guide/), [SQLite FTS5](https://www.sqlite.org/fts5.html), and [uv](https://docs.astral.sh/uv/) provide the relevant implementation documentation. Pin supported versions during the first build milestone.
-
-The initial packaged application will serve the built frontend from the backend on one loopback origin. A development UI server may proxy to it with an explicit local-origin allowlist. The launcher will check prerequisites, avoid starting duplicate instances, open the browser, and stop its child processes cleanly. Starting Maestro at OS login is a later opt-in feature.
-
-Maestro will own the orchestration loop and use specialists as bounded capabilities. An SDK may be used inside a provider adapter if all model/tool calls pass through the same checks and hosted tracing is disabled by default. The manager approach is consistent with [OpenAI's orchestration documentation](https://developers.openai.com/api/docs/guides/agents/orchestration).
-
-### Public layout and private storage
-
-Proposed source layout, to be created during implementation:
-
-```text
-maestro/
-  README.md
-  DEVELOPMENT_PLAN.md
-  .gitignore
-  .env.example
-  backend/          # API, storage, coordinator, budgets, memory, adapters
-  frontend/         # Web interface
-  agents/           # Generic role templates only
-  tests/            # Mock providers and synthetic fixtures
-  scripts/          # Local setup and startup
-```
-
-Private runtime layout under `%LOCALAPPDATA%\Maestro` on Windows:
-
-```text
-Maestro/
-  workspace.sqlite3 # Chats, tasks, runs, usage ledger, memory, settings
-  attachments/      # Selected local documents
-  artifacts/        # Agent outputs
-  logs/             # Redacted operational logs
-  exports/          # Explicit private exports
-  backups/          # Explicit private backups
-```
+Plan date: 2026-10-01. The current product supports real chat, persistent history, manual to-dos, provider setup and usage accounting. Local Ollama generation and two-turn context have been verified. Optional remote API setup/accounting and bounded hosted Ollama search have synthetic integration coverage. Hosted search access requires a successful test with the user's key.
 
-Use standard per-user data locations on other platforms. Validate and resolve `MAESTRO_DATA_DIR` before opening storage; reject a location within the checkout after resolving links. Apply user-only filesystem permissions where supported. SQLite is not encrypted by default: OS permissions and full-disk encryption are the initial at-rest protection; encrypted portable backups can follow.
+There is one active provider/model connection. Maestro cannot execute a to-do, delegate work, choose models for specialist tasks or recall private memory automatically. Demo dashboards, simulated runs and the reflection prototype have been removed from the active application. The [architecture](docs/ARCHITECTURE.md) describes the actual runtime and its next boundaries.
 
-The existing `.gitignore` is a backstop, not the primary storage boundary. Add automated secret scanning and checks against accidentally tracked runtime files when CI is introduced. Use synthetic data in all tests and screenshots. GitHub issues, PRs, CI artifacts, and external telemetry must never become an alternative personal memory store.
+## Product goal
 
-## 4. Core records and agent roles
+Build a personal AI coordinator that runs locally and turns conversation and to-dos into useful, bounded work. It should select appropriate local or remote models, delegate selected assignments, review outcomes and keep a useful result or a clear stop reason. Progress, token usage and estimated spend should remain visible.
 
-| Record | Essential fields |
-| --- | --- |
-| Task | ID, description, project, priority, due date, criteria, execution policy, status, and run links. |
-| Run | Task/context snapshot, parent run, limits, active-time deadline, spend reservations, status, result, and stop reason. |
-| Agent profile | Role, versioned prompt, provider/model, tools, context scope, and local overrides. |
-| Agent execution | Parent execution, role version, assignment, attempt, structured output, and usage. |
-| Event/action | Timestamp, run/execution ID, event type, tool authorization, outcome, and idempotency key. |
-| Memory | Text, category, scope, source references, inherited sharing policy, timestamps, confidence, review state, and optional expiry. |
-| Usage entry | Provider/model, call ID, input/output usage, estimated price version, reservation, and outcome. |
-| Integration | Adapter type, private source address/path, credential reference, and allowed operations. |
+Keep credentials and personal workspace data outside the public checkout. Private memory should carry provenance and project scope, support user corrections and deletion, and eventually help later tasks without indiscriminate sharing. Integrations should operate only on configured sources and permitted actions. MarketPulse document access and GitHub coding tasks are intended capabilities, with no assumption that either integration already works.
 
-Store rendered prompts and source excerpts only in private run records. Allow export with explicit content selection and credential redaction.
+The first supported setup is one user on one Windows computer. Deliver each capability as a small working increment; add navigation and controls when their behavior is implemented.
 
-Initial generic roles:
+## Current foundation
 
-- **Coordinator:** clarify completion criteria, create a plan, select specialists, track limits, and assemble the outcome.
-- **Work organizer:** break work into useful to-dos, priorities, and next actions.
-- **Document analyst:** retrieve permitted documentation, summarize it with source references, and flag missing evidence.
-- **Reviewer:** evaluate results against task criteria and give specific feedback or a completion decision.
+- **Workspace:** separate persistent chats with live Ollama or compatible API replies, editable titles and optional one-search-per-message Ollama web search. New chat preserves earlier conversations; deleting one retains shared usage accounting.
+- **Tasks:** manual create, complete/reopen and delete operations without model calls.
+- **Settings and usage:** one active model connection, OS/session credentials, search setup, output/context controls, spend/token limits, actual model usage and uncertain-charge reconciliation.
+- **Private storage:** SQLite outside Git; real conversations and accounting survive restart. Previous live history migrates into one conversation. Earlier prototype-only records remain archived privately, with simulated messages excluded from active chat.
 
-Each role has separate instructions and a structured output contract: result, references, unmet criteria, suggested next actions, and concise review notes. The same model may serve several roles. Agents cannot grant themselves new permissions or increase their budgets. Provider/model and prompt versions are recorded per run for reproducibility.
+Chat history stays separate while usage and limits are shared. A first successful reply may trigger one bounded title call using the original model, a short first-message excerpt, no tools and the remaining request allowance. A first-message title is the fallback; manual names always win.
 
-## 5. Task lifecycle and bounded refinement
+The current generation path supports one request at a time. API restart recovery assumes that the API process owns all generation. These are useful foundations for a task runtime, but neither establishes delegation.
 
-Task states: `inbox`, `queued`, `planning`, `running`, `reviewing`, `awaiting_input`, `paused`, `completed`, `failed`, `cancelled`, and `budget_exhausted`. A run can end with a partial result and an explicit stop reason. A to-do is marked completed only when its completion criteria are met.
+## Podman deployment backlog
 
-1. Save the to-do locally. With the default `manual` policy, wait for Run. With a configured `auto` policy, queue eligible tasks under the same limits.
-2. Snapshot criteria, relevant context, agent versions, integration scope, and budgets. Ask for missing information only when it prevents meaningful execution.
-3. Plan bounded subtasks. Before every delegation, model call, and tool action, check the persisted budget, cancellation flag, and permissions.
-4. Delegate to specialists with the minimum required context. Child agents may delegate only within the shared depth and total-agent limits.
-5. Validate structured results and review against explicit criteria. If complete, assemble the result. If incomplete, revise the assignment and repeat within the existing limits.
-6. Stop on completion, no meaningful progress, exhausted limits, cancellation, or a required user decision. Keep the best partial result and explain the unresolved work.
-7. Record feedback and proposed memory/prompt improvements under the configured memory policy. Those calls also consume budget.
+All tasks below are planned. The first deployment target is one Maestro container serving FastAPI and the built frontend, with a private data volume and the existing Windows Ollama service. Deployment can proceed alongside the functional build sequence below. Moving inference into a container follows a measured need and verified GPU access.
 
-Persist events and action status before advancing. Worker leases prevent duplicate claims. After a crash, show interrupted runs for explicit recovery; reconcile uncertain actions before retrying them. Use idempotency where supported and do not blindly replay external writes or timed-out provider requests. Resuming or retrying preserves consumed usage and needs a new explicit allowance if the old run is exhausted.
+| ID | Task | Acceptance | Depends on |
+| --- | --- | --- | --- |
+| POD-01 | Build a reproducible application image. | A multi-stage build uses locked dependencies and runs the built app as a non-root user. A `.containerignore` excludes credentials, private data and local build artifacts. The image serves the frontend without checkout mounts or Node in the runtime. | None |
+| POD-02 | Verify and configure host Ollama access. | The Podman container can list installed models and generate through the Windows Ollama service. A narrowly configured trusted endpoint works at setup and dispatch; arbitrary remote Ollama endpoints, credential forwarding and cloud fallback remain rejected. Verify the required Windows/WSL networking before changing host service bindings. | POD-01 |
+| POD-03 | Preserve the local browser boundary. | Bind the API for container port forwarding and publish it only on host loopback. Existing Host, Origin, session and CSRF checks pass; neither Maestro nor Ollama needs LAN exposure. | POD-01 |
+| POD-04 | Persist, migrate and restore the private workspace. | A consistent SQLite backup imports into a writable private volume with correct permissions. Chats, tasks, archived records and accounting survive container recreation and a restore rehearsal. Document endpoint adjustments, migration and rollback; credentials remain outside the database and image. | POD-01 |
+| POD-05 | Adapt credential storage and settings UI. | Define supported session-only and externally managed secret modes for provider and search keys. Expose actual storage capabilities; forms use a supported default and accurate labels. Rotation, removal and restart behavior match the chosen mechanism, including read-only mounted secrets. Windows Credential Manager continues to work in the native runtime. | POD-01 |
+| POD-06 | Implement container lifecycle and exclusive workspace ownership. | Start, stop, readiness, restart and update/rollback commands identify the owned container. Run one API worker/replica and prevent simultaneous Windows/container ownership of the same database. Interruption recovery preserves recorded usage and uncertain charges; missing Ollama produces a recoverable connection error. Keep this ownership rule until the durable-worker lease design is implemented. | POD-03, POD-04 |
+| POD-07 | Set and observe deployment resource limits. | Record effective WSL memory/GPU availability and explicit CPU/RAM limits for the Maestro container. Keep inference resource policy separate because Ollama remains on the host. Health checks and bounded logs diagnose startup, storage and provider failures without exposing keys or conversation content. | POD-01 |
+| POD-08 | Verify the container path and publish its runbook. | Isolated Podman fixtures exercise the served frontend, provider/search setup, local access checks, credential redaction, recreation persistence, interruption recovery and restore. Automated checks use synthetic services and no personal keys or paid calls. Document build, start/stop, secret setup, backup and update/rollback. | POD-02 through POD-07 |
 
-## 6. Cost and execution controls
+## 1. Separate generation from chat
 
-Proposed conservative defaults, to be adjustable in Settings. Dollar amounts are user budget choices in USD, not model pricing claims.
+Create one generation service that accepts an explicit model profile and selected context per call. Extract the existing reservations, provider dispatch, search behavior and usage settlement into that service. Keep history selection in the chat layer and capture configuration/pricing per request.
 
-| Limit | Initial proposal |
-| --- | --- |
-| Automatic execution on to-do entry | Off; configurable per task category/project |
-| Spending per task run | USD 1.00 |
-| Daily / monthly spending | USD 5.00 / USD 50.00 |
-| Review cycles | 3 total: initial review and at most 2 refinements |
-| Delegation depth | 2 below the coordinator; coordinator is depth 0 |
-| Total specialist executions | 6, counting new execution attempts |
-| Concurrent specialist executions | 2 globally |
-| Model requests per run | 20, including coordinator, review, summaries, and retries |
-| Tokens per run | 100,000 input + output combined, including provider-reported reasoning usage |
-| Tokens per request | 8,000 input and 2,000 output; reject or trim context before dispatch |
-| Tool invocations per run | 30, with per-tool timeouts |
-| Active run time | 10 minutes; persisted active-time accounting pauses while waiting for the user |
-| Automatic transient retries | At most 2 per request, inside all other limits |
+Acceptance:
 
-Implementation requirements:
+- Existing local/API chat, search, context checks and uncertain-charge handling still work.
+- A synthetic non-chat caller can supply its own context and profile without receiving unrelated conversation history.
+- Every call reserves and settles through the same ledger, with no duplicate accounting or bypass of limits.
 
-- Apply the same call gate to ordinary chat, key connection tests, background work, and task runs. Chat turns use a bounded execution record even when no to-do exists.
-- Reject paid calls when no trusted pricing configuration exists for the selected model/tool. Use conservative input estimates, bounded output, and known tool charges to reserve the maximum expected request cost before dispatch.
-- Atomically reserve spend and token capacity across concurrent runs in SQLite. Settle reservations from usage data; keep uncertain charges reserved after failures until reconciled. Avoid double-counting reasoning tokens already included in output usage.
-- Aggregate all descendants, retries, tool fees, and memory work into the parent run and local day/month ledger. Use the user's configured timezone for calendar boundaries; do not reset budgets on restart.
-- Stop dispatching when any limit is reached. Repeated equivalent plans or review failures trigger a no-progress stop. A Cancel or emergency-stop action blocks new calls and cooperatively interrupts workers.
-- Persist consumed usage across pause/resume. Budget increases and emergency-stop reset must be explicit user actions; agents cannot do them.
-- Show estimated spend separately from provider billing. In-flight calls can still incur charges after cancellation, and requests made outside Maestro are outside its ledger. Reconcile with provider usage where available and use a dedicated provider project/key where practical.
+## 2. Complete one durable task
 
-These controls must be implemented in application code before autonomous execution is enabled. Prompt instructions alone cannot enforce them.
+Add one separate task worker using local Ollama and the shared generation service. A manually queued text-only task has selected context, completion criteria, a persisted attempt and a saved result. It can run with the browser closed. Start with one generation slot and show persisted status in Tasks.
 
-## 7. Private memory and continuous improvement
+Implement claims and leases before allowing another process to dispatch. Associate reservations and results with their owning attempts so API restart cannot interrupt a live worker and stale workers cannot overwrite newer results. Pause/cancel and cumulative call/token/time allowances block subsequent calls; retries keep consumed usage and unresolved reservations.
 
-Memory serves future chats and tasks while remaining inspectable and reversible. Categories include user-approved preferences, project context, decisions, task lessons, and workflow guidance. Credentials are never memory entries.
+Acceptance:
 
-Start with SQLite text search and a bounded recall context. Keep each memory's provenance, scope, confidence, review state, and optional expiry. Prefer explicit user corrections over prior inferred memories; surface conflicts rather than silently treating an inference as fact. Retrieved documents and recalled content are untrusted input and cannot override permissions or system rules.
+- One queued task reaches a saved result with the browser closed.
+- Pause, cancel and exhausted allowances stop new dispatches and show a reason.
+- API and worker restarts preserve progress and accounting without duplicate claims or results.
+- Chat and tasks share the generation allowance without oversubscribing it.
 
-The initial policy saves explicitly requested memories and presents inferred entries for review. A later opt-in policy can automatically save selected low-risk categories with an audit history. Provide edit, forget, project isolation, recall disable, and private export controls. Deletion removes live records, FTS entries, derived summaries, and cached embeddings if introduced; disclose that previously exported files and backups need separate removal.
+## 3. Route between saved model profiles
 
-Improvement cycle: collect feedback, record a concrete lesson, propose a prompt/workflow revision, test it against synthetic or explicitly selected private evaluation cases, then allow promotion and rollback. Keep generic shipped prompts in Git and personal overrides in the private database. Automated promotion can be added as an opt-in policy with a fixed evaluation budget and regression criteria. Runtime agents do not mutate application source or publish memory to GitHub.
+Add named local/remote model profiles after the task path works. Each profile records its endpoint, protocol, model, resource settings, pricing and a credential reference. The user selects a profile for a task; model, provider and prices are recorded for every call. Automatic routing can follow explicit selection.
 
-Memory extraction, compaction, embeddings, and evaluations are subject to the same call gate and usage ledger. No unbounded idle-time reflection jobs. Add backup/restore before relying on memory as durable project knowledge; backups remain outside the checkout.
+Keep context sharing explicit. A task using a remote profile must not receive local-only source material or derived summaries. Credentials remain endpoint-scoped and never enter task prompts, memory or the database.
 
-## 8. Credentials, privacy, and integrations
+Record these model-specific tasks within this milestone:
 
-Bind the initial service to loopback only. Require a local session, validate Host and Origin headers, enforce CSRF protection for changes, and allow only configured local frontend origins. A local website must not let unrelated websites read memory or change settings. Remote/LAN access requires a separate authentication and transport design.
+| ID | Task | Acceptance | Depends on |
+| --- | --- | --- | --- |
+| MODEL-01 | Discover and validate installed models. | Refresh the installed-model list separately from loaded-model status. Check completion/tool capabilities needed by the task, detect missing or changed model versions, and show an actionable error without automatic downloads or cloud fallback. | Shared generation service; saved profiles |
+| MODEL-02 | Define model switching and memory policy. | Chat, tasks, search and titles share one generation slot. Begin with one resident model, profile-specific context limits and a deliberate idle-unload policy. Avoid unloading an in-flight model; document the effect of server-wide Ollama settings on other clients. Test switching, cancellation and failure without losing accounting or leaving a slot reserved. | Durable task ownership; saved profiles |
+| MODEL-03 | Benchmark role suitability and memory use. | Use fixed public task inputs to compare the installed `qwen2.5:7b` and `devstral-small-2:24b` candidates. Record cold/warm latency, switching time, token throughput, RAM/VRAM, GPU/CPU placement and task quality at 4K and 8K context. Include ordinary chat at 4K and search-capable operation at 8K; the existing search flow requires at least 8K. Set defaults from measurements before automatic routing. | MODEL-01, MODEL-02 |
 
-The Settings form may hold a newly entered key transiently while submitting it to the local backend, then clears it. Save in the OS credential store; expose only status through APIs. No keys in browser storage, frontend environment variables, logs, exception bodies, database rows, or prompt context. If a secure credential store is unavailable, support session-only credentials or a server process environment variable and make persistence behavior clear. [OpenAI authentication guidance](https://developers.openai.com/api/reference/overview#authentication) supports keeping provider keys on the server.
+Acceptance: synthetic tasks dispatch to distinct configured profiles, retain separate context, obey the shared ledger and reject disallowed remote sharing. A local task can run without cloud inference calls.
 
-Default operational logs contain event IDs and redacted metadata. Content-rich run history remains private; hosted tracing and telemetry are off by default. Display which provider receives context, and allow projects/documents to be marked local-only. Derived summaries, memories, artifacts, and agent handoffs inherit the most restrictive source-sharing policy; recalling a memory cannot bypass it. A cloud adapter must reject dispatch if selected content violates that policy. Keep conversation history and search indexes local; prefer selected text excerpts over provider-hosted document uploads. For OpenAI, request `store: false` and check feature-specific retention before adding hosted tools. This is not a promise of zero provider retention; see [OpenAI data controls](https://developers.openai.com/api/docs/guides/your-data).
+## 4. Delegate and review within one allowance
 
-MarketPulse connector sequence:
+Give the coordinator a typed handoff to one specialist, including assignment, profile, selected context, criteria and limits. Persist parent/child ownership, result, usage and stop reason. Start with a coordinator and one specialist; use a reviewer only when a concrete task needs a check against its criteria.
 
-1. During its milestone, identify the user-selected API, export, or document directory and authentication method.
-2. Configure private source details and allowlisted endpoints/directories in local Settings. Do not discover or crawl neighboring repositories automatically.
-3. Implement read-only search and document retrieval with normalized source IDs, document dates, and citation metadata. Mock the contract with synthetic documents first.
-4. Enforce path containment after resolving links, operation allowlists, timeouts, file-size limits, and document-specific provider-sharing policy.
-5. Include references and retrieval dates in analyst outputs; report unavailable, stale, or contradictory sources. Preserve the distinction between retrieved evidence and the agent's interpretation.
+All descendants share the parent's call/token/time/spend allowance and tool scope. Bounded revision can address unmet criteria, stopping on completion, cancellation, no progress or exhausted limits. Model agreement alone is not proof that work succeeded.
 
-Any future tool that modifies an external system needs scoped authorization, an audit record, and an idempotent or reviewable action contract. Unrestricted shell/file access is not part of the initial agent toolset.
+Acceptance: a synthetic task delegates an assignment to another profile, receives its result and records the actual calls. An incomplete result can trigger one useful revision; every configured bound stops further work with a visible reason. A child cannot grant itself more context, tools or budget.
 
-## 9. Milestones and acceptance criteria
+## Later increments
 
-### M0 - Public foundation and documentation
+**Projects:** group existing chats and tasks when shared project context becomes useful. Add project behavior with its UI rather than introducing unused records or navigation now.
 
-- [x] Document the vision, privacy boundary, architecture, and development sequence.
-- [x] Add Git exclusions and a blank configuration example.
-- [x] Audit repository history and publication files for secrets and private runtime data.
-- [x] Confirm public visibility and enable secret scanning with push protection.
+**Private memory:** add inspectable remember/forget, scoped recall and provenance before inferred memory or automatic curation. Corrections take precedence, deletion removes live derived indexes, and summaries inherit source-sharing restrictions. Evaluate prompt or memory changes against a baseline before promoting them; keep rollback available. All curation calls use the shared usage gate.
 
-### M1 - Bootable local chat and configuration
+**Scoped integrations:** start with read-only retrieval from a user-selected MarketPulse API, export or document directory. Inspect its actual contract during that increment. Enforce source/path scope and show citations, dates and unavailable evidence. External writes require a configured action scope and stable action identity so restart cannot duplicate them.
 
-Build the web shell, local backend, Windows startup/shutdown scripts, private storage migrations, session protection, Settings, mock provider, and OpenAI adapter. Include the call gate and spend ledger for chat from the start.
+**Coding tasks:** add isolated worktrees in explicitly selected repositories, meaningful checks and public-safe draft PRs. Keep private task evidence local. Repository access and draft preparation do not authorize merging, deploying or replacing the running application. Execution controls and credential isolation need enforcement beyond merely using a worktree.
 
-Acceptance: a clean checkout can be installed and started using documented commands; the browser opens on loopback; storage is outside the checkout; chat/history survives restart; keys can be added/removed without leaking to browser storage, API reads, logs, or Git; a mock conversation requires no key or network; missing credentials/pricing block paid requests; local-only context cannot be sent to a cloud provider.
+**EXEC-01 — Isolate future coding execution:** give coding attempts their own selected repository mounts, credentials, tool/network scope, resource/time limits and cleanup. Application-container deployment does not complete this task; execution containers must enforce the task's permissions independently.
 
-### M2 - To-dos, execution, and run browser
+**Code improvements:** use concrete task failures and user feedback to propose an explained change with measurable criteria. Start with a private proposal that the user can turn into an ordinary task. Later connect it to isolated coding, baseline/regression checks, a draft PR and measured post-activation outcomes. Keep revision and evaluation within fixed allowances; do not rebuild a reflection system before task outcomes exist.
 
-Build task CRUD, priorities/projects, criteria, persisted queue, run events, results, and start/cancel/pause controls. Default to manual execution and support explicitly enabled execution-on-entry policies. Finish all run-level and global budgets before enabling auto execution.
+**Automation and polish:** add opt-in schedules, replayable live status and streaming when they improve the working task path. Scheduled work uses the same limits and crash recovery. Remote access needs its own authentication design.
 
-Acceptance: entering a to-do persists it and queues it only under its configured policy; the browser displays status and usage live; reconnect replays events; restart retains history without duplicating actions; cancellation and exhausted limits prevent new dispatches; concurrent work cannot oversubscribe spend/token reservations.
+## Verification
 
-### M3 - Specialist agents and bounded refinement
+Use synthetic models and public-safe fixtures for automated checks; CI requires no personal keys or paid calls. Cover reservation concurrency, attempt ownership, restart recovery, limit/cancel enforcement, context separation, credential redaction and session/CSRF protection as those capabilities are added. Use browser checks for the implemented chat, tasks, settings and usage flows.
 
-Add role templates and local overrides, delegation trees, structured outputs, reviewer criteria, child limits, and no-progress detection.
+Live checks remain deliberate and bounded: a running local model for generation, or an explicitly configured remote profile and allowance. A model-list response does not prove generation; simulated results do not prove delegation; a reviewer accepting a proposal does not prove an improvement.
 
-Acceptance: a synthetic task delegates to distinct roles; a deliberately incomplete result triggers focused refinement; completion, failure, and each configured limit end with a visible reason; grandchildren inherit remaining permissions and budgets; agent requests to raise limits are rejected.
-
-### M4 - Persistent memory and feedback
-
-Add scoped search/recall, explicit remember/forget, reviewable inferred records, correction precedence, local prompt revisions, evaluation/rollback, and backup/restore.
-
-Acceptance: later chats use relevant approved memories with inspectable references; private projects stay isolated; corrections take precedence; forget removes live records and derived indexes; backup/restore works; improvement jobs are bounded and credentials never enter memory.
-
-### M5 - MarketPulse document access
-
-Implement the selected read-only connector and analyst output citations. Keep all real integration configuration and documents outside Git.
-
-Acceptance: a synthetic connector test retrieves and cites scoped documents; out-of-scope paths/endpoints are rejected; live access works only after local configuration; unavailable sources yield a useful partial result; local-only material stays off cloud providers.
-
-### M6 - Optional automation and provider expansion
-
-Add opt-in schedules, provider capability negotiation, a local-model adapter, and more scoped integrations. Add any remote-access mode only with a separately reviewed authentication design.
-
-Acceptance: idle automation has a fixed allowance, survives restart without duplicate scheduling, and stops at limits; changing providers preserves private local history; local-model operation can run without cloud API requests; emergency stop covers every scheduled and interactive execution path.
-
-The MVP checkpoint is M1-M3: a local chat/task interface with visible, bounded multi-agent work. The complete initial vision additionally requires M4-M5 for persistent assistance and MarketPulse access.
-
-## 10. Verification and next implementation step
-
-Use mock providers and synthetic content in automated checks. Cover lifecycle transitions, budget reservations under concurrency, timeout/cancellation, crash recovery, credentials/redaction, origin/session validation, path containment, memory isolation/deletion, and connector permissions. Use browser-level checks for chat, task entry, run inspection, and restart persistence. CI must not call paid APIs or require personal credentials.
-
-Keep any live provider smoke tests opt-in with an explicit small budget and local credentials. Record dependency versions and setup instructions at M1; update milestone status only when its acceptance checks pass.
-
-Next step: implement M1 as the first usable vertical slice - startup, private workspace, Settings, and one bounded chat - then build task execution and specialist orchestration on that foundation.
+The next functional acceptance target is one real durable task using the same generation and accounting path as chat. Complete that before expanding the model profile and delegation system. The Podman backlog provides a separate deployment acceptance path while preserving the single-owner runtime.
