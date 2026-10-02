@@ -711,9 +711,7 @@ test("local Ollama chat needs no key or USD budget and records native tokens", a
   await expect(page.getByLabel("API key", { exact: true })).toHaveCount(0);
 });
 
-test("local chat and orchestrator models can change without replacing a conversation or draft", async ({
-  page,
-}) => {
+test("chat model picker preserves conversation and draft", async ({ page }) => {
   await page.goto("/");
   await page.getByRole("button", { name: "Settings", exact: true }).click();
   const fixture = await (
@@ -748,19 +746,28 @@ test("local chat and orchestrator models can change without replacing a conversa
   await page.getByRole("button", { name: "New chat", exact: true }).click();
   await expect(page.getByLabel("Message Maestro")).toBeVisible();
   const before = await (await page.request.get("/api/workspace")).json();
-  for (const [role, choice, model] of [
-    ["chat", "", "synthetic-ollama:latest"],
-    ["orchestrator", "", "synthetic-devstral:latest"],
-    ["orchestrator", "synthetic-ollama:latest", "synthetic-ollama:latest"],
+  await expect(
+    page.getByRole("combobox", { name: "Role", exact: true }),
+  ).toHaveCount(0);
+  await expect(
+    page.getByRole("button", { name: "Refresh installed models" }),
+  ).toHaveCount(0);
+  for (const model of [
+    "synthetic-ollama:latest",
+    "synthetic-devstral:latest",
+    "synthetic-ollama:latest",
   ]) {
-    const text = `Synthetic ${role} request ${choice || "default"}`;
+    const text = `Synthetic chat request ${model}`;
     await page.getByLabel("Message Maestro").fill(text);
+    await page.getByRole("button", { name: "Choose model:" }).click();
     await page
-      .getByRole("combobox", { name: "Role", exact: true })
-      .selectOption(role);
-    await page.getByLabel("Model for this role").selectOption(choice);
+      .locator(".model-picker")
+      .getByRole("button", { name: model, exact: false })
+      .click();
     await expect(page.getByLabel("Message Maestro")).toHaveValue(text);
-    await expect(page.locator(".composer-bottom small")).toHaveText(model);
+    await expect(
+      page.getByRole("button", { name: "Choose model:" }),
+    ).toContainText(model);
     await page.getByRole("button", { name: "Send message" }).click();
     await expect(page.getByLabel("Message Maestro")).toHaveValue("");
     const saved = await (
@@ -769,7 +776,7 @@ test("local chat and orchestrator models can change without replacing a conversa
     expect(saved.messages.at(-1)).toMatchObject({
       role: "assistant",
       model,
-      kind: role,
+      kind: "chat",
     });
     expect(saved.active_chat_id).toBe(before.active_chat_id);
     expect(saved.provider.config.orchestrator_model).toBe(
@@ -778,32 +785,18 @@ test("local chat and orchestrator models can change without replacing a conversa
     expect(saved.provider.config.model).toBe("synthetic-ollama:latest");
   }
   await expect(page.locator(".chat-message.assistant")).toHaveCount(3);
-  await expect(
-    page.locator(".message-author").filter({ hasText: "Orchestrator" }),
-  ).toHaveCount(2);
-  await expect(
-    page.getByText(
-      "The orchestrator helps plan and break down work. Task execution and delegation are not available yet.",
-    ),
-  ).toBeVisible();
   await page
     .getByLabel("Message Maestro")
-    .fill("Keep this draft while refreshing models");
-  await page.getByRole("button", { name: "Refresh installed models" }).click();
-  await expect(
-    page.getByRole("button", { name: "Refresh installed models" }),
-  ).toBeEnabled();
+    .fill("Keep this draft while choosing models");
+  await page.getByRole("button", { name: "Choose model:" }).click();
+  await page.keyboard.press("Escape");
   await expect(page.getByLabel("Message Maestro")).toHaveValue(
-    "Keep this draft while refreshing models",
-  );
-  await expect(page.getByLabel("Model for this role")).toHaveValue(
-    "synthetic-ollama:latest",
+    "Keep this draft while choosing models",
   );
   await expect(page.locator(".chat-message.assistant")).toHaveCount(3);
   await page.setViewportSize({ width: 375, height: 812 });
-  await expect(
-    page.getByRole("combobox", { name: "Model for this role", exact: true }),
-  ).toBeVisible();
+  await page.getByRole("button", { name: "Choose model:" }).click();
+  await expect(page.locator(".model-picker")).toBeVisible();
   expect(
     await page.evaluate(() => document.documentElement.scrollWidth),
   ).toBeLessThanOrEqual(375);

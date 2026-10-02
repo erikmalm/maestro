@@ -1,8 +1,10 @@
 import { useEffect, useRef, useState } from "react";
 import type { FormEvent, ReactNode } from "react";
+import Reply from "./Reply";
 import {
   ArrowRight,
   Check,
+  ChevronDown,
   CheckSquare,
   Coins,
   LoaderCircle,
@@ -268,8 +270,9 @@ export default function App() {
   const [toast, setToast] = useState("");
   const [error, setError] = useState("");
   const [chat, setChat] = useState("");
-  const [role, setRole] = useState<"chat" | "orchestrator">("chat");
-  const [models, setModels] = useState({ chat: "", orchestrator: "" });
+  const [replyId, setReplyId] = useState("");
+  const [model, setModel] = useState("");
+  const modelPicker = useRef<HTMLDivElement>(null);
   const [mobileNav, setMobileNav] = useState(false);
   const navigationDrawer = useRef<HTMLElement>(null);
   const navigationMenu = useRef<HTMLButtonElement>(null);
@@ -404,11 +407,13 @@ export default function App() {
     }
   }
   function navigate(next: Page) {
+    if (next !== "workspace") setReplyId("");
     setPage(next);
     setMobileNav(false);
   }
   async function switchChat(action: () => Promise<Workspace>) {
     if (await perform("select-chat", action, undefined, true)) {
+      setReplyId("");
       setChat("");
       navigate("workspace");
     }
@@ -444,7 +449,10 @@ export default function App() {
         }
         if (!id)
           throw new Error("Could not create a conversation. Please try again.");
-        return api.sendMessage(submitted, id, requestedModel, role);
+        const next = await api.sendMessage(submitted, id, requestedModel);
+        const reply = next.messages.at(-1);
+        if (reply?.role === "assistant") setReplyId(reply.id);
+        return next;
       })
     )
       setChat((draft) => (draft === submitted ? "" : draft));
@@ -480,15 +488,13 @@ export default function App() {
     (thread) => thread.id === workspace.active_chat_id,
   );
   const local = workspace.provider.config.protocol === "ollama";
-  const requestedModel = local ? models[role] : "";
-  const unavailableModel =
-    !!requestedModel && !workspace.provider.models.includes(requestedModel);
-  const defaultModel =
-    (local &&
-      role === "orchestrator" &&
-      workspace.provider.config.orchestrator_model) ||
-    workspace.provider.config.model;
+  const requestedModel = local ? model : "";
+  const defaultModel = workspace.provider.config.model;
   const selectedModel = requestedModel || defaultModel;
+  const unavailableModel =
+    local &&
+    !!selectedModel &&
+    !workspace.provider.models.includes(selectedModel);
   const ready =
     (workspace.provider.credentials_required === false ||
       workspace.provider.credentials_present) &&
@@ -673,7 +679,14 @@ export default function App() {
                         ? `${message.kind === "orchestrator" ? "Orchestrator" : "Maestro"} · ${message.model ?? workspace.provider.config.model}`
                         : "You"}
                     </span>
-                    <p>{message.text}</p>
+                    {message.role === "assistant" ? (
+                      <Reply
+                        text={message.text}
+                        animate={message.id === replyId}
+                      />
+                    ) : (
+                      <p>{message.text}</p>
+                    )}
                     {message.cost !== undefined && (
                       <small className="message-usage">
                         {message.input_tokens} input · {message.output_tokens}{" "}
@@ -712,68 +725,6 @@ export default function App() {
             )}
             <div className="composer-area">
               <form className="composer" onSubmit={submitChat}>
-                <div className="composer-models">
-                  <label>
-                    Role
-                    <select
-                      value={role}
-                      disabled={!!busy}
-                      onChange={(event) =>
-                        setRole(event.target.value as typeof role)
-                      }
-                    >
-                      <option value="chat">Chat</option>
-                      <option value="orchestrator">Orchestrator</option>
-                    </select>
-                  </label>
-                  {local && (
-                    <>
-                      <label>
-                        Model for this role
-                        <select
-                          value={requestedModel}
-                          disabled={!!busy}
-                          onChange={(event) =>
-                            setModels({ ...models, [role]: event.target.value })
-                          }
-                        >
-                          <option value="">
-                            Default: {defaultModel || "Choose in Settings"}
-                          </option>
-                          {unavailableModel && (
-                            <option value={requestedModel} disabled>
-                              {requestedModel} (not installed)
-                            </option>
-                          )}
-                          {workspace.provider.models.map((model) => (
-                            <option key={model} value={model}>
-                              {model}
-                            </option>
-                          ))}
-                        </select>
-                      </label>
-                      <button
-                        className="button subtle"
-                        type="button"
-                        disabled={!!busy}
-                        onClick={() =>
-                          void perform("models", async () => {
-                            await api.testProvider();
-                            return api.loadWorkspace(workspace.active_chat_id);
-                          })
-                        }
-                      >
-                        Refresh installed models
-                      </button>
-                    </>
-                  )}
-                </div>
-                {unavailableModel && (
-                  <p className="composer-note" role="status">
-                    The chosen model is no longer in the installed list. Refresh
-                    the list or choose another model before sending.
-                  </p>
-                )}
                 <textarea
                   aria-label="Message Maestro"
                   placeholder="Write a message…"
@@ -791,7 +742,60 @@ export default function App() {
                   }}
                 />
                 <div className="composer-bottom">
-                  <small>{selectedModel || "No model selected"}</small>
+                  {local ? (
+                    <div className="model-control">
+                      <button
+                        className="model-trigger"
+                        type="button"
+                        popoverTarget="chat-model-picker"
+                        disabled={!!busy}
+                        aria-label={`Choose model: ${selectedModel || "none"}`}
+                      >
+                        {selectedModel || "Choose a model"}
+                        <ChevronDown size={14} />
+                      </button>
+                      <div
+                        id="chat-model-picker"
+                        className="model-picker"
+                        popover="auto"
+                        ref={modelPicker}
+                      >
+                        <p>Chat model</p>
+                        {[
+                          ...new Set([
+                            defaultModel,
+                            ...workspace.provider.models,
+                          ]),
+                        ]
+                          .filter(Boolean)
+                          .map((choice) => (
+                            <button
+                              key={choice}
+                              type="button"
+                              disabled={
+                                !!busy ||
+                                !workspace.provider.models.includes(choice)
+                              }
+                              aria-pressed={selectedModel === choice}
+                              onClick={() => {
+                                setModel(choice === defaultModel ? "" : choice);
+                                modelPicker.current?.hidePopover();
+                              }}
+                            >
+                              <span>
+                                {choice}
+                                {choice === defaultModel && (
+                                  <small>Default</small>
+                                )}
+                              </span>
+                              {selectedModel === choice && <Check size={16} />}
+                            </button>
+                          ))}
+                      </div>
+                    </div>
+                  ) : (
+                    <small>{selectedModel || "No model selected"}</small>
+                  )}
                   <button
                     className="send-button"
                     type="submit"
@@ -806,10 +810,10 @@ export default function App() {
                   </button>
                 </div>
               </form>
-              {role === "orchestrator" && (
-                <p className="composer-note">
-                  The orchestrator helps plan and break down work. Task
-                  execution and delegation are not available yet.
+              {unavailableModel && (
+                <p className="composer-note" role="status">
+                  The chosen model is no longer installed. Please choose another
+                  model before sending.
                 </p>
               )}
               <p className="composer-note">

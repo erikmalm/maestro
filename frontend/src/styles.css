@@ -386,6 +386,78 @@ textarea {
   font-size: 12px;
   margin-top: 12px;
 }
+.message-markdown {
+  margin-top: 12px;
+  font-size: 15px;
+  line-height: 1.75;
+}
+.message-markdown > * + * {
+  margin-top: 14px;
+}
+.message-markdown :is(h1, h2, h3, h4, h5, h6) {
+  line-height: 1.35;
+  letter-spacing: -0.2px;
+  margin-bottom: 8px;
+}
+.message-markdown h1 {
+  font-size: 24px;
+}
+.message-markdown h2 {
+  font-size: 20px;
+}
+.message-markdown h3 {
+  font-size: 17px;
+}
+.message-markdown :is(ul, ol) {
+  padding-left: 24px;
+}
+.message-markdown li + li {
+  margin-top: 5px;
+}
+.message-markdown blockquote {
+  margin-left: 0;
+  padding-left: 16px;
+  border-left: 3px solid #d7cfee;
+  color: var(--muted);
+}
+.message-markdown code {
+  background: #f2f0f6;
+  border-radius: 4px;
+  padding: 2px 5px;
+  font-size: 0.88em;
+}
+.message-markdown pre {
+  overflow-x: auto;
+  padding: 16px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: #f6f5f8;
+  line-height: 1.6;
+}
+.message-markdown pre code {
+  padding: 0;
+  background: transparent;
+}
+.message-markdown table {
+  display: block;
+  overflow-x: auto;
+  border-collapse: collapse;
+}
+.message-markdown :is(th, td) {
+  border: 1px solid var(--line);
+  padding: 8px 12px;
+  text-align: left;
+}
+.message-markdown th {
+  background: #f6f5f8;
+}
+.message-markdown a {
+  text-underline-offset: 3px;
+}
+.message-markdown hr {
+  border: 0;
+  border-top: 1px solid var(--line);
+}
 .message-sources {
   margin-top: 16px;
   border-top: 1px solid var(--line);
@@ -405,8 +477,8 @@ textarea {
 }
 .composer {
   border: 1px solid #d7d3e4;
-  border-radius: 10px;
-  padding: 14px;
+  border-radius: 16px;
+  padding: 16px;
   background: #fff;
   box-shadow: 0 3px 12px #26213606;
 }
@@ -423,16 +495,70 @@ textarea {
   font-size: 15px;
   outline: none;
 }
-.composer-models {
+.model-trigger {
+  anchor-name: --chat-model;
   display: flex;
-  flex-wrap: wrap;
-  align-items: end;
-  gap: 10px;
-  margin-bottom: 12px;
+  align-items: center;
+  gap: 6px;
+  max-width: 100%;
+  padding: 7px 10px;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 12px;
+  overflow-wrap: anywhere;
 }
-.composer-models label {
-  flex: 1;
-  min-width: 130px;
+.model-trigger:hover:not(:disabled) {
+  background: #f0edf8;
+  color: var(--accent);
+}
+.model-control {
+  min-width: 0;
+}
+.model-picker {
+  position-anchor: --chat-model;
+  inset: auto;
+  bottom: anchor(top);
+  left: anchor(left);
+  margin: 0 0 8px;
+  width: 280px;
+  max-width: calc(100vw - 40px);
+  max-height: 280px;
+  overflow-y: auto;
+  padding: 6px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: #fff;
+  color: inherit;
+  box-shadow: 0 8px 32px #26213618;
+}
+.model-picker > p {
+  padding: 8px 10px;
+  color: var(--muted);
+  font-size: 11px;
+}
+.model-picker button {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  width: 100%;
+  padding: 10px;
+  border-radius: 7px;
+  background: transparent;
+  text-align: left;
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+.model-picker button:hover:not(:disabled),
+.model-picker button[aria-pressed="true"] {
+  background: #f0edf8;
+  color: var(--accent);
+}
+.model-picker small {
+  display: block;
+  margin-top: 3px;
+  font-size: 11px;
 }
 .composer-bottom {
   display: flex;
@@ -612,7 +738,6 @@ textarea {
   align-items: end;
   gap: 10px;
 }
-.composer-models label,
 .limits-form label,
 .entry-form label,
 .reflection-box label {
@@ -621,7 +746,6 @@ textarea {
   font-size: 13px;
   line-height: 1.5;
 }
-.composer-models select,
 .limits-form input,
 .entry-form input,
 .entry-form textarea,
