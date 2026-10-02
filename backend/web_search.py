@@ -115,7 +115,7 @@ class WebSearch:
         state = self.read_state() if state is None else state
         key, source = credentials.read(ENDPOINT)
         return {**self.summary(state), "credentials_present": bool(key), "credential_source": source,
-                "tested_at": state["tested_at"] if key else None}
+                "tested_at": state["tested_at"] if key else None, **credentials.storage_options(ENDPOINT)}
 
     def configure(self, config, key, persist):
         with self.transaction() as state:

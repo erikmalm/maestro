@@ -52,8 +52,9 @@ with tempfile.TemporaryDirectory(prefix="maestro-browser-") as directory:
             if self.path == "/api/tags":
                 if self.headers.get("Authorization"):
                     return self.reply(400, {"error": "Unexpected local credential"})
-                return self.reply(200, {"models": [{"name": "synthetic-ollama:latest",
-                    "details": {"format": "gguf"}, "capabilities": ["completion"]}]})
+                return self.reply(200, {"models": [{"name": model,
+                    "details": {"format": "gguf"}, "capabilities": ["completion"]}
+                    for model in ("synthetic-ollama:latest", "synthetic-devstral:latest")]})
             if self.authorized():
                 self.reply(200, {"data": [{"id": "synthetic-browser-model"}]})
 
@@ -62,6 +63,7 @@ with tempfile.TemporaryDirectory(prefix="maestro-browser-") as directory:
                 if self.headers.get("Authorization"):
                     return self.reply(400, {"error": "Unexpected local credential"})
                 request = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+                assert request["model"] in ("synthetic-ollama:latest", "synthetic-devstral:latest")
                 if self.path == "/api/show":
                     return self.reply(200, {"details": {"format": "gguf"}, "capabilities": ["completion", "tools"]})
                 if request["messages"][0]["content"].startswith("Create a short, specific title"):

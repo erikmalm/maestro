@@ -3,8 +3,24 @@ import ctypes
 from ctypes import wintypes
 import hashlib
 import os
+from pathlib import Path
 
 session_keys = {}
+
+
+def secret_file(base_url):
+    variable = "MAESTRO_SEARCH_KEY_FILE" if base_url == "https://ollama.com/api/web_search" else "MAESTRO_API_KEY_FILE" if base_url == os.environ.get("MAESTRO_API_KEY_URL", "https://api.openai.com/v1").rstrip("/") else None
+    return os.environ.get(variable, "") if variable else ""
+
+
+def storage_options(base_url):
+    managed = bool(secret_file(base_url))
+    return {"persist_supported": os.name == "nt" and not managed, "managed_credentials": managed}
+
+
+def reject_managed_change(base_url):
+    if secret_file(base_url):
+        raise ValueError("This key is managed by the server. Update or remove its mounted secret and recreate Maestro.")
 
 
 class Credential(ctypes.Structure):
@@ -43,6 +59,17 @@ def vault():
 
 
 def read(base_url):
+    path = secret_file(base_url)
+    if path:
+        try:
+            with Path(path).open(encoding="utf-8") as stream:
+                raw = stream.read(4098)
+            key = raw.strip()
+            if len(raw) > 4097 or not key or len(key) > 4096 or not key.isascii() or not key.isprintable():
+                raise ValueError
+        except (OSError, UnicodeError, ValueError):
+            raise ValueError("The server's mounted API key is missing or invalid. Check its secret configuration.") from None
+        return key, "mounted secret"
     if base_url in session_keys:
         return session_keys[base_url], "session"
     if os.name == "nt":
@@ -60,6 +87,7 @@ def read(base_url):
 
 
 def save(base_url, key, persist):
+    reject_managed_change(base_url)
     if not key.isascii() or not key.isprintable():
         raise ValueError("Enter a valid API key without control or non-ASCII characters.")
     if not persist:
@@ -76,6 +104,7 @@ def save(base_url, key, persist):
 
 
 def delete(base_url):
+    reject_managed_change(base_url)
     if base_url == "https://api.openai.com/v1" and os.environ.get("OPENAI_API_KEY"):
         raise ValueError("Remove OPENAI_API_KEY from the server environment and restart Maestro before removing this API key.")
     if os.name == "nt":

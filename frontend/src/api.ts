@@ -11,6 +11,7 @@ export type Message = {
   role: "user" | "assistant";
   text: string;
   model?: string;
+  kind?: "chat" | "orchestrator";
   cost?: number;
   input_tokens?: number;
   output_tokens?: number;
@@ -124,9 +125,16 @@ export const toggleTask = (id: string, done: boolean) =>
   request<Workspace>(`/tasks/${id}`, "PATCH", { done });
 export const deleteTask = (id: string) =>
   request<Workspace>(`/tasks/${id}`, "DELETE");
-export const sendMessage = (text: string, chat_id?: string | null) =>
+export const sendMessage = (
+  text: string,
+  chat_id?: string | null,
+  model = "",
+  role: "chat" | "orchestrator" = "chat",
+) =>
   request<Workspace>("/chat", "POST", {
     text,
+    role,
+    ...(model ? { model } : {}),
     ...(chat_id ? { chat_id } : {}),
   });
 export const saveLimits = (limits: Limits) =>
@@ -136,6 +144,7 @@ export type ProviderConfig = {
   base_url: string;
   protocol: "responses" | "chat_completions" | "ollama";
   model: string;
+  orchestrator_model: string;
   input_usd_per_million: number;
   output_usd_per_million: number;
   pricing_verified: boolean;
@@ -144,11 +153,16 @@ export type ProviderConfig = {
   ollama_threads: number;
   ollama_keep_alive_minutes: number;
 };
-export type ProviderStatus = {
-  config: ProviderConfig;
-  credentials_required: boolean;
+export type CredentialStatus = {
   credentials_present: boolean;
   credential_source: string;
+  persist_supported?: boolean;
+  managed_credentials?: boolean;
+};
+export type ProviderStatus = CredentialStatus & {
+  config: ProviderConfig;
+  credentials_required: boolean;
+  ollama_base_url?: string;
   models: string[];
   tested_at: string | null;
 };
@@ -171,13 +185,11 @@ export type WebSearchConfig = {
   daily_limit: number;
   max_results: number;
 };
-export type WebSearchStatus = {
+export type WebSearchStatus = CredentialStatus & {
   config: WebSearchConfig;
   searches_today: number;
   remaining_today: number;
   paused_until: string | null;
-  credentials_present: boolean;
-  credential_source: string;
   tested_at: string | null;
 };
 export const loadWebSearch = () => request<WebSearchStatus>("/web-search");

@@ -1,8 +1,8 @@
 import { useEffect } from "react";
-import { LoaderCircle, Search, ShieldCheck } from "lucide-react";
+import { LoaderCircle, Search } from "lucide-react";
 import * as api from "./api";
 import type { ProviderStatus, WebSearchStatus } from "./api";
-import { NumberFields, useSetupForm } from "./SetupForm";
+import { KeyStorage, NumberFields, useSetupForm } from "./SetupForm";
 
 export default function OllamaSearchSetup({
   initialStatus,
@@ -101,6 +101,7 @@ export default function OllamaSearchSetup({
             autoComplete="new-password"
             spellCheck={false}
             maxLength={4096}
+            disabled={status.managed_credentials}
             value={apiKey}
             placeholder={
               status.credentials_present
@@ -113,22 +114,12 @@ export default function OllamaSearchSetup({
             }}
           />
         </label>
-        <label className="reflection-check">
-          <input
-            type="checkbox"
-            checked={persist}
-            onChange={(event) => setPersist(event.target.checked)}
-          />
-          Save search key in Windows Credential Manager
-        </label>
-        <p className="reflection-note">
-          <ShieldCheck size={15} />
-          {persist
-            ? "The search key is stored outside the repository."
-            : "A new search key stays in server memory until Maestro stops."}
-          {status.credentials_present &&
-            ` Current source: ${status.credential_source.replaceAll("_", " ")}.`}
-        </p>
+        <KeyStorage
+          status={status}
+          persist={persist}
+          onChange={setPersist}
+          search
+        />
         <div className="reflection-fields">
           <NumberFields
             values={config}
@@ -213,7 +204,11 @@ export default function OllamaSearchSetup({
           <button
             className="button subtle"
             type="button"
-            disabled={!!busy || !status.credentials_present}
+            disabled={
+              !!busy ||
+              !status.credentials_present ||
+              !!status.managed_credentials
+            }
             onClick={() => {
               void act(
                 "remove",

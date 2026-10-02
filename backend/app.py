@@ -22,12 +22,15 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 from backend.provider import Provider
 from backend import credentials
 from backend.web_search import WebSearch
+from backend.storage import workspace_owner
 
 ROOT = Path(__file__).resolve().parent.parent
 DATA_DIR = Path(os.environ.get("MAESTRO_DATA_DIR") or Path(os.environ.get("LOCALAPPDATA", Path.home() / ".local" / "share")) / "Maestro" / "preview").expanduser().resolve()
 if DATA_DIR == ROOT or ROOT in DATA_DIR.parents:
     raise RuntimeError("Choose a private data directory outside the Git checkout.")
 DATA_DIR.mkdir(parents=True, exist_ok=True)
+if os.name != "nt":
+    DATA_DIR.chmod(0o700)
 DATABASE = DATA_DIR / "workspace.sqlite3"
 TIMEZONE = ZoneInfo(os.environ.get("MAESTRO_TIMEZONE", "Europe/Stockholm"))
 SESSION = secrets.token_urlsafe(32)
@@ -164,6 +167,8 @@ class DoneInput(StrictModel):
 class TextInput(StrictModel):
     text: str = Field(min_length=1, max_length=4000)
     chat_id: str | None = Field(default=None, min_length=1, max_length=100)
+    model: str = Field(default="", max_length=200, pattern=r"^[A-Za-z0-9_./:-]*$")
+    role: Literal["chat", "orchestrator"] = "chat"
 
 
 class ChatTitleInput(StrictModel):
@@ -185,6 +190,7 @@ class ProviderConfig(StrictModel):
     base_url: str = Field(default="https://api.openai.com/v1", min_length=1, max_length=2048)
     protocol: Literal["responses", "chat_completions", "ollama"] = "responses"
     model: str = Field(default="", max_length=200, pattern=r"^[A-Za-z0-9_./:-]*$")
+    orchestrator_model: str = Field(default="", max_length=200, pattern=r"^[A-Za-z0-9_./:-]*$")
     input_usd_per_million: float = Field(default=0, ge=0, le=10000, allow_inf_nan=False)
     output_usd_per_million: float = Field(default=0, ge=0, le=10000, allow_inf_nan=False)
     pricing_verified: bool = False
@@ -226,9 +232,10 @@ def conflict_errors():
 
 @asynccontextmanager
 async def lifespan(application):
-    provider().recover()
-    WebSearch(DATABASE, TIMEZONE).recover()
-    yield
+    with workspace_owner(DATABASE.parent):
+        provider().recover()
+        WebSearch(DATABASE, TIMEZONE).recover()
+        yield
 
 
 app = FastAPI(title="Maestro", docs_url=None, redoc_url=None, openapi_url=None, lifespan=lifespan)
@@ -408,7 +415,7 @@ def chat(entry: TextInput):
             state["chats"].append(target)
         chat_id = target["id"]
     with conflict_errors():
-        provider().chat(entry.text, chat_id)
+        provider().chat(entry.text, chat_id, entry.model, entry.role)
     state = read_workspace()
     return snapshot(state, chat_id if any(item["id"] == chat_id for item in state["chats"]) else None)
 

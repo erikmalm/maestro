@@ -2,7 +2,7 @@
 
 Plan date: 2026-10-01. The current product supports real chat, persistent history, manual to-dos, provider setup and usage accounting. Local Ollama generation and two-turn context have been verified. Optional remote API setup/accounting and bounded hosted Ollama search have synthetic integration coverage. Hosted search access requires a successful test with the user's key.
 
-There is one active provider/model connection. Maestro cannot execute a to-do, delegate work, choose models for specialist tasks or recall private memory automatically. Demo dashboards, simulated runs and the reflection prototype have been removed from the active application. The [architecture](docs/ARCHITECTURE.md) describes the actual runtime and its next boundaries.
+There is one active provider connection with separate local chat/orchestrator model defaults and per-message choices. Orchestrator mode supports planning conversations. Maestro cannot execute a to-do, delegate work, choose models for specialist tasks or recall private memory automatically. Demo dashboards, simulated runs and the reflection prototype have been removed from the active application. The [architecture](docs/ARCHITECTURE.md) describes the actual runtime and its next boundaries.
 
 ## Product goal
 
@@ -16,16 +16,18 @@ The first supported setup is one user on one Windows computer. Deliver each capa
 
 - **Workspace:** separate persistent chats with live Ollama or compatible API replies, editable titles and optional one-search-per-message Ollama web search. New chat preserves earlier conversations; deleting one retains shared usage accounting.
 - **Tasks:** manual create, complete/reopen and delete operations without model calls.
-- **Settings and usage:** one active model connection, OS/session credentials, search setup, output/context controls, spend/token limits, actual model usage and uncertain-charge reconciliation.
+- **Settings and usage:** one connection with chat/orchestrator model preferences, per-message local choices, OS/session/mounted credentials, search setup, output/context controls, spend/token limits, actual model usage and uncertain-charge reconciliation.
 - **Private storage:** SQLite outside Git; real conversations and accounting survive restart. Previous live history migrates into one conversation. Earlier prototype-only records remain archived privately, with simulated messages excluded from active chat.
 
 Chat history stays separate while usage and limits are shared. A first successful reply may trigger one bounded title call using the original model, a short first-message excerpt, no tools and the remaining request allowance. A first-message title is the fallback; manual names always win.
 
 The current generation path supports one request at a time. API restart recovery assumes that the API process owns all generation. These are useful foundations for a task runtime, but neither establishes delegation.
 
-## Podman deployment backlog
+## Podman deployment
 
-All tasks below are planned. The first deployment target is one Maestro container serving FastAPI and the built frontend, with a private data volume and the existing Windows Ollama service. Deployment can proceed alongside the functional build sequence below. Moving inference into a container follows a measured need and verified GPU access.
+The application container, lifecycle launcher, trusted host endpoint, mounted secrets and private snapshots are implemented; the [runbook](docs/CONTAINERS.md) describes setup and verification. Isolated Podman checks verify model choices, access controls, resource limits, recreation, backup/restore and mounted secrets. The acceptance tasks below remain the checklist when migrating a real workspace or changing deployment configuration. Maestro serves FastAPI and the built frontend from one container, with a private data volume and the existing Windows Ollama service. Moving inference into a container follows a measured need and verified GPU access.
+
+Host model discovery and a bounded `qwen2.5:7b` reply have also been verified through the Windows loopback tunnel, with actual token accounting and no provider API charge.
 
 | ID | Task | Acceptance | Depends on |
 | --- | --- | --- | --- |

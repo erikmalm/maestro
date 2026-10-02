@@ -21,6 +21,7 @@ const initial: Workspace = {
       base_url: "http://127.0.0.1:11434",
       protocol: "ollama",
       model: "old-model",
+      orchestrator_model: "",
       input_usd_per_million: 0,
       output_usd_per_million: 0,
       pricing_verified: true,
@@ -84,6 +85,67 @@ async function mockSettings(
     } else throw new Error(`Unexpected API request: ${path}`);
   });
   return () => pending;
+}
+
+for (const managed of [false, true]) {
+  test(`container credentials are ${managed ? "managed outside the UI" : "saved only for the session"}`, async ({
+    page,
+  }) => {
+    const state = structuredClone(initial);
+    Object.assign(state.provider.config, {
+      base_url: "https://provider.example/v1",
+      protocol: "responses",
+      model: "synthetic-model",
+    });
+    for (const status of [state.provider, state.web_search]) {
+      status.persist_supported = false;
+      status.managed_credentials = managed;
+      status.credentials_present = true;
+      status.credential_source = managed ? "mounted_secret" : "session";
+    }
+    state.provider.credentials_required = true;
+    await mockSettings(page, state, "");
+    await page.goto("/");
+    await page.getByRole("button", { name: "Settings", exact: true }).click();
+    await expect(page.getByText(/Windows Credential Manager/)).toHaveCount(0);
+    if (managed) {
+      await expect(page.getByLabel("API key", { exact: true })).toBeDisabled();
+      await expect(
+        page.getByLabel("Ollama search API key", { exact: true }),
+      ).toBeDisabled();
+      await expect(
+        page.getByRole("button", { name: "Remove API key", exact: true }),
+      ).toBeDisabled();
+      await expect(
+        page.getByRole("button", { name: "Remove search key", exact: true }),
+      ).toBeDisabled();
+      await expect(
+        page.getByText(/This key is managed by the server/),
+      ).toHaveCount(2);
+    } else {
+      await expect(
+        page.getByText(/New keys stay in server memory/),
+      ).toHaveCount(2);
+      for (const [path, field, button] of [
+        ["/api/provider", "API key", "Save connection"],
+        ["/api/web-search", "Ollama search API key", "Save search settings"],
+      ]) {
+        await page
+          .getByLabel(field, { exact: true })
+          .fill("synthetic-session-key");
+        const saved = page.waitForRequest(
+          (request) =>
+            new URL(request.url()).pathname === path &&
+            request.method() === "PUT",
+        );
+        await page.getByRole("button", { name: button, exact: true }).click();
+        expect((await saved).postDataJSON().persist).toBe(false);
+        await expect(
+          page.getByRole("button", { name: button, exact: true }),
+        ).toBeEnabled();
+      }
+    }
+  });
 }
 
 for (const search of [false, true]) {

@@ -711,6 +711,104 @@ test("local Ollama chat needs no key or USD budget and records native tokens", a
   await expect(page.getByLabel("API key", { exact: true })).toHaveCount(0);
 });
 
+test("local chat and orchestrator models can change without replacing a conversation or draft", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await page.getByRole("button", { name: "Settings", exact: true }).click();
+  const fixture = await (
+    await page.request.get("/api/provider-fixture")
+  ).json();
+  await page
+    .getByLabel("Model provider", { exact: true })
+    .selectOption("ollama");
+  await page
+    .getByLabel("API base URL", { exact: true })
+    .fill(fixture.ollama_url);
+  await page.getByRole("button", { name: "Connect and load models" }).click();
+  await page
+    .getByLabel("Available models", { exact: true })
+    .selectOption("synthetic-ollama:latest");
+  await page
+    .getByLabel("Orchestrator default model")
+    .selectOption("synthetic-devstral:latest");
+  await page
+    .getByRole("button", { name: "Save connection", exact: true })
+    .click();
+  await expect(
+    page.getByText(
+      "Chat model settings saved. Return to Workspace to send a message.",
+    ),
+  ).toBeVisible();
+  await page.reload();
+  await page.getByRole("button", { name: "Settings", exact: true }).click();
+  await expect(page.getByLabel("Orchestrator default model")).toHaveValue(
+    "synthetic-devstral:latest",
+  );
+  await page.getByRole("button", { name: "New chat", exact: true }).click();
+  await expect(page.getByLabel("Message Maestro")).toBeVisible();
+  const before = await (await page.request.get("/api/workspace")).json();
+  for (const [role, choice, model] of [
+    ["chat", "", "synthetic-ollama:latest"],
+    ["orchestrator", "", "synthetic-devstral:latest"],
+    ["orchestrator", "synthetic-ollama:latest", "synthetic-ollama:latest"],
+  ]) {
+    const text = `Synthetic ${role} request ${choice || "default"}`;
+    await page.getByLabel("Message Maestro").fill(text);
+    await page
+      .getByRole("combobox", { name: "Role", exact: true })
+      .selectOption(role);
+    await page.getByLabel("Model for this role").selectOption(choice);
+    await expect(page.getByLabel("Message Maestro")).toHaveValue(text);
+    await expect(page.locator(".composer-bottom small")).toHaveText(model);
+    await page.getByRole("button", { name: "Send message" }).click();
+    await expect(page.getByLabel("Message Maestro")).toHaveValue("");
+    const saved = await (
+      await page.request.get(`/api/workspace?chat_id=${before.active_chat_id}`)
+    ).json();
+    expect(saved.messages.at(-1)).toMatchObject({
+      role: "assistant",
+      model,
+      kind: role,
+    });
+    expect(saved.active_chat_id).toBe(before.active_chat_id);
+    expect(saved.provider.config.orchestrator_model).toBe(
+      "synthetic-devstral:latest",
+    );
+    expect(saved.provider.config.model).toBe("synthetic-ollama:latest");
+  }
+  await expect(page.locator(".chat-message.assistant")).toHaveCount(3);
+  await expect(
+    page.locator(".message-author").filter({ hasText: "Orchestrator" }),
+  ).toHaveCount(2);
+  await expect(
+    page.getByText(
+      "The orchestrator helps plan and break down work. Task execution and delegation are not available yet.",
+    ),
+  ).toBeVisible();
+  await page
+    .getByLabel("Message Maestro")
+    .fill("Keep this draft while refreshing models");
+  await page.getByRole("button", { name: "Refresh installed models" }).click();
+  await expect(
+    page.getByRole("button", { name: "Refresh installed models" }),
+  ).toBeEnabled();
+  await expect(page.getByLabel("Message Maestro")).toHaveValue(
+    "Keep this draft while refreshing models",
+  );
+  await expect(page.getByLabel("Model for this role")).toHaveValue(
+    "synthetic-ollama:latest",
+  );
+  await expect(page.locator(".chat-message.assistant")).toHaveCount(3);
+  await page.setViewportSize({ width: 375, height: 812 });
+  await expect(
+    page.getByRole("combobox", { name: "Model for this role", exact: true }),
+  ).toBeVisible();
+  expect(
+    await page.evaluate(() => document.documentElement.scrollWidth),
+  ).toBeLessThanOrEqual(375);
+});
+
 test("verified search key enables bounded local-model search with persistent sources", async ({
   page,
 }) => {

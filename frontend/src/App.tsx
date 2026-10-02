@@ -268,6 +268,8 @@ export default function App() {
   const [toast, setToast] = useState("");
   const [error, setError] = useState("");
   const [chat, setChat] = useState("");
+  const [role, setRole] = useState<"chat" | "orchestrator">("chat");
+  const [models, setModels] = useState({ chat: "", orchestrator: "" });
   const [mobileNav, setMobileNav] = useState(false);
   const navigationDrawer = useRef<HTMLElement>(null);
   const navigationMenu = useRef<HTMLButtonElement>(null);
@@ -442,7 +444,7 @@ export default function App() {
         }
         if (!id)
           throw new Error("Could not create a conversation. Please try again.");
-        return api.sendMessage(submitted, id);
+        return api.sendMessage(submitted, id, requestedModel, role);
       })
     )
       setChat((draft) => (draft === submitted ? "" : draft));
@@ -477,10 +479,21 @@ export default function App() {
   const activeChat = workspace.chats.find(
     (thread) => thread.id === workspace.active_chat_id,
   );
+  const local = workspace.provider.config.protocol === "ollama";
+  const requestedModel =
+    local && workspace.provider.models.includes(models[role])
+      ? models[role]
+      : "";
+  const defaultModel =
+    (local &&
+      role === "orchestrator" &&
+      workspace.provider.config.orchestrator_model) ||
+    workspace.provider.config.model;
+  const selectedModel = requestedModel || defaultModel;
   const ready =
     (workspace.provider.credentials_required === false ||
       workspace.provider.credentials_present) &&
-    !!workspace.provider.config.model &&
+    !!selectedModel &&
     workspace.provider.config.pricing_verified;
 
   return (
@@ -606,7 +619,7 @@ export default function App() {
               <div>
                 <h1>{activeChat?.title ?? "Chat"}</h1>
                 <p>
-                  {workspace.provider.config.model ||
+                  {selectedModel ||
                     "Connect a model in Settings to start a conversation."}
                 </p>
               </div>
@@ -657,7 +670,7 @@ export default function App() {
                   >
                     <span className="message-author">
                       {message.role === "assistant"
-                        ? `Maestro · ${message.model ?? workspace.provider.config.model}`
+                        ? `${message.kind === "orchestrator" ? "Orchestrator" : "Maestro"} · ${message.model ?? workspace.provider.config.model}`
                         : "You"}
                     </span>
                     <p>{message.text}</p>
@@ -699,6 +712,57 @@ export default function App() {
             )}
             <div className="composer-area">
               <form className="composer" onSubmit={submitChat}>
+                <div className="composer-models">
+                  <label>
+                    Role
+                    <select
+                      value={role}
+                      disabled={!!busy}
+                      onChange={(event) =>
+                        setRole(event.target.value as typeof role)
+                      }
+                    >
+                      <option value="chat">Chat</option>
+                      <option value="orchestrator">Orchestrator</option>
+                    </select>
+                  </label>
+                  {local && (
+                    <>
+                      <label>
+                        Model for this role
+                        <select
+                          value={requestedModel}
+                          disabled={!!busy}
+                          onChange={(event) =>
+                            setModels({ ...models, [role]: event.target.value })
+                          }
+                        >
+                          <option value="">
+                            Default: {defaultModel || "Choose in Settings"}
+                          </option>
+                          {workspace.provider.models.map((model) => (
+                            <option key={model} value={model}>
+                              {model}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                      <button
+                        className="button subtle"
+                        type="button"
+                        disabled={!!busy}
+                        onClick={() =>
+                          void perform("models", async () => {
+                            await api.testProvider();
+                            return api.loadWorkspace(workspace.active_chat_id);
+                          })
+                        }
+                      >
+                        Refresh installed models
+                      </button>
+                    </>
+                  )}
+                </div>
                 <textarea
                   aria-label="Message Maestro"
                   placeholder="Write a message…"
@@ -716,9 +780,7 @@ export default function App() {
                   }}
                 />
                 <div className="composer-bottom">
-                  <small>
-                    {workspace.provider.config.model || "No model selected"}
-                  </small>
+                  <small>{selectedModel || "No model selected"}</small>
                   <button
                     className="send-button"
                     type="submit"
@@ -733,6 +795,12 @@ export default function App() {
                   </button>
                 </div>
               </form>
+              {role === "orchestrator" && (
+                <p className="composer-note">
+                  The orchestrator helps plan and break down work. Task
+                  execution and delegation are not available yet.
+                </p>
+              )}
               <p className="composer-note">
                 Chat is saved locally and sent to your configured model provider
                 when you send a message.

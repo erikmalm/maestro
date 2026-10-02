@@ -2,7 +2,7 @@
 
 A local web interface for persistent chats with your chosen model, usage tracking and to-dos. Workspace, Tasks and Settings expose the working core: live conversation, manual task management and provider configuration.
 
-Maestro currently saves one active provider/model connection. It supports local Ollama or a compatible remote API, but has no autonomous task execution, delegation or model routing between tasks. Optional Ollama web search is the only model-selected tool. The [development plan](DEVELOPMENT_PLAN.md) describes the next functional increments.
+Maestro saves one provider connection with separate local chat and orchestrator model preferences. Chat supports per-message model choices; orchestrator mode helps plan work. Autonomous task execution and delegation remain future work. Optional Ollama web search is the only model-selected tool. The [development plan](DEVELOPMENT_PLAN.md) describes the next functional increments.
 
 ## Run locally
 
@@ -14,6 +14,8 @@ Windows, Python 3.11+, and Node.js 20.19+ or 22.12+:
 
 Open [http://127.0.0.1:8765](http://127.0.0.1:8765). Stop with `.\scripts\stop.ps1`. If script execution is blocked, run `powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\start.ps1 -NoBrowser`.
 
+For a non-root Podman container, private workspace volume and host Ollama, follow the [container runbook](docs/CONTAINERS.md). It includes build/start/stop, loopback networking, mounted secrets, migration and backup/restore.
+
 ## Connect and chat
 
 For local Ollama:
@@ -23,7 +25,9 @@ For local Ollama:
 3. Click **Connect and load models**, select an installed model, then **Save connection**.
 4. Return to **Workspace** and send a message. Tokens are reported by Ollama and provider API charges are $0; hardware and electricity costs are not estimated.
 
-Ollama mode uses the native local API without a key or price entry. Only loopback endpoints and installed local chat models are accepted; cloud models are excluded and there is no cloud fallback. Output and conversation token limits still apply, including when dollar budgets are zero. Models and Ollama's own configuration stay outside this repository. See [Ollama's local API](https://docs.ollama.com/api/authentication).
+The installed-model list is the same inventory shown by `ollama list`. Set an independent **Orchestrator model** in Settings, or leave it blank to share the chat default. In Workspace, choose **Chat** or **Orchestrator** and a model beside the composer; each role remembers its current choice while you switch. **Refresh installed models** picks up models added or removed through Ollama. Switching preserves the conversation and draft, and each answer records the model actually used. Orchestrator mode provides plans; saving a task still does not execute it.
+
+Ollama mode uses the native local API without a key or price entry. Only loopback endpoints, the exact trusted container host endpoint and installed local chat models are accepted; cloud models are excluded and there is no cloud fallback. Output and conversation token limits still apply, including when dollar budgets are zero. Models and Ollama's own configuration stay outside this repository. See [Ollama's local API](https://docs.ollama.com/api/authentication).
 
 Expand **Local worker settings** to control context size (default 4,096 tokens), CPU threads (0 lets Ollama choose), and idle keep-loaded time (default 5 minutes; 0 unloads after each reply). Save changes before the next message. Larger contexts use more memory; these settings do not limit GPU utilization. Maestro conservatively checks conversation size plus the reply allowance before dispatch and asks for a new chat or a larger context when it would not fit. Ollama runs inference on demand; these settings do not start a background task runner. See [Ollama's context and keep-alive settings](https://docs.ollama.com/faq).
 
@@ -70,7 +74,7 @@ Paid API requests with unknown usage retain a reservation and block further chat
 
 ## Private credentials and data
 
-Keys never go into Git, the workspace database, browser storage, prompts, read API responses or logs. The password field clears on submission. Persisted keys are scoped to the exact provider endpoint in Windows Credential Manager. Session-only keys disappear when the server stops; previously saved credentials remain until removed. Remove `OPENAI_API_KEY` from the server environment and restart Maestro before removing an OpenAI key through the UI.
+Keys never go into Git, the workspace database, browser storage, prompts, read API responses or logs. The password field clears on submission. Windows persists keys in endpoint-scoped Credential Manager entries. Linux supports session-only keys and externally managed mounted secrets; the UI reflects those capabilities. Session-only keys disappear when the server stops. Remove `OPENAI_API_KEY` from the server environment and restart Maestro before removing an OpenAI key through the UI.
 
 The Ollama search key uses its own credential scope for `https://ollama.com/api/web_search`. Removing it disables automatic search and leaves the local model connection intact.
 

@@ -1,6 +1,7 @@
 """Native loopback Ollama chat with synthetic fixtures and no real model calls."""
 from pathlib import Path
 import json
+import os
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -223,7 +224,7 @@ class OllamaTests(unittest.TestCase):
         self.configure()
         service = Provider(backend.DATABASE, backend.TIMEZONE)
         with service.transaction() as state:
-            for key in ("ollama_context_tokens", "ollama_threads", "ollama_keep_alive_minutes"):
+            for key in ("ollama_context_tokens", "ollama_threads", "ollama_keep_alive_minutes", "orchestrator_model"):
                 del state["config"][key]
             state["models"] = [self.model]
             state["tested_at"] = "synthetic-previous-test"
@@ -231,6 +232,7 @@ class OllamaTests(unittest.TestCase):
         self.assertEqual(status["config"]["ollama_context_tokens"], 4096)
         self.assertEqual(status["config"]["ollama_threads"], 0)
         self.assertEqual(status["config"]["ollama_keep_alive_minutes"], 5)
+        self.assertEqual(status["config"]["orchestrator_model"], "")
         self.assertEqual(status["config"]["model"], self.model)
         self.assertEqual(status["models"], [self.model])
         self.assertEqual(status["tested_at"], "synthetic-previous-test")
@@ -320,6 +322,46 @@ class OllamaTests(unittest.TestCase):
         self.assertEqual(self.requests, [])
         self.save_key.assert_not_called()
         self.read_key.assert_not_called()
+
+    @patch.dict(os.environ, {"MAESTRO_OLLAMA_URL": ""})
+    def test_container_endpoint_requires_exact_server_opt_in_and_never_sends_credentials(self):
+        self.configure()
+        for host in ("host.containers.internal", "host.docker.internal"):
+            endpoint = f"http://{host}:11434"
+            with self.subTest(host=host):
+                rejected = self.client.put("/api/provider", headers=self.headers,
+                                           json={"config": {**self.config, "base_url": endpoint}})
+                self.assertEqual(rejected.status_code, 409, rejected.text)
+                with patch.dict(os.environ, {"MAESTRO_OLLAMA_URL": endpoint}):
+                    self.configure({**self.config, "base_url": endpoint})
+                    calls = []
+                    def handler(request):
+                        calls.append(request)
+                        self.assertEqual(request.url.host, host)
+                        self.assertNotIn("authorization", request.headers)
+                        if request.url.path == "/api/show":
+                            return httpx.Response(200, json={"details": {"format": "gguf"}, "capabilities": ["completion"]})
+                        return httpx.Response(200, json={"done": True, "message": {"content": "Synthetic container reply"},
+                                                         "prompt_eval_count": 100, "eval_count": 20})
+                    with self.mock_http(handler):
+                        allowed = self.client.post("/api/chat", headers=self.headers, json={"text": "Container host model"})
+                    self.assertEqual(allowed.status_code, 200, allowed.text)
+                    self.assertEqual(calls[0].url.path, "/api/show")
+                    for invalid in (endpoint + "/v1", endpoint.replace(":11434", ":11435"),
+                                    endpoint + "?key=synthetic", endpoint.replace(host, "synthetic.invalid")):
+                        denied = self.client.put("/api/provider", headers=self.headers,
+                                                 json={"config": {**self.config, "base_url": invalid}})
+                        self.assertEqual(denied.status_code, 409, denied.text)
+                self.configure()
+        for invalid in ("http://synthetic.invalid:11434", "https://synthetic.invalid", "http://host.containers.internal:11434/v1",
+                        "http://user:synthetic-env-key@host.containers.internal:11434", "http://host.containers.internal:11434?key=synthetic-env-key"):
+            with patch.dict(os.environ, {"MAESTRO_OLLAMA_URL": invalid}):
+                status = self.client.get("/api/provider")
+                self.assertEqual(status.json()["ollama_base_url"], self.base)
+                self.assertNotIn("synthetic-env-key", status.text)
+                rejected = self.client.put("/api/provider", headers=self.headers,
+                                           json={"config": {**self.config, "base_url": invalid}})
+            self.assertEqual(rejected.status_code, 409, rejected.text)
 
     def test_show_rejects_cloud_models_and_unsupported_capabilities_before_generation(self):
         self.configure()
