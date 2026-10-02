@@ -76,6 +76,8 @@ def save(base_url, key, persist):
 
 
 def delete(base_url):
+    if base_url == "https://api.openai.com/v1" and os.environ.get("OPENAI_API_KEY"):
+        raise ValueError("Remove OPENAI_API_KEY from the server environment and restart Maestro before removing this API key.")
     if os.name == "nt":
         api = vault()
         if not api.CredDeleteW(target(base_url), 1, 0) and ctypes.get_last_error() != 1168:

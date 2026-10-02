@@ -70,7 +70,7 @@ Paid API requests with unknown usage retain a reservation and block further chat
 
 ## Private credentials and data
 
-Keys never go into Git, the workspace database, browser storage, prompts, read API responses or logs. The password field clears on submission. Persisted keys are scoped to the exact provider endpoint in Windows Credential Manager. Session-only keys disappear when the server stops; previously saved credentials remain until removed. A server-environment OpenAI key can also be used and is controlled outside the UI.
+Keys never go into Git, the workspace database, browser storage, prompts, read API responses or logs. The password field clears on submission. Persisted keys are scoped to the exact provider endpoint in Windows Credential Manager. Session-only keys disappear when the server stops; previously saved credentials remain until removed. Remove `OPENAI_API_KEY` from the server environment and restart Maestro before removing an OpenAI key through the UI.
 
 The Ollama search key uses its own credential scope for `https://ollama.com/api/web_search`. Removing it disables automatic search and leaves the local model connection intact.
 
@@ -87,6 +87,7 @@ When you send API chat, its history and your key go to the configured provider. 
 .\.venv\Scripts\python.exe -m unittest discover -s tests -p "test_*.py"
 cd frontend
 npm run build
+npx playwright install chromium
 npm run test:ui
 ```
 

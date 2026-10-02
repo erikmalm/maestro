@@ -185,6 +185,49 @@ class WorkspaceTests(unittest.TestCase):
         self.assertEqual(self.workspace()["limits"], original["limits"])
         self.assertNotIn("api_key", str(self.workspace()))
 
+    def test_environment_fallback_blocks_key_removal_without_changing_keys_or_state(self):
+        base = DEFAULT["base_url"]
+        environment_key = "synthetic-environment-key"
+        service = Provider(backend.DATABASE, backend.TIMEZONE)
+        with service.transaction() as state:
+            state.update(models=["synthetic-model"], tested_at=backend.now(), ledger=[
+                {"id": "synthetic-charge", "at": backend.now(), "cost": 0.12,
+                 "input_tokens": 15, "output_tokens": 5, "status": "settled"}])
+        saved = service.read_state()
+        for source, key in (("server environment", environment_key), ("session", "synthetic-session-key"),
+                            ("Windows Credential Manager", "synthetic-vault-key")):
+            session = {base: key} if source == "session" else {}
+            with self.subTest(source=source), patch.dict(os.environ, OPENAI_API_KEY=environment_key), \
+                    patch.dict(backend.credentials.session_keys, session, clear=True), \
+                    patch.object(backend.credentials, "read", return_value=(key, source)), \
+                    patch.object(backend.credentials, "vault") as vault:
+                before = self.workspace()
+                response = self.client.delete("/api/provider/key", headers=self.headers)
+                self.assertEqual(response.status_code, 409)
+                self.assertIn("OPENAI_API_KEY", response.json()["detail"])
+                self.assertIn("restart Maestro", response.json()["detail"])
+                self.assertNotIn(key, response.text)
+                self.assertEqual(os.environ["OPENAI_API_KEY"], environment_key)
+                self.assertEqual(backend.credentials.session_keys, session)
+                self.assertEqual(service.read_state(), saved)
+                self.assertEqual(self.workspace(), before)
+                vault.assert_not_called()
+
+    def test_stored_key_removal_still_works_without_an_environment_fallback(self):
+        for base, environment in ((DEFAULT["base_url"], ""), ("https://provider.example/v1", "synthetic-env-key")):
+            with Provider(backend.DATABASE, backend.TIMEZONE).transaction() as state:
+                state["config"]["base_url"] = base
+            with self.subTest(base=base), patch.dict(os.environ, OPENAI_API_KEY=environment), \
+                    patch.dict(backend.credentials.session_keys, {base: "synthetic-session-key"}, clear=True), \
+                    patch.object(backend.credentials, "vault") as vault:
+                vault.return_value.CredDeleteW.return_value = True
+                response = self.client.delete("/api/provider/key", headers=self.headers)
+                self.assertEqual(response.status_code, 200)
+                self.assertFalse(response.json()["credentials_present"])
+                self.assertNotIn(base, backend.credentials.session_keys)
+                if os.name == "nt":
+                    vault.return_value.CredDeleteW.assert_called_once_with(backend.credentials.target(base), 1, 0)
+
     def test_preview_migration_preserves_user_data_and_real_accounting_once(self):
         legacy = {
             "tasks": [{"id": "sample-documents", "title": "Synthetic sample"},

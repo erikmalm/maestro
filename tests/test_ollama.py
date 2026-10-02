@@ -115,6 +115,8 @@ class OllamaTests(unittest.TestCase):
     def test_setup_rejects_credentials_and_forces_zero_prices(self):
         synthetic_key = "synthetic-accidental-local-key"
         status = self.configure()
+        self.read_key.assert_called_once_with(DEFAULT["base_url"])
+        self.read_key.reset_mock()
         rejected = self.client.put(
             "/api/provider",
             headers=self.headers,
@@ -145,6 +147,7 @@ class OllamaTests(unittest.TestCase):
 
     def test_native_model_test_and_history_usage_survive_fresh_read(self):
         self.configure()
+        self.read_key.reset_mock()
         with self.mock_http():
             tested = self.client.post("/api/provider/test", headers=self.headers)
             self.assertEqual(tested.status_code, 200, tested.text)
@@ -291,6 +294,7 @@ class OllamaTests(unittest.TestCase):
 
     def test_remote_or_non_native_urls_rejected_without_saving_or_dispatch(self):
         self.configure()
+        self.read_key.reset_mock()
         invalid = (
             "http://synthetic.invalid:11434",
             "https://synthetic.invalid",
@@ -355,7 +359,7 @@ class OllamaTests(unittest.TestCase):
     def test_local_errors_release_reservations_redact_details_and_allow_retry(self):
         self.configure()
         secret = "synthetic-private-provider-error"
-        for failure in ("http", "timeout", "malformed", "missing_usage"):
+        for failure in ("http", "timeout", "malformed", "missing_usage", "refusal"):
             calls = []
 
             def handler(request):
@@ -369,6 +373,9 @@ class OllamaTests(unittest.TestCase):
                     raise httpx.ReadTimeout(secret, request=request)
                 if failure == "malformed":
                     return httpx.Response(200, text=secret)
+                if failure == "refusal":
+                    return httpx.Response(200, json={"done": True, "message": {"content": None, "refusal": secret},
+                                                     "prompt_eval_count": 100, "eval_count": 5})
                 return httpx.Response(200, json={"done": True, "message": {"role": "assistant", "content": secret}})
 
             with self.subTest(failure=failure), self.mock_http(handler):

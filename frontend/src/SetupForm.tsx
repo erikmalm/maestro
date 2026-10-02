@@ -1,13 +1,9 @@
 import { useRef, useState } from "react";
 
-function unsaved<T extends object>(
-  draft: Partial<T>,
-  ...saved: T[]
-): Partial<T> {
+function unsaved<T extends object>(draft: Partial<T>, saved: T): Partial<T> {
   const changes = { ...draft };
   for (const key of Object.keys(draft) as (keyof T)[]) {
-    if (saved.some((config) => Object.is(draft[key], config[key])))
-      delete changes[key];
+    if (Object.is(draft[key], saved[key])) delete changes[key];
   }
   return changes;
 }
@@ -17,7 +13,7 @@ export function useSetupForm<T extends { config: object }>(
   onChange: (status: T) => void,
   failureMessage: string,
 ) {
-  const [source, setSource] = useState(initialStatus);
+  const source = useRef(initialStatus);
   const [status, setStatus] = useState(initialStatus);
   const [draft, setDraft] = useState<Partial<T["config"]>>({});
   const [apiKey, setApiKey] = useState("");
@@ -28,8 +24,8 @@ export function useSetupForm<T extends { config: object }>(
   const [notice, setNotice] = useState("");
   const config = { ...(status.config as T["config"]), ...draft };
 
-  if (source !== initialStatus) {
-    setSource(initialStatus);
+  if (source.current !== initialStatus) {
+    source.current = initialStatus;
     setStatus(initialStatus);
     if (!submitted.current) setDraft(unsaved(draft, initialStatus.config));
   }
@@ -45,12 +41,9 @@ export function useSetupForm<T extends { config: object }>(
 
   function update(next: T, confirmed = true) {
     const saved = confirmed ? submitted.current : null;
-    setStatus(next);
-    setDraft((previous) =>
-      saved
-        ? unsaved(previous, saved, next.config)
-        : unsaved(previous, next.config),
-    );
+    const latest = source.current === initialStatus ? next : source.current;
+    if (latest === next) setStatus(next);
+    setDraft((previous) => unsaved(previous, saved ?? latest.config));
     if (saved) submitted.current = next.config;
     onChange(next);
   }

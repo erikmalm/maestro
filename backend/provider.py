@@ -168,7 +168,7 @@ class Provider:
             config.update(input_usd_per_million=0, output_usd_per_million=0, pricing_verified=True)
         with self.transaction() as state:
             effective_key = None if local else key or credentials.read(config["base_url"])[0]
-            current_key = None if local or state["config"]["protocol"] == "ollama" else credentials.read(state["config"]["base_url"])[0]
+            current_key = None if state["config"]["protocol"] == "ollama" else credentials.read(state["config"]["base_url"])[0]
             if any(saved_key and saved_key in url for saved_key in (effective_key, current_key) for url in (config["base_url"], unquote(config["base_url"]))):
                 raise ValueError("Enter an API base URL without the API key.")
             if any(saved_key and saved_key in config["model"] for saved_key in (effective_key, current_key)):
@@ -360,7 +360,7 @@ class Provider:
                     choices = data.get("choices")
                     first = choices[0] if isinstance(choices, list) and choices and isinstance(choices[0], dict) else {}
                     message = data.get("message") if local else first.get("message")
-                    reply = message.get("content", "") if isinstance(message, dict) else ""
+                    reply = message.get("content") or ("" if local else message.get("refusal", "")) if isinstance(message, dict) else ""
                 reply = reply if isinstance(reply, str) else ""
                 reply = credentials.redact(reply, key)
                 # Persist the actual exchange and accounting atomically.

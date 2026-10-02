@@ -155,11 +155,13 @@ class ProviderTests(unittest.TestCase):
     def test_manual_model_rejects_current_and_effective_keys_before_changing_state(self):
         with self.mock_http():
             before = self.client.post("/api/provider/test", headers=self.headers).json()
-        for submitted, exposed in (("", self.key), ("synthetic-replacement-key", "synthetic-replacement-key"),
-                                   ("synthetic-replacement-key", self.key)):
-            with self.subTest(submitted=bool(submitted), exposed=exposed), patch.object(credentials, "save", wraps=credentials.save) as save:
+        for protocol, submitted, exposed in (("responses", "", self.key),
+                                            ("responses", "synthetic-replacement-key", "synthetic-replacement-key"),
+                                            ("responses", "synthetic-replacement-key", self.key), ("ollama", "", self.key)):
+            with self.subTest(protocol=protocol, submitted=bool(submitted), exposed=exposed), patch.object(credentials, "save", wraps=credentials.save) as save:
                 response = self.client.put("/api/provider", headers=self.headers, json={
-                    "config": {**self.config, "model": "model-" + exposed + "-suffix"},
+                    "config": {**self.config, "protocol": protocol, "model": "model-" + exposed + "-suffix",
+                               "base_url": "http://127.0.0.1:11434" if protocol == "ollama" else self.base},
                     "api_key": submitted, "persist": False})
                 self.assertEqual(response.status_code, 409)
                 self.assertNotIn(exposed, response.text)
@@ -216,8 +218,10 @@ class ProviderTests(unittest.TestCase):
                     credentials.session_keys.pop(target, None)
 
     def test_successful_reply_refusal_and_title_redact_dispatched_credentials(self):
-        for protocol, kind in (("responses", "output_text"), ("responses", "refusal"), ("chat_completions", "content")):
-            with self.subTest(protocol=protocol, kind=kind):
+        for protocol, kind, empty in (("responses", "output_text", None), ("responses", "refusal", None),
+                                     ("chat_completions", "content", None), ("chat_completions", "refusal", None),
+                                     ("chat_completions", "refusal", "")):
+            with self.subTest(protocol=protocol, kind=kind, content=empty):
                 self.setup_provider({**self.config, "protocol": protocol})
                 self.client.post("/api/chats", headers=self.headers)
                 def handler(request):
@@ -233,7 +237,10 @@ class ProviderTests(unittest.TestCase):
                         data = {"output": [{"type": "message", "content": content}],
                                 "usage": {"input_tokens": 100, "output_tokens": 5}}
                     else:
-                        data = {"choices": [{"message": {"content": reply}}],
+                        message = {kind: reply}
+                        if kind == "refusal":
+                            message["content"] = empty
+                        data = {"choices": [{"message": message}],
                                 "usage": {"prompt_tokens": 100, "completion_tokens": 5}}
                     return httpx.Response(200, json=data)
                 with self.mock_http(handler):
@@ -243,6 +250,9 @@ class ProviderTests(unittest.TestCase):
                 self.assertEqual(workspace["messages"][-1]["text"], "Provider echo [redacted]")
                 self.assertEqual(next(x["title"] for x in workspace["chats"] if x["id"] == workspace["active_chat_id"]), "Provider echo [redacted]")
                 self.assertEqual(workspace["usage"]["reserved_usd"], 0)
+                self.assertAlmostEqual(workspace["messages"][-1]["cost"], 0.00011)
+                self.assertEqual(workspace["messages"][-1]["input_tokens"], 100)
+                self.assertEqual(workspace["messages"][-1]["output_tokens"], 5)
                 self.assertNotIn(self.key, response.text)
                 self.assertNotIn(self.key, self.client.get("/api/workspace").text)
                 self.assertNotIn(self.key.encode(), backend.DATABASE.read_bytes())

@@ -54,7 +54,12 @@ const initial: Workspace = {
   },
 };
 
-async function mockSettings(page: Page, state: Workspace, hold: string) {
+async function mockSettings(
+  page: Page,
+  state: Workspace,
+  hold: string,
+  failRefresh = () => false,
+) {
   let pending: Route | undefined;
   await page.route("**/api/**", async (route) => {
     const path = new URL(route.request().url()).pathname;
@@ -62,7 +67,11 @@ async function mockSettings(page: Page, state: Workspace, hold: string) {
     else if (path === "/api/session") {
       await route.fulfill({ json: { csrf: "synthetic-csrf" } });
     } else if (path === "/api/workspace") {
-      await route.fulfill({ json: state });
+      await route.fulfill(
+        failRefresh()
+          ? { status: 500, json: { detail: "Synthetic refresh failed." } }
+          : { json: state },
+      );
     } else if (path === "/api/limits") {
       state.limits = route.request().postDataJSON();
       await route.fulfill({ json: state });
@@ -75,6 +84,77 @@ async function mockSettings(page: Page, state: Workspace, hold: string) {
     } else throw new Error(`Unexpected API request: ${path}`);
   });
   return () => pending;
+}
+
+for (const search of [false, true]) {
+  test(`an older ${search ? "search" : "provider"} save cannot restore invalidated settings`, async ({
+    page,
+  }) => {
+    const state = structuredClone(initial);
+    if (!search) {
+      Object.assign(state.provider.config, {
+        base_url: "https://provider.example/v1",
+        protocol: "responses",
+        model: "synthetic-model",
+      });
+      Object.assign(state.provider, {
+        credentials_required: true,
+        credentials_present: true,
+      });
+    }
+    let failRefresh = false;
+    const pending = await mockSettings(
+      page,
+      state,
+      search ? "/api/web-search" : "/api/provider",
+      () => failRefresh,
+    );
+    await page.goto("/");
+    await page.getByRole("button", { name: "Settings", exact: true }).click();
+    const save = page.getByRole("button", {
+      name: search ? "Save search settings" : "Save connection",
+      exact: true,
+    });
+    await save.click();
+    await expect.poll(() => !!pending()).toBe(true);
+    const oldStatus = structuredClone(
+      search ? state.web_search : state.provider,
+    );
+    if (search) {
+      state.web_search.config.enabled = false;
+      state.web_search.tested_at = null;
+    } else state.provider.config.pricing_verified = false;
+    await page
+      .getByRole("button", { name: "Save limits", exact: true })
+      .click();
+    await expect(
+      page.getByRole("button", { name: "Save limits", exact: true }),
+    ).toBeEnabled();
+    const field = page.getByLabel(
+      search ? "Daily search cap" : "Maximum output tokens per reply",
+    );
+    await field.fill(search ? "30" : "1500");
+    failRefresh = true;
+    await pending()!.fulfill({ json: oldStatus });
+    await expect(page.getByRole("alert")).toHaveText(
+      "Synthetic refresh failed.",
+    );
+    await expect(field).toHaveValue(search ? "30" : "1500");
+    if (search) {
+      await expect(page.locator(".ollama-search-setup .badge")).toHaveText(
+        "Disabled",
+      );
+      await expect(
+        page.getByLabel("Let Maestro decide when to search"),
+      ).not.toBeChecked();
+      await expect(page.getByText(/Search connection tested/)).toHaveCount(0);
+    } else {
+      await expect(
+        page.getByLabel("Use these prices for cost estimates"),
+      ).not.toBeChecked();
+      await expect(save).toBeDisabled();
+    }
+  });
 }
 
 for (const change of [
