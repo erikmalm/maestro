@@ -1,7 +1,7 @@
 import { useEffect } from "react";
 import { LoaderCircle, Search, ShieldCheck } from "lucide-react";
 import * as api from "./api";
-import type { ProviderStatus, WebSearchConfig, WebSearchStatus } from "./api";
+import type { ProviderStatus, WebSearchStatus } from "./api";
 import { NumberFields, useSetupForm } from "./SetupForm";
 
 export default function OllamaSearchSetup({
@@ -27,7 +27,6 @@ export default function OllamaSearchSetup({
     busy,
     error,
     notice,
-    setNotice,
     act,
   } = useSetupForm(
     initialStatus,
@@ -47,11 +46,6 @@ export default function OllamaSearchSetup({
     );
     return () => window.clearTimeout(timer);
   }, [status.paused_until]);
-
-  function editConfig(changes: Partial<WebSearchConfig>) {
-    setConfig({ ...config, ...changes });
-    setNotice("");
-  }
 
   const localReady =
     provider.config.protocol === "ollama" &&
@@ -115,7 +109,7 @@ export default function OllamaSearchSetup({
             }
             onChange={(event) => {
               setApiKey(event.target.value);
-              editConfig({ enabled: false });
+              setConfig({ enabled: false });
             }}
           />
         </label>
@@ -138,7 +132,7 @@ export default function OllamaSearchSetup({
         <div className="reflection-fields">
           <NumberFields
             values={config}
-            onChange={(key, value) => editConfig({ [key]: value })}
+            onChange={(key, value) => setConfig({ [key]: value })}
             fields={[
               ["daily_limit", "Daily search cap", 0, 200],
               ["max_results", "Results per search", 1, 3],
@@ -150,7 +144,7 @@ export default function OllamaSearchSetup({
             type="checkbox"
             checked={config.enabled}
             disabled={!!busy || (!config.enabled && (!verified || !localReady))}
-            onChange={(event) => editConfig({ enabled: event.target.checked })}
+            onChange={(event) => setConfig({ enabled: event.target.checked })}
           />
           Let Maestro decide when to search
         </label>

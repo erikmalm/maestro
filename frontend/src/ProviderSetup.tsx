@@ -69,9 +69,7 @@ export default function ProviderSetup({
   function selectProvider(provider: string) {
     setApiKey("");
     setError("");
-    setNotice("");
     setConfig({
-      ...config,
       base_url:
         provider === "ollama"
           ? "http://127.0.0.1:11434"
@@ -94,21 +92,18 @@ export default function ProviderSetup({
     const prices =
       isOpenAI && pricesAreCurrent() ? openAIPrices(model) : undefined;
     setConfig({
-      ...config,
       model,
       ...(prices ? { protocol: "responses" as const } : {}),
       input_usd_per_million: prices?.input ?? 0,
       output_usd_per_million: prices?.output ?? 0,
       pricing_verified: isOllama || !!prices,
     });
-    setNotice("");
   }
   const field = <K extends keyof ProviderConfig>(
     key: K,
     value: ProviderConfig[K],
   ) => {
     setConfig({
-      ...config,
       [key]: value,
       ...([
         "base_url",
@@ -120,7 +115,6 @@ export default function ProviderSetup({
         ? { pricing_verified: isOllama }
         : {}),
     });
-    setNotice("");
   };
 
   return (

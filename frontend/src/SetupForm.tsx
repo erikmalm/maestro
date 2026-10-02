@@ -34,8 +34,9 @@ export function useSetupForm<T extends { config: object }>(
     if (!submitted.current) setDraft(unsaved(draft, initialStatus.config));
   }
 
-  function setConfig(next: T["config"]) {
+  function setConfig(next: Partial<T["config"]>) {
     const pending = submitted.current !== null;
+    setNotice("");
     setDraft((previous) => {
       const changes = { ...previous, ...unsaved(next, config) };
       return pending ? changes : unsaved(changes, status.config);
