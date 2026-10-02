@@ -1,8 +1,7 @@
-import { useState } from "react";
 import { Check, LoaderCircle, ShieldCheck } from "lucide-react";
 import * as api from "./api";
 import type { ProviderConfig, ProviderStatus } from "./api";
-import { NumberFields, useSetupAction } from "./SetupForm";
+import { NumberFields, useSetupForm } from "./SetupForm";
 
 // Standard short-context text rates, checked against https://developers.openai.com/api/docs/pricing.
 // Expired or unlisted rates require manual confirmation; never infer model prices from an ID.
@@ -30,24 +29,24 @@ export default function ProviderSetup({
   initialStatus: ProviderStatus;
   onChange: (status: ProviderStatus) => void;
 }) {
-  const [status, setStatus] = useState(initialStatus);
-  const [config, setConfig] = useState(initialStatus.config);
-  const [apiKey, setApiKey] = useState("");
-  const [persist, setPersist] = useState(true);
-  const { busy, error, notice, setError, setNotice, act } = useSetupAction(
+  const {
+    status,
+    config,
+    setConfig,
     update,
-    "Could not update the connection.",
-  );
+    apiKey,
+    setApiKey,
+    persist,
+    setPersist,
+    dirty,
+    busy,
+    error,
+    notice,
+    setError,
+    setNotice,
+    act,
+  } = useSetupForm(initialStatus, onChange, "Could not update the connection.");
 
-  function update(next: ProviderStatus) {
-    setStatus(next);
-    setConfig(next.config);
-    onChange(next);
-  }
-
-  const dirty =
-    JSON.stringify(config) !== JSON.stringify(status.config) ||
-    apiKey.length > 0;
   const isOllama = config.protocol === "ollama";
   const isOpenAI =
     !isOllama &&
@@ -149,11 +148,9 @@ export default function ProviderSetup({
         onSubmit={(event) => {
           event.preventDefault();
           if (!canSave) return;
-          const submittedKey = apiKey;
-          setApiKey("");
           void act(
             "save",
-            () => api.saveProvider(config, submittedKey, persist),
+            () => api.saveProvider(config, apiKey, persist),
             "Chat model settings saved. Return to Workspace to send a message.",
           );
         }}
@@ -426,15 +423,11 @@ export default function ProviderSetup({
             className="button secondary"
             disabled={!!busy}
             onClick={() => {
-              const submittedKey = apiKey;
-              setApiKey("");
               void act(
                 "test",
                 async () => {
                   if (dirty)
-                    update(
-                      await api.saveProvider(config, submittedKey, persist),
-                    );
+                    update(await api.saveProvider(config, apiKey, persist));
                   return api.testProvider();
                 },
                 isOllama
@@ -454,7 +447,6 @@ export default function ProviderSetup({
                 !!busy || !sameConnection || !status.credentials_present
               }
               onClick={() => {
-                setApiKey("");
                 void act(
                   "remove",
                   api.deleteProviderKey,

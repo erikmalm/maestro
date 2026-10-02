@@ -18,19 +18,14 @@ from backend.web_search import DEFAULT as SEARCH_DEFAULT, WebSearch
 
 class WorkspaceTests(unittest.TestCase):
     def setUp(self):
-        self.temporary = tempfile.TemporaryDirectory(prefix="maestro-test-")
-        self.directory = Path(self.temporary.name).resolve()
-        self.database_patch = patch.object(backend, "DATABASE", self.directory / "workspace.sqlite3")
-        self.database_patch.start()
+        self.directory = Path(self.enterContext(tempfile.TemporaryDirectory(prefix="maestro-test-"))).resolve()
+        self.assertEqual(self.directory.parent, Path(tempfile.gettempdir()).resolve())
+        self.enterContext(patch.object(backend, "DATABASE", self.directory / "workspace.sqlite3"))
+        self.enterContext(patch.object(backend.credentials, "read", return_value=(None, "missing")))
         self.client = TestClient(backend.app)
+        self.addCleanup(self.client.close)
         self.csrf = self.client.get("/api/session").json()["csrf"]
         self.headers = {"X-Maestro-CSRF": self.csrf, "Origin": "http://127.0.0.1:8765"}
-
-    def tearDown(self):
-        self.client.close()
-        self.database_patch.stop()
-        self.assertEqual(self.directory.parent, Path(tempfile.gettempdir()).resolve())
-        self.temporary.cleanup()
 
     def workspace(self):
         response = self.client.get("/api/workspace")

@@ -152,20 +152,21 @@ class ProviderTests(unittest.TestCase):
         self.assertEqual(self.client.get("/api/provider").json(), before)
         self.assertNotIn(self.key.encode(), backend.DATABASE.read_bytes())
 
-    def test_manual_model_rejects_effective_key_before_changing_configuration_or_credentials(self):
+    def test_manual_model_rejects_current_and_effective_keys_before_changing_state(self):
         with self.mock_http():
             before = self.client.post("/api/provider/test", headers=self.headers).json()
-        for submitted, effective in (("", self.key), ("synthetic-replacement-key", "synthetic-replacement-key")):
-            with self.subTest(submitted=bool(submitted)), patch.object(credentials, "save", wraps=credentials.save) as save:
+        for submitted, exposed in (("", self.key), ("synthetic-replacement-key", "synthetic-replacement-key"),
+                                   ("synthetic-replacement-key", self.key)):
+            with self.subTest(submitted=bool(submitted), exposed=exposed), patch.object(credentials, "save", wraps=credentials.save) as save:
                 response = self.client.put("/api/provider", headers=self.headers, json={
-                    "config": {**self.config, "model": "model-" + effective + "-suffix"},
+                    "config": {**self.config, "model": "model-" + exposed + "-suffix"},
                     "api_key": submitted, "persist": False})
                 self.assertEqual(response.status_code, 409)
-                self.assertNotIn(effective, response.text)
+                self.assertNotIn(exposed, response.text)
                 save.assert_not_called()
                 self.assertEqual(credentials.read(self.base)[0], self.key)
                 self.assertEqual(self.client.get("/api/provider").json(), before)
-                self.assertNotIn(effective.encode(), backend.DATABASE.read_bytes())
+                self.assertNotIn(exposed.encode(), backend.DATABASE.read_bytes())
 
     def test_manual_model_uses_target_endpoint_and_replacement_key_scope(self):
         target = "https://different.example/v1"
@@ -173,6 +174,7 @@ class ProviderTests(unittest.TestCase):
         credentials.session_keys[target] = target_key
         try:
             for submitted, model, expected in (("", "model-" + target_key, 409),
+                                               ("synthetic-new-key", "model-" + self.key, 409),
                                                ("", "safe-target-model", 200),
                                                ("synthetic-new-key", "safe-replacement-model", 200)):
                 with self.subTest(submitted=bool(submitted), model=model):

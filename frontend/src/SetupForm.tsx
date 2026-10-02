@@ -1,12 +1,58 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 
-export function useSetupAction<T>(
-  update: (status: T) => void,
+function unsaved<T extends object>(
+  draft: Partial<T>,
+  ...saved: T[]
+): Partial<T> {
+  const changes = { ...draft };
+  for (const key of Object.keys(draft) as (keyof T)[]) {
+    if (saved.some((config) => Object.is(draft[key], config[key])))
+      delete changes[key];
+  }
+  return changes;
+}
+
+export function useSetupForm<T extends { config: object }>(
+  initialStatus: T,
+  onChange: (status: T) => void,
   failureMessage: string,
 ) {
+  const [source, setSource] = useState(initialStatus);
+  const [status, setStatus] = useState(initialStatus);
+  const [draft, setDraft] = useState<Partial<T["config"]>>({});
+  const [apiKey, setApiKey] = useState("");
+  const [persist, setPersist] = useState(true);
+  const submitted = useRef<T["config"] | null>(null);
   const [busy, setBusy] = useState("");
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
+  const config = { ...(status.config as T["config"]), ...draft };
+
+  if (source !== initialStatus) {
+    setSource(initialStatus);
+    setStatus(initialStatus);
+    if (!submitted.current) setDraft(unsaved(draft, initialStatus.config));
+  }
+
+  function setConfig(next: T["config"]) {
+    const pending = submitted.current !== null;
+    setDraft((previous) => {
+      const changes = { ...previous, ...unsaved(next, config) };
+      return pending ? changes : unsaved(changes, status.config);
+    });
+  }
+
+  function update(next: T, confirmed = true) {
+    const saved = confirmed ? submitted.current : null;
+    setStatus(next);
+    setDraft((previous) =>
+      saved
+        ? unsaved(previous, saved, next.config)
+        : unsaved(previous, next.config),
+    );
+    if (saved) submitted.current = next.config;
+    onChange(next);
+  }
 
   async function act(
     name: string,
@@ -14,6 +60,8 @@ export function useSetupAction<T>(
     message: string,
     recover?: () => Promise<T>,
   ) {
+    submitted.current = name === "save" || name === "test" ? config : null;
+    setApiKey("");
     setBusy(name);
     setError("");
     setNotice("");
@@ -24,17 +72,35 @@ export function useSetupAction<T>(
       setError(reason instanceof Error ? reason.message : failureMessage);
       if (recover) {
         try {
-          update(await recover());
+          update(await recover(), false);
         } catch {
           // Keep the original error if refreshing the local status also fails.
         }
       }
     } finally {
+      submitted.current = null;
       setBusy("");
     }
   }
 
-  return { busy, error, notice, setError, setNotice, act };
+  return {
+    status,
+    config,
+    setStatus,
+    setConfig,
+    update,
+    apiKey,
+    setApiKey,
+    persist,
+    setPersist,
+    dirty: Object.keys(draft).length > 0 || apiKey.length > 0,
+    busy,
+    error,
+    notice,
+    setError,
+    setNotice,
+    act,
+  };
 }
 
 type NumericKey<T> = {

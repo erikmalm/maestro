@@ -8,7 +8,7 @@ import json
 import re
 import sqlite3
 import uuid
-from urllib.parse import urlsplit
+from urllib.parse import unquote, urlsplit
 
 import httpx
 
@@ -201,7 +201,7 @@ class WebSearch:
             for item in data["results"][:max_results]:
                 if not isinstance(item, dict) or not all(isinstance(item.get(k), str) for k in ("title", "url", "content")):
                     continue
-                if len(item["url"]) > 2048 or key in item["url"] or not safe_url(item["url"]):
+                if len(item["url"]) > 2048 or key in item["url"] or key in unquote(item["url"]) or not safe_url(item["url"]):
                     continue
                 results.append({"title": credentials.redact(item["title"], key)[:200], "url": item["url"],
                                 "content": credentials.redact(item["content"], key)[:1200]})

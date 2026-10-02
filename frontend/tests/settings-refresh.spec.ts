@@ -1,4 +1,4 @@
-import { expect, test, type Route } from "@playwright/test";
+import { expect, test, type Page, type Route } from "@playwright/test";
 import type { Workspace } from "../src/api";
 
 const initial: Workspace = {
@@ -53,6 +53,227 @@ const initial: Workspace = {
     secure_credentials: false,
   },
 };
+
+async function mockSettings(page: Page, state: Workspace, hold: string) {
+  let pending: Route | undefined;
+  await page.route("**/api/**", async (route) => {
+    const path = new URL(route.request().url()).pathname;
+    if (path === hold && route.request().method() !== "GET") pending = route;
+    else if (path === "/api/session") {
+      await route.fulfill({ json: { csrf: "synthetic-csrf" } });
+    } else if (path === "/api/workspace") {
+      await route.fulfill({ json: state });
+    } else if (path === "/api/limits") {
+      state.limits = route.request().postDataJSON();
+      await route.fulfill({ json: state });
+    } else if (path === "/api/provider" || path === "/api/web-search") {
+      const status =
+        path === "/api/provider" ? state.provider : state.web_search;
+      if (route.request().method() === "PUT")
+        status.config = route.request().postDataJSON().config;
+      await route.fulfill({ json: status });
+    } else throw new Error(`Unexpected API request: ${path}`);
+  });
+  return () => pending;
+}
+
+for (const change of [
+  "pricing",
+  "search authentication",
+  "search cooldown",
+] as const) {
+  test(`open settings receive chat updates: ${change}`, async ({ page }) => {
+    const state = structuredClone(initial);
+    state.chats = [
+      {
+        id: "thread",
+        title: "Thread",
+        created_at: "2026-10-01",
+        updated_at: "2026-10-01",
+      },
+    ];
+    state.active_chat_id = "thread";
+    if (change === "pricing") {
+      Object.assign(state.provider.config, {
+        base_url: "https://provider.example/v1",
+        protocol: "responses",
+        model: "synthetic-model",
+        input_usd_per_million: 1,
+        output_usd_per_million: 2,
+      });
+      Object.assign(state.provider, {
+        credentials_required: true,
+        credentials_present: true,
+      });
+    }
+    const pending = await mockSettings(page, state, "/api/chat");
+    await page.goto("/?chat=thread");
+    await page.getByLabel("Message Maestro").fill("Synthetic message");
+    await page.getByRole("button", { name: "Send message" }).click();
+    await expect.poll(() => !!pending()).toBe(true);
+    await page.getByRole("button", { name: "Settings", exact: true }).click();
+
+    const pricing = change === "pricing";
+    const draft = page.getByLabel(
+      pricing ? "Maximum output tokens per reply" : "Daily search cap",
+    );
+    const key = page.getByLabel(pricing ? "API key" : "Ollama search API key", {
+      exact: true,
+    });
+    const confirmation = page.getByLabel("Use these prices for cost estimates");
+    await draft.fill(pricing ? "1500" : "30");
+    await key.fill("synthetic-unsaved-key");
+    if (pricing) state.provider.config.pricing_verified = false;
+    else {
+      state.web_search.searches_today = 1;
+      state.web_search.remaining_today = 19;
+      if (change === "search authentication") {
+        state.web_search.config.enabled = false;
+        state.web_search.tested_at = null;
+      } else
+        state.web_search.paused_until = new Date(
+          Date.now() + 60000,
+        ).toISOString();
+    }
+    await pending()!.fulfill({ json: state });
+    await expect(draft).toHaveValue(pricing ? "1500" : "30");
+    await expect(key).toHaveValue("synthetic-unsaved-key");
+
+    if (pricing) {
+      await expect(confirmation).not.toBeChecked();
+      await expect(
+        page.getByRole("button", { name: "Save connection", exact: true }),
+      ).toBeDisabled();
+      // A confirmation matching a newer saved snapshot must stop overriding later invalidations.
+      await confirmation.check();
+      for (const verified of [true, false]) {
+        state.provider.config.pricing_verified = verified;
+        await page
+          .getByRole("button", { name: "Save limits", exact: true })
+          .click();
+        await expect(
+          page.getByRole("button", { name: "Save limits", exact: true }),
+        ).toBeEnabled();
+        await expect(confirmation).toBeChecked({ checked: verified });
+      }
+      await confirmation.check();
+      const saved = page.waitForRequest("**/api/provider");
+      await page
+        .getByRole("button", { name: "Save connection", exact: true })
+        .click();
+      expect((await saved).postDataJSON()).toMatchObject({
+        config: { pricing_verified: true, max_output_tokens: 1500 },
+        api_key: "synthetic-unsaved-key",
+      });
+      await expect(key).toHaveValue("");
+    } else {
+      const search = page.locator(".ollama-search-setup");
+      await expect(search.getByText(/1 \/ 20 searches today/)).toBeVisible();
+      if (change === "search authentication") {
+        await expect(search.locator(".badge")).toHaveText("Disabled");
+        await expect(search.getByText(/Search connection tested/)).toHaveCount(
+          0,
+        );
+        await expect(
+          page.getByLabel("Let Maestro decide when to search"),
+        ).not.toBeChecked();
+      } else {
+        await expect(
+          search.getByText(/Search service cooldown until/),
+        ).toBeVisible();
+        await expect(
+          page.getByRole("button", { name: "Test search connection" }),
+        ).toBeDisabled();
+      }
+    }
+  });
+}
+
+for (const search of [false, true]) {
+  test(`edits during ${search ? "search" : "provider"} save remain unsaved`, async ({
+    page,
+  }) => {
+    const state = structuredClone(initial);
+    const pending = await mockSettings(
+      page,
+      state,
+      search ? "/api/web-search" : "/api/provider",
+    );
+    await page.goto("/");
+    await page.getByRole("button", { name: "Settings", exact: true }).click();
+    const field = page.getByLabel(
+      search ? "Daily search cap" : "Maximum output tokens per reply",
+    );
+    const key = page.getByLabel("Ollama search API key");
+    const save = page.getByRole("button", {
+      name: search ? "Save search settings" : "Save connection",
+      exact: true,
+    });
+    await field.fill(search ? "30" : "1500");
+    if (search) await key.fill("synthetic-submitted-key");
+    await save.click();
+    await expect.poll(() => !!pending()).toBe(true);
+    if (search) await expect(key).toHaveValue("");
+    await field.fill(search ? "20" : "1024");
+    if (search) await key.fill("synthetic-new-draft-key");
+    // An unrelated workspace refresh must preserve the revert while the save is pending.
+    await page
+      .getByRole("button", { name: "Save limits", exact: true })
+      .click();
+    await expect(
+      page.getByRole("button", { name: "Save limits", exact: true }),
+    ).toBeEnabled();
+    const status = search ? state.web_search : state.provider;
+    status.config = pending()!.request().postDataJSON().config;
+    await pending()!.fulfill({ json: status });
+    await expect(save).toBeEnabled();
+    await expect(field).toHaveValue(search ? "20" : "1024");
+    if (search) await expect(key).toHaveValue("synthetic-new-draft-key");
+  });
+}
+
+for (const failed of [false, true]) {
+  test(`search drafts survive ${failed ? "failed save recovery" : "key removal"}`, async ({
+    page,
+  }) => {
+    const state = structuredClone(initial);
+    const pending = await mockSettings(
+      page,
+      state,
+      failed ? "/api/web-search" : "/api/web-search/key",
+    );
+    await page.goto("/");
+    await page.getByRole("button", { name: "Settings", exact: true }).click();
+    await page.getByLabel("Daily search cap").fill("30");
+    await page
+      .getByRole("button", {
+        name: failed ? "Test search connection" : "Remove search key",
+      })
+      .click();
+    await expect.poll(() => !!pending()).toBe(true);
+    if (failed) {
+      await pending()!.fulfill({
+        status: 409,
+        json: { detail: "Synthetic save failure." },
+      });
+      await expect(page.getByRole("alert")).toHaveText(
+        "Synthetic save failure.",
+      );
+    } else {
+      state.web_search.credentials_present = false;
+      state.web_search.config.enabled = false;
+      state.web_search.tested_at = null;
+      await pending()!.fulfill({ json: state.web_search });
+      await expect(page.locator(".ollama-search-setup .badge")).toHaveText(
+        "Disabled",
+      );
+    }
+    await expect(
+      page.getByRole("button", { name: "Save search settings" }),
+    ).toBeEnabled();
+    await expect(page.getByLabel("Daily search cap")).toHaveValue("30");
+  });
+}
 
 for (const [name, order, failed] of [
   ["older response first", [0, 1], -1],

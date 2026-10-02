@@ -171,7 +171,7 @@ class Provider:
             current_key = None if local or state["config"]["protocol"] == "ollama" else credentials.read(state["config"]["base_url"])[0]
             if any(saved_key and saved_key in url for saved_key in (effective_key, current_key) for url in (config["base_url"], unquote(config["base_url"]))):
                 raise ValueError("Enter an API base URL without the API key.")
-            if effective_key and effective_key in config["model"]:
+            if any(saved_key and saved_key in config["model"] for saved_key in (effective_key, current_key)):
                 raise ValueError("Enter a model ID without the API key.")
             # Model-list access depends on the endpoint/key, not the chat model or API format.
             connection_changed = bool(key) or config["base_url"] != state["config"]["base_url"] or ((config["protocol"] == "ollama") != (state["config"]["protocol"] == "ollama"))

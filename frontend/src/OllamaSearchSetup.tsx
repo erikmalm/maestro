@@ -1,8 +1,8 @@
-import { useEffect, useState } from "react";
+import { useEffect } from "react";
 import { LoaderCircle, Search, ShieldCheck } from "lucide-react";
 import * as api from "./api";
 import type { ProviderStatus, WebSearchConfig, WebSearchStatus } from "./api";
-import { NumberFields, useSetupAction } from "./SetupForm";
+import { NumberFields, useSetupForm } from "./SetupForm";
 
 export default function OllamaSearchSetup({
   initialStatus,
@@ -13,20 +13,27 @@ export default function OllamaSearchSetup({
   provider: ProviderStatus;
   onChange: () => void;
 }) {
-  const [status, setStatus] = useState(initialStatus);
-  const [config, setConfig] = useState(initialStatus.config);
-  const [apiKey, setApiKey] = useState("");
-  const [persist, setPersist] = useState(true);
-  const { busy, error, notice, setNotice, act } = useSetupAction(
+  const {
+    status,
+    config,
+    setStatus,
+    setConfig,
     update,
+    apiKey,
+    setApiKey,
+    persist,
+    setPersist,
+    dirty,
+    busy,
+    error,
+    notice,
+    setNotice,
+    act,
+  } = useSetupForm(
+    initialStatus,
+    onChange,
     "Could not update search settings.",
   );
-
-  function update(next: WebSearchStatus) {
-    setStatus(next);
-    setConfig(next.config);
-    onChange();
-  }
 
   useEffect(() => {
     if (!status.paused_until) return;
@@ -42,7 +49,7 @@ export default function OllamaSearchSetup({
   }, [status.paused_until]);
 
   function editConfig(changes: Partial<WebSearchConfig>) {
-    setConfig((previous) => ({ ...previous, ...changes }));
+    setConfig({ ...config, ...changes });
     setNotice("");
   }
 
@@ -51,9 +58,6 @@ export default function OllamaSearchSetup({
     provider.config.ollama_context_tokens >= 8192;
   const verified =
     status.credentials_present && !!status.tested_at && !apiKey.trim();
-  const dirty =
-    JSON.stringify(config) !== JSON.stringify(status.config) ||
-    apiKey.length > 0;
   const inCooldown =
     !!status.paused_until && Date.parse(status.paused_until) > Date.now();
 
@@ -78,11 +82,9 @@ export default function OllamaSearchSetup({
         onSubmit={(event) => {
           event.preventDefault();
           if (config.enabled && (!verified || !localReady)) return;
-          const submittedKey = apiKey;
-          setApiKey("");
           void act(
             "save",
-            () => api.saveWebSearch(config, submittedKey, persist),
+            () => api.saveWebSearch(config, apiKey, persist),
             "Search settings saved.",
           );
         }}
@@ -189,8 +191,6 @@ export default function OllamaSearchSetup({
               config.daily_limit <= status.searches_today
             }
             onClick={() => {
-              const submittedKey = apiKey;
-              setApiKey("");
               void act(
                 "test",
                 async () => {
@@ -198,7 +198,7 @@ export default function OllamaSearchSetup({
                     update(
                       await api.saveWebSearch(
                         { ...config, enabled: false },
-                        submittedKey,
+                        apiKey,
                         persist,
                       ),
                     );
@@ -221,7 +221,6 @@ export default function OllamaSearchSetup({
             type="button"
             disabled={!!busy || !status.credentials_present}
             onClick={() => {
-              setApiKey("");
               void act(
                 "remove",
                 api.deleteWebSearchKey,
