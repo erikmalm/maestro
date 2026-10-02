@@ -113,14 +113,13 @@ class WebSearch:
 
     def status(self, state=None):
         state = self.read_state() if state is None else state
-        key, source = credentials.read(ENDPOINT)
-        return {**self.summary(state), "credentials_present": bool(key), "credential_source": source,
-                "tested_at": state["tested_at"] if key else None, **credentials.storage_options(ENDPOINT)}
+        credential_status = credentials.status(ENDPOINT)
+        return {**self.summary(state), **credential_status,
+                "tested_at": state["tested_at"] if credential_status["credentials_present"] else None}
 
     def configure(self, config, key, persist):
         with self.transaction() as state:
-            present = bool(key) or bool(credentials.read(ENDPOINT)[0])
-            if config["enabled"] and (key or not present or not state["tested_at"]):
+            if config["enabled"] and (key or not credentials.read(ENDPOINT)[0] or not state["tested_at"]):
                 raise ValueError("Save and test the Ollama search key before enabling automatic search.")
             if key:
                 credentials.save(ENDPOINT, key, persist)

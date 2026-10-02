@@ -156,6 +156,7 @@ export type ProviderConfig = {
 export type CredentialStatus = {
   credentials_present: boolean;
   credential_source: string;
+  credential_error?: string;
   persist_supported?: boolean;
   managed_credentials?: boolean;
 };

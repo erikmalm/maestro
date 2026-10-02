@@ -22,6 +22,7 @@ $global:volumeOwned = $true
 $global:imageId = 'built-image'
 $global:operations = @()
 $global:healthMode = 'ready'
+$global:connectionUrl = 'ssh://root@127.0.0.1:65152/run/podman/podman.sock'
 function podman {
     $global:LASTEXITCODE = 0
     $global:operations += ,@($args)
@@ -29,6 +30,8 @@ function podman {
         'container exists' { if (-not $global:container) { $global:LASTEXITCODE = 1 }; return }
         'container inspect' { return ($global:container | ConvertTo-Json -Depth 8) }
         'image inspect' { return (@{ Id = $global:imageId } | ConvertTo-Json) }
+        'machine inspect' { return (@{ State = 'running'; SSHConfig = @{ Port = 65152; RemoteUsername = 'user' } } | ConvertTo-Json) }
+        'system connection' { return (@(@{ Name = 'default'; Default = $true; URI = $global:connectionUrl }, @{ Name = 'named'; Default = $false; URI = 'ssh://user@127.0.0.1:65153/run/podman/podman.sock' }) | ConvertTo-Json) }
         'volume exists' { if (-not $global:volumeExists) { $global:LASTEXITCODE = 1 }; return }
         'volume create' { $global:volumeExists = $true; return 'maestro-test-data' }
         'volume inspect' { return (@{ Labels = @{ 'io.maestro.managed' = $(if ($global:volumeOwned) { 'container.ps1' } else { 'other' }) } } | ConvertTo-Json) }
@@ -70,6 +73,20 @@ if ($global:container.State.Running) { throw 'Owned container did not stop.' }
 & $launcher -Action start -Name maestro-test -ProviderSecret provider-test -SearchSecret search-test | Out-Null
 if (-not $global:container.State.Running -or ($global:operations | Where-Object { $_[0] -eq 'run' })) { throw 'Restart did not reuse the existing container and volume.' }
 Assert-Blocked start 'another image or configuration' @{ Port = 8766 }
+Assert-Blocked start 'not owned' @{ Volume = 'Maestro-Test-data' }
+Assert-Blocked start 'another image or configuration' @{ Tunnel = $true }
+foreach ($connectionUrl in @('ssh://user@127.0.0.1:65153/run/podman/podman.sock', 'ssh://user@other.invalid:65152/run/podman/podman.sock', 'tcp://127.0.0.1:65152')) {
+    $global:connectionUrl = $connectionUrl
+    Assert-Blocked start 'active Podman connection' @{ Tunnel = $true }
+}
+$env:CONTAINER_HOST = 'ssh://root@127.0.0.1:65152/run/podman/podman.sock'
+Assert-Blocked start 'another image or configuration' @{ Tunnel = $true }
+$env:CONTAINER_CONNECTION = 'named'
+Assert-Blocked start 'active Podman connection' @{ Tunnel = $true }
+$env:CONTAINER_HOST = ''; $env:CONTAINER_CONNECTION = ''
+$global:container.Config.Labels.'io.maestro.managed' = 'Container.ps1'
+Assert-Blocked stop 'not owned'
+$global:container.Config.Labels.'io.maestro.managed' = 'container.ps1'
 $global:imageId = 'updated-image'
 Assert-Blocked start 'another image or configuration'
 $global:imageId = 'built-image'
@@ -85,7 +102,7 @@ Write-Output 'Container lifecycle scenarios passed.'
         result = subprocess.run(
             ["powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", harness],
             cwd=Path(__file__).resolve().parent.parent,
-            env={**os.environ, "LOCALAPPDATA": self.directory},
+            env={**os.environ, "LOCALAPPDATA": self.directory, "CONTAINER_HOST": "", "CONTAINER_CONNECTION": ""},
             capture_output=True, text=True, timeout=20,
         )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
@@ -113,14 +130,16 @@ function Get-Process { return $global:fakeProcess }
 function Get-CimInstance { return $global:details }
 function Start-Process { throw 'Reuse must never start an SSH process.' }
 $record = @{ Owner = $owner; Name = $Name; ProcessId = 43210; StartTicks = $stamp.ToUniversalTime().Ticks; Executable = $details.ExecutablePath; CommandLine = $details.CommandLine; ConfigId = $configId }
-foreach ($mode in @('reuse', 'configuration', 'pid-reuse', 'executable', 'command', 'foreign', 'stop', 'stale')) {
+foreach ($mode in @('reuse', 'configuration', 'pid-reuse', 'executable', 'command', 'foreign', 'case', 'owner-case', 'stop', 'stale')) {
     $global:killed = $false; $failure = $null
-    $record.Owner = $owner; $record.ConfigId = $configId; $record.StartTicks = $stamp.ToUniversalTime().Ticks; $record.Executable = $details.ExecutablePath; $record.CommandLine = $details.CommandLine
+    $record.Owner = $owner; $record.Name = $Name; $record.ConfigId = $configId; $record.StartTicks = $stamp.ToUniversalTime().Ticks; $record.Executable = $details.ExecutablePath; $record.CommandLine = $details.CommandLine
     if ($mode -eq 'configuration') { $record.ConfigId = 'other-config' }
     if ($mode -eq 'pid-reuse') { $record.StartTicks++ }
     if ($mode -eq 'executable') { $record.Executable = 'another-process.exe' }
     if ($mode -eq 'command') { $record.CommandLine = 'another SSH command' }
     if ($mode -eq 'foreign') { $record.Owner = 'other-launcher' }
+    if ($mode -eq 'case') { $record.Name = 'Maestro-Test' }
+    if ($mode -eq 'owner-case') { $record.Owner = 'Container.ps1' }
     Set-Content -LiteralPath $recordPath -Value ($record | ConvertTo-Json -Compress)
     if ($mode -eq 'stale') { $global:fakeProcess = $null }
     try { Manage-Tunnel ($mode -in @('reuse', 'configuration')) } catch { $failure = $_.Exception.Message }

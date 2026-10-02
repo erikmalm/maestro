@@ -23,3 +23,5 @@
 **/*.sqlite*
 **/*.db*
 **/*.log
+**/config.local.*
+**/settings.local.*

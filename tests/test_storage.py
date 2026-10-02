@@ -7,7 +7,10 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from backend import credentials
+from fastapi.testclient import TestClient
+
+from backend import app as backend, credentials
+from backend.provider import DEFAULT, Provider
 from backend.storage import backup_database, workspace_owner
 
 
@@ -49,9 +52,52 @@ class StorageTests(unittest.TestCase):
                     credentials.read("https://provider.example/v1")
                 if content:
                     self.assertNotIn(content, str(caught.exception))
+                status = credentials.status("https://provider.example/v1")
+                self.assertFalse(status["credentials_present"])
+                self.assertEqual(status["credential_source"], "unavailable")
+                self.assertIn("missing or invalid", status["credential_error"])
+                self.assertNotIn(str(self.secret), str(status))
         self.secret.unlink()
         with self.assertRaisesRegex(ValueError, "missing or invalid"):
             credentials.read("https://provider.example/v1")
+
+    def test_invalid_mounted_keys_keep_workspace_usable_and_dispatch_closed(self):
+        database = self.directory / "workspace.sqlite3"
+        remote = {**DEFAULT, "base_url": "https://provider.example/v1", "model": "synthetic-remote", "pricing_verified": True}
+        local = {**DEFAULT, "base_url": "http://127.0.0.1:11434", "protocol": "ollama", "model": "synthetic-local"}
+        with patch.object(backend, "DATABASE", database), patch.object(credentials, "vault") as vault:
+            vault.return_value.CredReadW.return_value = False
+            with patch.object(credentials.ctypes, "get_last_error", return_value=1168, create=True), TestClient(backend.app) as client:
+                headers = {"X-Maestro-CSRF": client.get("/api/session").json()["csrf"]}
+                self.assertEqual(client.put("/api/provider", headers=headers, json={"config": remote}).status_code, 200)
+                self.secret.unlink()
+                for path in ("/api/provider", "/api/workspace"):
+                    result = client.get(path)
+                    self.assertEqual(result.status_code, 200, result.text)
+                    status = result.json()["provider"] if path.endswith("workspace") else result.json()
+                    self.assertFalse(status["credentials_present"])
+                    self.assertIn("missing or invalid", status["credential_error"])
+                    self.assertNotIn(str(self.secret), result.text)
+                with patch("backend.provider.network") as network:
+                    for path, body in (("/api/provider/test", {}), ("/api/chat", {"text": "Synthetic bounded request"})):
+                        result = client.post(path, headers=headers, json=body)
+                        self.assertEqual(result.status_code, 409, result.text)
+                    network.assert_not_called()
+                self.assertEqual(Provider(database, backend.TIMEZONE).read_state()["ledger"], [])
+                result = client.put("/api/provider", headers=headers, json={"config": local})
+                self.assertEqual(result.status_code, 200, result.text)
+                with patch.dict(os.environ, {"MAESTRO_SEARCH_KEY_FILE": str(self.secret)}):
+                    result = client.get("/api/workspace")
+                    self.assertEqual(result.status_code, 200, result.text)
+                    self.assertIn("missing or invalid", result.json()["web_search"]["credential_error"])
+                    result = client.put("/api/web-search", headers=headers, json={"config": {"enabled": False}})
+                    self.assertEqual(result.status_code, 200, result.text)
+                    with patch("backend.provider.network", side_effect=lambda config, key, method, path, payload=None:
+                               {"details": {"format": "gguf"}, "capabilities": ["completion"]} if path == "/api/show" else
+                               {"done": True, "message": {"content": "Synthetic local reply"}, "prompt_eval_count": 20, "eval_count": 5}):
+                        result = client.post("/api/chat", headers=headers, json={"text": "Local work with search disabled"})
+                    self.assertEqual(result.status_code, 200, result.text)
+                    self.assertEqual(result.json()["messages"][-1]["text"], "Synthetic local reply")
 
     def test_workspace_has_one_owner_and_releases_after_failure(self):
         with self.assertRaisesRegex(ValueError, "synthetic failure"):

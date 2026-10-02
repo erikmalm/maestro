@@ -60,7 +60,12 @@ export default function ProviderSetup({
   const models = sameConnection ? status.models : [];
   const credentials = sameConnection
     ? status
-    : { ...status, credentials_present: false, managed_credentials: false };
+    : {
+        ...status,
+        credentials_present: false,
+        managed_credentials: false,
+        credential_error: undefined,
+      };
   const pricesCurrent = pricesAreCurrent();
   const preset = isOpenAI ? openAIPrices(config.model) : undefined;
   const canSave =

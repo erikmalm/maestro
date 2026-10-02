@@ -148,6 +148,109 @@ for (const managed of [false, true]) {
   });
 }
 
+test("unavailable mounted keys leave the workspace usable and explain how to repair them", async ({
+  page,
+}) => {
+  const state = structuredClone(initial);
+  Object.assign(state.provider.config, {
+    base_url: "https://provider.example/v1",
+    protocol: "responses",
+    model: "synthetic-model",
+  });
+  state.provider.credentials_required = true;
+  state.web_search.config.enabled = false;
+  for (const status of [state.provider, state.web_search]) {
+    Object.assign(status, {
+      persist_supported: false,
+      managed_credentials: true,
+      credentials_present: false,
+      credential_source: "mounted secret",
+      credential_error: "The mounted secret file could not be read.",
+    });
+  }
+  await mockSettings(page, state, "");
+  await page.goto("/");
+  await expect(page.getByLabel("Message Maestro")).toBeVisible();
+  await page.getByRole("button", { name: "Settings", exact: true }).click();
+  await expect(page.getByRole("alert")).toContainText([
+    "The mounted secret file could not be read.",
+    "The mounted secret file could not be read.",
+  ]);
+  await expect(page.getByRole("alert")).toContainText([
+    "Update or remove its secret file",
+    "Update or remove its secret file",
+  ]);
+  await expect(
+    page.getByLabel("Ollama search API key", { exact: true }),
+  ).toBeDisabled();
+  await expect(
+    page.getByRole("button", { name: "Save search settings", exact: true }),
+  ).toBeEnabled();
+});
+
+test("refreshing installed models never silently replaces an explicit choice", async ({
+  page,
+}) => {
+  const state = structuredClone(initial);
+  state.provider.models = ["old-model", "chosen-model"];
+  state.active_chat_id = "synthetic-chat";
+  state.chats = [
+    {
+      id: "synthetic-chat",
+      title: "Synthetic chat",
+      created_at: "2026-10-01",
+      updated_at: "2026-10-01",
+    },
+  ];
+  let sends = 0;
+  let sentModel = "";
+  await mockSettings(page, state, "");
+  await page.route("**/api/provider/test", (route) =>
+    route.fulfill({ json: state.provider }),
+  );
+  await page.route("**/api/chat", (route) => {
+    sends += 1;
+    sentModel = route.request().postDataJSON().model;
+    return route.fulfill({ json: state });
+  });
+  await page.goto("/");
+  await page.getByLabel("Message Maestro").fill("Keep this model and draft");
+  await page.getByLabel("Model for this role").selectOption("chosen-model");
+  state.provider.models = ["old-model"];
+  await page.getByRole("button", { name: "Refresh installed models" }).click();
+  await expect(
+    page.getByRole("button", { name: "Refresh installed models" }),
+  ).toBeEnabled();
+  await expect(page.getByLabel("Model for this role")).toHaveValue(
+    "chosen-model",
+  );
+  await expect(page.getByRole("status")).toContainText(
+    "choose another model before sending",
+  );
+  await expect(
+    page.getByRole("button", { name: "Send message" }),
+  ).toBeDisabled();
+  await page.getByLabel("Message Maestro").press("Enter");
+  expect(sends).toBe(0);
+  await expect(page.getByLabel("Message Maestro")).toHaveValue(
+    "Keep this model and draft",
+  );
+  await page.getByLabel("Model for this role").selectOption("old-model");
+  state.provider.models = ["old-model", "chosen-model"];
+  await page.getByRole("button", { name: "Refresh installed models" }).click();
+  await expect(
+    page.getByRole("button", { name: "Refresh installed models" }),
+  ).toBeEnabled();
+  await expect(page.getByLabel("Model for this role")).toHaveValue("old-model");
+  await expect(page.getByRole("status")).toHaveCount(0);
+  await expect(
+    page.getByRole("button", { name: "Send message" }),
+  ).toBeEnabled();
+  await page.getByRole("button", { name: "Send message" }).click();
+  await expect.poll(() => sends).toBe(1);
+  expect(sentModel).toBe("old-model");
+});
+
 for (const search of [false, true]) {
   test(`an older ${search ? "search" : "provider"} save cannot restore invalidated settings`, async ({
     page,

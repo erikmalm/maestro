@@ -9,6 +9,7 @@ from pathlib import Path
 import socket
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.error
 import urllib.request
@@ -47,6 +48,27 @@ def podman(*arguments, check=True, input=None):
     if check and result.returncode:
         raise RuntimeError(f"Podman {arguments[0]} failed: {result.stderr[-1000:]}")
     return result
+
+
+def verify_build_context(image, tag):
+    """Ignored local source settings must never become container image layers."""
+    assert podman("image", "exists", tag, check=False).returncode == 1
+    with tempfile.TemporaryDirectory(prefix="maestro-context-") as temporary:
+        context = Path(temporary)
+        (context / ".containerignore").write_text((ROOT / ".containerignore").read_text())
+        (context / "Containerfile").write_text(f"FROM {image}\nCOPY backend/*.py /audit/backend/\nCOPY frontend/src/*.ts /audit/frontend/\n")
+        for folder, extension in (("backend", "py"), ("frontend/src", "ts")):
+            directory = context / folder
+            directory.mkdir(parents=True)
+            for stem in ("visible", "config.local", "settings.local"):
+                (directory / f"{stem}.{extension}").write_text("synthetic-context-marker\n")
+        try:
+            podman("build", "--quiet", "--format", "docker", "--http-proxy=false", "--pull=never", "--tag", tag, str(context))
+            files = podman("run", "--rm", "--pull", "never", "--network", "none", "--entrypoint", "python", tag, "-c",
+                           "from pathlib import Path; import json; print(json.dumps(sorted(p.name for p in Path('/audit').rglob('*') if p.is_file())))")
+            assert json.loads(files.stdout) == ["visible.py", "visible.ts"], "Build context included private source settings"
+        finally:
+            podman("image", "rm", tag, check=False)
 
 
 def verify(image, tunnel=False):
@@ -95,6 +117,7 @@ def verify(image, tunnel=False):
         return {"X-Maestro-CSRF": api("/api/session")["csrf"]}
 
     try:
+        verify_build_context(image, "localhost/" + name + ":context")
         launch()
         info = json.loads(podman("inspect", name).stdout)[0]
         host = info["HostConfig"]
@@ -171,7 +194,29 @@ def verify(image, tunnel=False):
             api(path, {"config": config, "api_key": "synthetic-replacement-key", "persist": False}, method="PUT", headers=headers, expected=409)
             api(path + "/key", method="DELETE", headers=headers, expected=409)
         podman("exec", restored, "python", "-c", "from pathlib import Path; db=Path('/data/workspace.sqlite3').read_bytes(); assert all(Path(p).read_bytes().strip() not in db for p in ('/run/secrets/maestro-provider-key','/run/secrets/maestro-search-key'))")
-        print("Podman integration passed: isolation, model choices, persistence, recreation, backup/restore and mounted secrets.")
+        launch(restored, restored_volume, action="stop", mounted=True)
+        podman("rm", restored)
+        for secret_name, synthetic_key in secrets.items():
+            podman("secret", "rm", secret_name)
+            created_secrets.remove(secret_name)
+            podman("secret", "create", "--label", "io.maestro.managed=verify_container.py", secret_name, "-", input=synthetic_key + "\ncontrol")
+            created_secrets.append(secret_name)
+        launch(restored, restored_volume, mounted=True)
+        headers = session()
+        unavailable = api("/api/workspace")
+        assert unavailable["messages"] == state["messages"] and unavailable["usage"] == state["usage"]
+        for key, path, config in (("provider", "/api/provider", remote_config), ("web_search", "/api/web-search", recovered["web_search"]["config"])):
+            status = unavailable[key]
+            assert not status["credentials_present"] and status["credential_source"] == "unavailable"
+            assert "missing or invalid" in status["credential_error"] and "/run/secrets" not in json.dumps(status)
+            assert status["managed_credentials"] and not status["persist_supported"]
+            api(path, {"config": config, "api_key": "synthetic-replacement-key", "persist": False}, method="PUT", headers=headers, expected=409)
+            api(path + "/key", method="DELETE", headers=headers, expected=409)
+        rejected = api("/api/provider/test", {}, headers=headers, expected=409)
+        assert "missing or invalid" in rejected["detail"] and "/run/secrets" not in rejected["detail"]
+        api("/api/provider", {"config": state["provider"]["config"]}, method="PUT", headers=headers)
+        api("/api/web-search", {"config": {**recovered["web_search"]["config"], "enabled": False}}, method="PUT", headers=headers)
+        print("Podman integration passed: build context, isolation, model choices, persistence, recreation, backup/restore, mounted secrets and invalid-secret recovery.")
     finally:
         podman("rm", "--force", fixture_name, check=False)
         for container, data in ((restored, restored_volume), (name, volume)):

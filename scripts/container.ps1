@@ -30,7 +30,7 @@ function Get-OwnedContainer {
     if ($LASTEXITCODE -eq 1) { return $null }
     if ($LASTEXITCODE -ne 0) { throw 'Could not inspect Podman containers.' }
     $container = @(Invoke-Podman container inspect $Name | ConvertFrom-Json)[0]
-    if ($container.Config.Labels.$ownerLabel -ne $owner -or -not ($container.Mounts | Where-Object { $_.Type -eq 'volume' -and $_.Name -eq $volumeName -and $_.Destination -eq '/data' })) {
+    if ($container.Config.Labels.$ownerLabel -cne $owner -or -not ($container.Mounts | Where-Object { $_.Type -eq 'volume' -and $_.Name -ceq $volumeName -and $_.Destination -eq '/data' })) {
         throw "Container $Name is not owned by this launcher with volume $volumeName."
     }
     return $container
@@ -51,7 +51,7 @@ function Manage-Tunnel([bool]$StartTunnel) {
     $recordPath = Join-Path $directory "$Name.json"
     if (Test-Path -LiteralPath $recordPath) {
         $record = Get-Content -Raw -LiteralPath $recordPath | ConvertFrom-Json
-        if ($record.Owner -ne $owner -or $record.Name -ne $Name) { throw 'The SSH tunnel record is not owned by this launcher.' }
+        if ($record.Owner -cne $owner -or $record.Name -cne $Name) { throw 'The SSH tunnel record is not owned by this launcher.' }
         $process = Get-Process -Id $record.ProcessId -ErrorAction SilentlyContinue
         if ($process) {
             $null = $process.Handle  # Keep this process handle open across verification and stop.
@@ -69,8 +69,6 @@ function Manage-Tunnel([bool]$StartTunnel) {
         Remove-Item -LiteralPath $recordPath
     }
     if (-not $StartTunnel) { return }
-    $machine = @(Invoke-Podman machine inspect | ConvertFrom-Json)[0]
-    if ($machine.State -ne 'running' -or $machine.SSHConfig.RemoteUsername -notmatch '^[a-zA-Z0-9_.-]+$') { throw 'Start the default Podman machine before using -Tunnel.' }
     New-Item -ItemType Directory -Force -Path $directory | Out-Null
     $sshPath = (Get-Command ssh.exe -ErrorAction Stop).Source
     $knownHosts = Join-Path $directory 'known_hosts'
@@ -97,6 +95,20 @@ function Manage-Tunnel([bool]$StartTunnel) {
 if ($Action -eq 'build') {
     Invoke-Podman build --format docker --http-proxy=false --file (Join-Path $repoDirectory 'Containerfile') --tag $Image $repoDirectory
     return
+}
+if ($Action -eq 'start' -and $Tunnel) {
+    $machine = @(Invoke-Podman machine inspect | ConvertFrom-Json)[0]
+    if ($machine.State -ne 'running' -or $machine.SSHConfig.RemoteUsername -notmatch '^[a-zA-Z0-9_.-]+$') { throw 'Start the default Podman machine before using -Tunnel.' }
+    $connectionUrl = $env:CONTAINER_HOST
+    if ($env:CONTAINER_CONNECTION -or -not $connectionUrl) {
+        $connections = Invoke-Podman system connection list --format json | ConvertFrom-Json
+        $connection = @($connections | Where-Object { if ($env:CONTAINER_CONNECTION) { $_.Name -ceq $env:CONTAINER_CONNECTION } else { $_.Default } })[0]
+        $connectionUrl = $connection.URI
+    }
+    try { $endpoint = [uri]$connectionUrl } catch { throw 'Could not read the active Podman connection.' }
+    if ($endpoint.Scheme -ne 'ssh' -or $endpoint.Host -notin @('127.0.0.1', 'localhost', '[::1]') -or $endpoint.Port -ne $machine.SSHConfig.Port) {
+        throw 'Tunnel mode requires the active Podman connection to use the default machine.'
+    }
 }
 $container = Get-OwnedContainer
 if ($Action -eq 'status') {
@@ -144,7 +156,7 @@ if ($container) {
         Invoke-Podman volume create --label "$ownerLabel=$owner" --uid 1000 --gid 1000 $volumeName | Out-Null
     } elseif ($LASTEXITCODE -ne 0) { throw 'Could not inspect Podman volumes.' }
     $volumeInfo = @(Invoke-Podman volume inspect $volumeName | ConvertFrom-Json)[0]
-    if ($volumeInfo.Labels.$ownerLabel -ne $owner) { throw "Volume $volumeName is not owned by this launcher." }
+    if ($volumeInfo.Labels.$ownerLabel -cne $owner) { throw "Volume $volumeName is not owned by this launcher." }
     Invoke-Podman run --detach --name $Name --pull never --label "$ownerLabel=$owner" --label "io.maestro.config=$configId" --env "MAESTRO_LAUNCH_ID=$([guid]::NewGuid().ToString('N'))" @runOptions $Image @command | Out-Null
     $container = Get-OwnedContainer
 }

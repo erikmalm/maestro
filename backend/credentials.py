@@ -18,6 +18,16 @@ def storage_options(base_url):
     return {"persist_supported": os.name == "nt" and not managed, "managed_credentials": managed}
 
 
+def status(base_url):
+    try:
+        key, source = read(base_url)
+        error = {}
+    except ValueError as failure:
+        key, source = None, "unavailable"
+        error = {"credential_error": str(failure)}
+    return {"credentials_present": bool(key), "credential_source": source, **error, **storage_options(base_url)}
+
+
 def reject_managed_change(base_url):
     if secret_file(base_url):
         raise ValueError("This key is managed by the server. Update or remove its mounted secret and recreate Maestro.")

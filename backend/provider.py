@@ -145,15 +145,15 @@ class Provider:
     def status(self, state=None):
         state = self.read_state() if state is None else state
         required = state["config"]["protocol"] != "ollama"
-        key, source = credentials.read(state["config"]["base_url"]) if required else (None, "not_required")
+        credential_status = credentials.status(state["config"]["base_url"]) if required else {
+            "credentials_present": False, "credential_source": "not_required", **credentials.storage_options(state["config"]["base_url"])}
         try:
             ollama_url = validate_ollama_url(os.environ.get("MAESTRO_OLLAMA_URL", "http://127.0.0.1:11434"))
         except ValueError:
             ollama_url = "http://127.0.0.1:11434"
-        return {"config": state["config"], "credentials_present": bool(key), "credential_source": source,
+        return {"config": state["config"], **credential_status,
                 "credentials_required": required, "models": state["models"], "tested_at": state["tested_at"],
-                "ollama_base_url": ollama_url,
-                **credentials.storage_options(state["config"]["base_url"])}
+                "ollama_base_url": ollama_url}
 
     def read_state(self):
         with closing(sqlite3.connect(self.database)) as db:
@@ -177,7 +177,12 @@ class Provider:
             config.update(input_usd_per_million=0, output_usd_per_million=0, pricing_verified=True)
         with self.transaction() as state:
             effective_key = None if local else key or credentials.read(config["base_url"])[0]
-            current_key = None if state["config"]["protocol"] == "ollama" else credentials.read(state["config"]["base_url"])[0]
+            try:
+                current_key = None if state["config"]["protocol"] == "ollama" else credentials.read(state["config"]["base_url"])[0]
+            except ValueError:
+                if not local and config["base_url"] == state["config"]["base_url"]:
+                    raise
+                current_key = None
             if any(saved_key and saved_key in url for saved_key in (effective_key, current_key) for url in (config["base_url"], unquote(config["base_url"]))):
                 raise ValueError("Enter an API base URL without the API key.")
             if any(saved_key and saved_key in config[field] for saved_key in (effective_key, current_key) for field in ("model", "orchestrator_model")):

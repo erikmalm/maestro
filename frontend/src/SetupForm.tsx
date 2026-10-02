@@ -124,8 +124,12 @@ export function KeyStorage({
             : "Save a new key in Windows Credential Manager"}
         </label>
       )}
-      <p className="reflection-note">
+      <p
+        className="reflection-note"
+        role={status.credential_error ? "alert" : undefined}
+      >
         <ShieldCheck size={15} />
+        {status.credential_error && <>{status.credential_error} </>}
         {status.managed_credentials
           ? "This key is managed by the server. Update or remove its secret file or environment setting and restart Maestro to change it."
           : persist

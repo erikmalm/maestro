@@ -480,10 +480,9 @@ export default function App() {
     (thread) => thread.id === workspace.active_chat_id,
   );
   const local = workspace.provider.config.protocol === "ollama";
-  const requestedModel =
-    local && workspace.provider.models.includes(models[role])
-      ? models[role]
-      : "";
+  const requestedModel = local ? models[role] : "";
+  const unavailableModel =
+    !!requestedModel && !workspace.provider.models.includes(requestedModel);
   const defaultModel =
     (local &&
       role === "orchestrator" &&
@@ -493,6 +492,7 @@ export default function App() {
   const ready =
     (workspace.provider.credentials_required === false ||
       workspace.provider.credentials_present) &&
+    !unavailableModel &&
     !!selectedModel &&
     workspace.provider.config.pricing_verified;
 
@@ -740,6 +740,11 @@ export default function App() {
                           <option value="">
                             Default: {defaultModel || "Choose in Settings"}
                           </option>
+                          {unavailableModel && (
+                            <option value={requestedModel} disabled>
+                              {requestedModel} (not installed)
+                            </option>
+                          )}
                           {workspace.provider.models.map((model) => (
                             <option key={model} value={model}>
                               {model}
@@ -763,6 +768,12 @@ export default function App() {
                     </>
                   )}
                 </div>
+                {unavailableModel && (
+                  <p className="composer-note" role="status">
+                    The chosen model is no longer in the installed list. Refresh
+                    the list or choose another model before sending.
+                  </p>
+                )}
                 <textarea
                   aria-label="Message Maestro"
                   placeholder="Write a message…"

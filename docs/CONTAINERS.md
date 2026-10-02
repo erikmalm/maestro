@@ -18,7 +18,9 @@ The UI is at `http://127.0.0.1:8765`. To avoid another local Maestro instance, p
 The launcher checks its ownership label, volume, image, configuration and health response before reusing a container. It restarts a matching stopped container, keeps its volume, and refuses conflicting names or configuration. It never replaces or removes a container. Changing the image or startup options requires an explicit upgrade:
 
 ```powershell
-podman tag localhost/maestro:dev localhost/maestro:previous
+$previousImage = podman inspect --type container --format '{{.Image}}' maestro
+if ($LASTEXITCODE -ne 0) { throw 'Could not inspect the running container image.' }
+podman tag $previousImage localhost/maestro:previous
 if ($LASTEXITCODE -ne 0) { throw 'Could not preserve the current image for rollback.' }
 powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\container.ps1 -Action stop
 if ($LASTEXITCODE -ne 0) { throw 'Stop failed; leave the container untouched.' }
@@ -63,7 +65,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\container.ps1 -Act
 podman exec maestro-local python -c "import urllib.request; print(urllib.request.urlopen('http://127.0.0.1:11435/api/tags', timeout=3).status)"
 ```
 
-This mode binds Maestro to the Podman machine's loopback at port 8790, forwards the Windows loopback UI port through OpenSSH, and forwards machine loopback 11435 to Windows Ollama's loopback 11434. It requires Windows OpenSSH and the running default Podman machine's SSH identity. It uses the host network namespace so it can reach the SSH listener; the application and both forwarded ports bind only `127.0.0.1`. Use a different `-OllamaTunnelPort` for each simultaneous tunneled instance.
+This mode binds Maestro to the Podman machine's loopback at port 8790, forwards the Windows loopback UI port through OpenSSH, and forwards machine loopback 11435 to Windows Ollama's loopback 11434. It requires Windows OpenSSH, the running default Podman machine's SSH identity, and an active Podman connection to that machine. It uses the host network namespace so it can reach the SSH listener; the application and both forwarded ports bind only `127.0.0.1`. Use a different `-OllamaTunnelPort` for each simultaneous tunneled instance.
 
 Keep `-Tunnel` and the same port options on subsequent starts. The launcher safely reuses its recorded SSH process and closes it on `stop`; process ID, start time, executable and full command must still match. Its record, diagnostic log and SSH host keys stay under `%LOCALAPPDATA%\Maestro\container-tunnels`. The first loopback machine host key is accepted and remembered; a changed key is rejected. After Windows restarts, run `start` to restore forwarding. If another process reused a recorded PID, the launcher leaves it untouched and asks you to inspect the private record.
 
@@ -118,6 +120,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\container.ps1 -Act
 
 The temporary import container only sets permissions, then exits. [Podman cp](https://docs.podman.io/en/latest/markdown/podman-cp.1.html) assigns imported files to the container's UID/GID 1000 by default; its short import command ensures `/data` is `0700` and the database is `0600`. The normal launcher then uses the prepared, labeled volume.
 
+Migration preserves the saved provider URL. In Settings, change a native Ollama URL such as `http://127.0.0.1:11434` to the container's host endpoint (`http://host.containers.internal:11434`, or `http://127.0.0.1:11435` with the tunnel above), then reconnect and verify the installed models before chatting.
+
 For an online container backup:
 
 ```powershell
@@ -138,4 +142,4 @@ Choose a new private destination for each backup; `/tmp` is ephemeral and its sn
 .\.venv\Scripts\python.exe tests/verify_container.py localhost/maestro:dev --tunnel
 ```
 
-Omit `--tunnel` where normal Podman port forwarding works. This opt-in check creates unique temporary containers, volumes and synthetic secrets, then removes them. It verifies the served UI, local access checks, resource limits, separate model choices, workspace ownership, restart/recreation persistence, backup/restore and mounted-key protection without paid calls or personal data. It uses a synthetic Ollama service; verify the real host connection separately with the probe above and a short local chat.
+Omit `--tunnel` where normal Podman port forwarding works. This opt-in check creates unique temporary images, containers, volumes and synthetic secrets, then removes them. It verifies build-context exclusions, the served UI, local access checks, resource limits, separate model choices, workspace ownership, restart/recreation persistence, backup/restore and mounted-key protection without paid calls or personal data. It uses a synthetic Ollama service; verify the real host connection separately with the probe above and a short local chat.
