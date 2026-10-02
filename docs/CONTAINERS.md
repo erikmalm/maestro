@@ -56,7 +56,7 @@ podman exec maestro python -c "import urllib.request; print(urllib.request.urlop
 ollama list
 ```
 
-Both commands describe the host's installed models; Maestro discovers them using Ollama's `/api/tags` endpoint. Select the chat and orchestrator models independently in Settings, and change the chat choice as needed without creating another provider or container. Pull/remove models through Ollama, then refresh the model list in Maestro.
+Both commands describe the host's installed models; Maestro discovers them using Ollama's `/api/tags` endpoint. Select the chat default and separate orchestrator preference in Settings. Click the model name in the chat composer to change the chat choice without creating another provider or container. After pulling or removing models through Ollama, use **Connect and load models** in Settings to update the list.
 
 `host.containers.internal` must reach the host's Ollama listener. On Windows, a WSL Podman machine without user-mode networking may not reach an Ollama server bound only to `127.0.0.1`; its published UI port may also be unreachable. Use the optional SSH tunnel to connect both directions without restarting the machine or changing Ollama's listener:
 

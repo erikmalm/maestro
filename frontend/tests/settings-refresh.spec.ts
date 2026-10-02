@@ -33,7 +33,7 @@ const initial: Workspace = {
     credentials_required: false,
     credentials_present: false,
     credential_source: "not_required",
-    models: [],
+    models: ["old-model"],
     tested_at: null,
   },
   web_search: {
@@ -188,7 +188,7 @@ test("unavailable mounted keys leave the workspace usable and explain how to rep
   ).toBeEnabled();
 });
 
-test("refreshing installed models never silently replaces an explicit choice", async ({
+test("settings updates never silently replace an explicit chat model", async ({
   page,
 }) => {
   const state = structuredClone(initial);
@@ -210,20 +210,24 @@ test("refreshing installed models never silently replaces an explicit choice", a
   );
   await page.route("**/api/chat", (route) => {
     sends += 1;
-    sentModel = route.request().postDataJSON().model;
+    sentModel =
+      route.request().postDataJSON().model ?? state.provider.config.model;
     return route.fulfill({ json: state });
   });
   await page.goto("/");
   await page.getByLabel("Message Maestro").fill("Keep this model and draft");
-  await page.getByLabel("Model for this role").selectOption("chosen-model");
+  await page.getByRole("button", { name: "Choose model:" }).click();
+  await page
+    .locator(".model-picker")
+    .getByRole("button", { name: "chosen-model", exact: true })
+    .click();
   state.provider.models = ["old-model"];
-  await page.getByRole("button", { name: "Refresh installed models" }).click();
+  await page.getByRole("button", { name: "Settings", exact: true }).click();
+  await page.getByRole("button", { name: "Connect and load models" }).click();
+  await page.getByRole("button", { name: "Workspace", exact: true }).click();
   await expect(
-    page.getByRole("button", { name: "Refresh installed models" }),
-  ).toBeEnabled();
-  await expect(page.getByLabel("Model for this role")).toHaveValue(
-    "chosen-model",
-  );
+    page.getByRole("button", { name: "Choose model:" }),
+  ).toContainText("chosen-model");
   await expect(page.getByRole("status")).toContainText(
     "choose another model before sending",
   );
@@ -235,13 +239,11 @@ test("refreshing installed models never silently replaces an explicit choice", a
   await expect(page.getByLabel("Message Maestro")).toHaveValue(
     "Keep this model and draft",
   );
-  await page.getByLabel("Model for this role").selectOption("old-model");
-  state.provider.models = ["old-model", "chosen-model"];
-  await page.getByRole("button", { name: "Refresh installed models" }).click();
-  await expect(
-    page.getByRole("button", { name: "Refresh installed models" }),
-  ).toBeEnabled();
-  await expect(page.getByLabel("Model for this role")).toHaveValue("old-model");
+  await page.getByRole("button", { name: "Choose model:" }).click();
+  await page
+    .locator(".model-picker")
+    .getByRole("button", { name: "old-model", exact: false })
+    .click();
   await expect(page.getByRole("status")).toHaveCount(0);
   await expect(
     page.getByRole("button", { name: "Send message" }),
@@ -585,9 +587,9 @@ for (const [name, order, failed] of [
           ),
       );
       if (index === 1 && failed !== 1) currentModel = "new-model";
-      await expect(page.locator(".composer-bottom small")).toHaveText(
-        currentModel,
-      );
+      await expect(
+        page.locator(".model-trigger, .composer-bottom > small"),
+      ).toHaveText(currentModel);
       await expect(page.getByText(/Automatic web search/)).toContainText(
         `0 / ${currentModel === "new-model" ? 30 : 20} today`,
       );
@@ -636,10 +638,14 @@ test("a delayed limits save keeps newer provider settings", async ({
     .getByRole("button", { name: "Save connection", exact: true })
     .click();
   await page.getByRole("button", { name: "Workspace", exact: true }).click();
-  await expect(page.locator(".composer-bottom small")).toHaveText("new-model");
+  await expect(
+    page.locator(".model-trigger, .composer-bottom > small"),
+  ).toHaveText("new-model");
   await saved!.route.fulfill({ json: saved!.snapshot });
   await expect(page.getByText("Limits saved.", { exact: true })).toBeVisible();
-  await expect(page.locator(".composer-bottom small")).toHaveText("new-model");
+  await expect(
+    page.locator(".model-trigger, .composer-bottom > small"),
+  ).toHaveText("new-model");
   await expect.poll(() => reads).toBe(3);
   await page
     .getByRole("button", { name: "View usage and manage budgets" })
@@ -714,8 +720,180 @@ test("settings refreshes preserve an explicitly selected new chat", async ({
   await expect(
     page.getByRole("heading", { name: "Chat b", exact: true }),
   ).toBeVisible();
-  await expect(page.locator(".composer-bottom small")).toHaveText("new-model");
+  await expect(
+    page.locator(".model-trigger, .composer-bottom > small"),
+  ).toHaveText("new-model");
   await expect(page.getByText(/Automatic web search/)).toContainText(
     "0 / 30 today",
   );
+});
+
+test("assistant Markdown renders safely and stays within a mobile message", async ({
+  page,
+}) => {
+  const state = structuredClone(initial);
+  state.provider.models = ["qwen2.5:7b", "devstral-small-2:24b"];
+  state.provider.config.model = "qwen2.5:7b";
+  state.messages = [
+    {
+      id: "markdown-reply",
+      role: "assistant",
+      model: "qwen2.5:7b",
+      text: '## A clearer reply\n\n**Strong text** and [Weather.com](https://weather.com).\n\n- First item\n- Second item\n\n> A useful note\n\n```python\nprint("hello")\n```\n\n| Model | Purpose |\n| --- | --- |\n| Qwen | Chat |\n\n[unsafe](javascript:alert(1))\n\n<script>window.markdownExecuted = true</script>\n\n![remote image](https://example.com/tracker.png)',
+    },
+  ];
+  await mockSettings(page, state, "");
+  await page.goto("/");
+  const reply = page.locator(".message-markdown");
+  await expect(
+    reply.getByRole("heading", { name: "A clearer reply" }),
+  ).toBeVisible();
+  await expect(reply.locator("strong")).toHaveText("Strong text");
+  await expect(
+    reply.getByRole("link", { name: "Weather.com" }),
+  ).toHaveAttribute("href", "https://weather.com");
+  await expect(reply.locator("li")).toHaveCount(2);
+  await expect(reply.locator("pre code")).toContainText('print("hello")');
+  await expect(reply.locator("table")).toBeVisible();
+  await expect(reply.locator("script, img")).toHaveCount(0);
+  await expect(reply.locator('a[href^="javascript:"]')).toHaveCount(0);
+  await page.setViewportSize({ width: 375, height: 812 });
+  await page.getByRole("button", { name: "Choose model:" }).click();
+  await expect(page.locator(".model-picker")).toBeVisible();
+  expect(
+    await page.evaluate(() => document.documentElement.scrollWidth),
+  ).toBeLessThanOrEqual(375);
+});
+
+for (const reducedMotion of [false, true]) {
+  test(`new replies reveal progressively: reduced motion ${reducedMotion}`, async ({
+    page,
+  }) => {
+    await page.emulateMedia({
+      reducedMotion: reducedMotion ? "reduce" : "no-preference",
+    });
+    await page.clock.install();
+    await page.clock.pauseAt(new Date());
+    const state = structuredClone(initial);
+    state.active_chat_id = "fluid-chat";
+    state.chats = [
+      {
+        id: "fluid-chat",
+        title: "Fluid chat",
+        created_at: "2026-10-02",
+        updated_at: "2026-10-02",
+      },
+    ];
+    const text =
+      "## A flowing reply\n\n" +
+      "This answer appears a word at a time. ".repeat(15) +
+      "\n\n**Finished.**";
+    await mockSettings(page, state, "");
+    await page.route("**/api/chat", async (route) => {
+      state.messages = [{ id: "new-reply", role: "assistant", text }];
+      await route.fulfill({ json: state });
+    });
+    await page.goto("/");
+    await page.getByLabel("Message Maestro").fill("Please reply");
+    await page.getByRole("button", { name: "Send message" }).click();
+    const reply = page.locator(".message-markdown");
+    await expect(reply).toHaveAttribute("aria-busy", String(!reducedMotion));
+    if (!reducedMotion) {
+      await page.clock.runFor(200);
+      await expect(reply).toContainText("A flowing reply");
+      await expect(reply.locator("strong")).toHaveCount(0);
+      await page.clock.runFor(8000);
+    }
+    await expect(reply).toHaveAttribute("aria-busy", "false");
+    await expect(reply.locator("strong")).toHaveText("Finished.");
+    await page.getByRole("button", { name: "Settings", exact: true }).click();
+    await page.getByRole("button", { name: "Workspace", exact: true }).click();
+    await expect(reply).toHaveAttribute("aria-busy", "false");
+    await expect(reply.locator("strong")).toHaveText("Finished.");
+    await page.reload();
+    await expect(reply).toHaveAttribute("aria-busy", "false");
+    await expect(reply.locator("strong")).toHaveText("Finished.");
+  });
+}
+
+test("a removed default model blocks sending and the picker works with the keyboard", async ({
+  page,
+}) => {
+  const state = structuredClone(initial);
+  state.provider.models = ["installed-model"];
+  let sends = 0;
+  await mockSettings(page, state, "");
+  await page.route("**/api/chat", (route) => {
+    sends++;
+    return route.fulfill({ json: state });
+  });
+  await page.goto("/");
+  await page.getByLabel("Message Maestro").fill("Keep this draft");
+  await expect(
+    page.getByRole("button", { name: "Send message" }),
+  ).toBeDisabled();
+  await page.getByLabel("Message Maestro").press("Enter");
+  expect(sends).toBe(0);
+  const trigger = page.getByRole("button", { name: "Choose model:" });
+  await trigger.focus();
+  await page.keyboard.press("Enter");
+  await page.keyboard.press("Tab");
+  await expect(
+    page
+      .locator(".model-picker")
+      .getByRole("button", { name: "installed-model" }),
+  ).toBeFocused();
+  await page.keyboard.press("Enter");
+  await expect(trigger).toContainText("installed-model");
+  await expect(page.locator(".model-picker")).not.toBeVisible();
+  await expect(trigger).toBeFocused();
+  await expect(page.getByLabel("Message Maestro")).toHaveValue(
+    "Keep this draft",
+  );
+  await expect(
+    page.getByRole("button", { name: "Send message" }),
+  ).toBeEnabled();
+});
+
+test("reply growth follows the visible tail and respects scrolling away", async ({
+  page,
+}) => {
+  await page.clock.install();
+  await page.clock.pauseAt(new Date());
+  await page.setViewportSize({ width: 375, height: 812 });
+  const state = structuredClone(initial);
+  state.active_chat_id = "scroll-chat";
+  state.chats = [
+    {
+      id: "scroll-chat",
+      title: "Scroll chat",
+      created_at: "2026-10-02",
+      updated_at: "2026-10-02",
+    },
+  ];
+  await mockSettings(page, state, "");
+  await page.route("**/api/chat", (route) => {
+    state.messages = [
+      {
+        id: "growing-reply",
+        role: "assistant",
+        text: "A short paragraph with several words.\n\n".repeat(100),
+      },
+    ];
+    return route.fulfill({ json: state });
+  });
+  await page.goto("/");
+  await page.getByLabel("Message Maestro").fill("Give me a long reply");
+  await page.getByRole("button", { name: "Send message" }).click();
+  const reply = page.locator(".message-markdown");
+  await expect(reply).toHaveAttribute("aria-busy", "true");
+  await page.clock.runFor(2000);
+  expect(
+    (await reply.boundingBox())!.y + (await reply.boundingBox())!.height,
+  ).toBeLessThanOrEqual(814);
+  await page.evaluate(() => window.scrollTo({ top: 0, behavior: "instant" }));
+  await page.clock.runFor(1000);
+  expect(await page.evaluate(() => window.scrollY)).toBe(0);
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  await expect(reply).toHaveAttribute("aria-busy", "false");
 });
