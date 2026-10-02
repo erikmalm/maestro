@@ -2,6 +2,7 @@
 from contextlib import closing, contextmanager
 from datetime import datetime
 import json
+import os
 import sqlite3
 import uuid
 from urllib.parse import unquote, urlsplit
@@ -11,7 +12,7 @@ import httpx
 from backend import credentials
 from backend.web_search import WebSearch, TOOL, SEARCH_INSTRUCTIONS, fit_sources
 
-DEFAULT = {"base_url": "https://api.openai.com/v1", "protocol": "responses", "model": "",
+DEFAULT = {"base_url": "https://api.openai.com/v1", "protocol": "responses", "model": "", "orchestrator_model": "",
            "input_usd_per_million": 0.0, "output_usd_per_million": 0.0,
            "pricing_verified": False, "max_output_tokens": 1024,
            "ollama_context_tokens": 4096, "ollama_threads": 0, "ollama_keep_alive_minutes": 5}
@@ -25,7 +26,7 @@ class ProviderFailure(ValueError):
         self.may_be_billed = may_be_billed
 
 
-def validate_url(url):
+def validate_url(url, http_hosts=("127.0.0.1", "localhost", "::1")):
     try:
         parts = urlsplit(url)
         parts.port  # Validate malformed and out-of-range ports before dispatch.
@@ -33,16 +34,18 @@ def validate_url(url):
         raise ValueError("Enter a valid API base URL and port.") from None
     if parts.username or parts.password or parts.query or parts.fragment or not parts.hostname:
         raise ValueError("Use an API base URL without credentials, query parameters or fragments.")
-    if parts.scheme != "https" and not (parts.scheme == "http" and parts.hostname in ("127.0.0.1", "localhost", "::1")):
+    if parts.scheme != "https" and not (parts.scheme == "http" and parts.hostname in http_hosts):
         raise ValueError("Use HTTPS for remote providers or HTTP for a loopback model server.")
     return url.rstrip("/")
 
 
 def validate_ollama_url(url):
-    url = validate_url(url)
+    trusted = os.environ.get("MAESTRO_OLLAMA_URL", "").rstrip("/")
+    hosts = ("127.0.0.1", "localhost", "::1") + (("host.containers.internal", "host.docker.internal") if url.rstrip("/") == trusted else ())
+    url = validate_url(url, hosts)
     parts = urlsplit(url)
-    if parts.hostname not in ("127.0.0.1", "localhost", "::1") or parts.path:
-        raise ValueError("Local Ollama requires a loopback server root URL, for example http://127.0.0.1:11434.")
+    if parts.hostname not in hosts or parts.path:
+        raise ValueError("Local Ollama requires a loopback server root URL or the exact container host URL set by MAESTRO_OLLAMA_URL.")
     return url
 
 
@@ -142,9 +145,15 @@ class Provider:
     def status(self, state=None):
         state = self.read_state() if state is None else state
         required = state["config"]["protocol"] != "ollama"
-        key, source = credentials.read(state["config"]["base_url"]) if required else (None, "not_required")
-        return {"config": state["config"], "credentials_present": bool(key), "credential_source": source,
-                "credentials_required": required, "models": state["models"], "tested_at": state["tested_at"]}
+        credential_status = credentials.status(state["config"]["base_url"]) if required else {
+            "credentials_present": False, "credential_source": "not_required", **credentials.storage_options(state["config"]["base_url"])}
+        try:
+            ollama_url = validate_ollama_url(os.environ.get("MAESTRO_OLLAMA_URL", "http://127.0.0.1:11434"))
+        except ValueError:
+            ollama_url = "http://127.0.0.1:11434"
+        return {"config": state["config"], **credential_status,
+                "credentials_required": required, "models": state["models"], "tested_at": state["tested_at"],
+                "ollama_base_url": ollama_url}
 
     def read_state(self):
         with closing(sqlite3.connect(self.database)) as db:
@@ -168,11 +177,18 @@ class Provider:
             config.update(input_usd_per_million=0, output_usd_per_million=0, pricing_verified=True)
         with self.transaction() as state:
             effective_key = None if local else key or credentials.read(config["base_url"])[0]
-            current_key = None if state["config"]["protocol"] == "ollama" else credentials.read(state["config"]["base_url"])[0]
+            try:
+                current_key = None if state["config"]["protocol"] == "ollama" else credentials.read(state["config"]["base_url"])[0]
+            except ValueError:
+                if not local and config["base_url"] == state["config"]["base_url"]:
+                    raise
+                current_key = None
             if any(saved_key and saved_key in url for saved_key in (effective_key, current_key) for url in (config["base_url"], unquote(config["base_url"]))):
                 raise ValueError("Enter an API base URL without the API key.")
-            if any(saved_key and saved_key in config["model"] for saved_key in (effective_key, current_key)):
+            if any(saved_key and saved_key in config[field] for saved_key in (effective_key, current_key) for field in ("model", "orchestrator_model")):
                 raise ValueError("Enter a model ID without the API key.")
+            if not local and config["orchestrator_model"] not in ("", config["model"]):
+                raise ValueError("Remote planning must use the chat model with its verified prices. Choose Local Ollama to assign different models.")
             # Model-list access depends on the endpoint/key, not the chat model or API format.
             connection_changed = bool(key) or config["base_url"] != state["config"]["base_url"] or ((config["protocol"] == "ollama") != (state["config"]["protocol"] == "ollama"))
             if key:
@@ -230,8 +246,8 @@ class Provider:
                 raise ValueError("No unresolved charge with that ID.")
             entry.update({"status": "reconciled", "cost": cost})
 
-    def chat(self, text, chat_id):
-        result = self.generate(text, chat_id)
+    def chat(self, text, chat_id, model="", role="chat"):
+        result = self.generate(text, chat_id, model=model, role=role)
         if result["title_ready"]:
             try:
                 self.generate("", chat_id, title_for=result)
@@ -240,16 +256,21 @@ class Provider:
                 pass
         return result["reply"]
 
-    def generate(self, text, chat_id, title_for=None):
+    def generate(self, text, chat_id, title_for=None, model="", role="chat"):
         """Reply and title generation use one provider adapter, reservation gate and ledger."""
         title = title_for is not None
         # Reserve before dispatch under the same SQLite lock used for tasks and limits.
         with self.transaction(with_db=True) as (state, db):
-            config = title_for["config"] if title else state["config"].copy()
+            connection_config = title_for["connection_config"] if title else state["config"].copy()
+            config = title_for["config"] if title else connection_config.copy()
             local = config["protocol"] == "ollama"
             key = None if local else credentials.read(config["base_url"])[0]
-            if title and (state["config"] != config or key != title_for["key"]):
+            if title and (state["config"] != connection_config or key != title_for["key"]):
                 raise ValueError("Connection settings changed; the first-message title was skipped.")
+            if not title:
+                config["model"] = model or (config["orchestrator_model"] if role == "orchestrator" else "") or config["model"]
+                if not local and (model or config["model"] != connection_config["model"]):
+                    raise ValueError("Per-message model choices require Local Ollama. Remote calls use the configured model and verified prices.")
             search = None
             if not title and local:
                 service = WebSearch(self.database, self.timezone)
@@ -259,6 +280,8 @@ class Provider:
             auto_search = bool(search and search["credentials_present"]
                                and search["tested_at"] and search["remaining_today"] and not search["paused_until"])
             instructions = TITLE_INSTRUCTIONS if title else INSTRUCTIONS + (SEARCH_INSTRUCTIONS if auto_search else "")
+            if not title and role == "orchestrator":
+                instructions += " Help plan and break down tasks. Task execution and delegation are unavailable; provide a plan without claiming to execute it."
             if auto_search and config["ollama_context_tokens"] < 8192:
                 raise ValueError("Automatic web search needs at least 8192 context tokens. Update Local worker settings or disable search.")
             if not config["model"]:
@@ -295,7 +318,7 @@ class Provider:
                 raise ValueError("This request would exceed your spending limit. Adjust limits in Settings.")
             request_id = uuid.uuid4().hex
             state["ledger"].append({"id": request_id, "at": self.stamp(), "model": config["model"], "protocol": config["protocol"],
-                                    "thread_id": chat_id, "kind": "title" if title else "chat",
+                                    "thread_id": chat_id, "kind": "title" if title else role,
                                     "parent_id": title_for["request_id"] if title else None, "cost": reserve, "status": "reserved"})
         payload = {"model": config["model"], "store": False}
         search_result = None
@@ -374,8 +397,8 @@ class Provider:
                                 chat.update(title=generated, title_source="generated")
                     elif chat:
                         first_exchange = not chat["messages"]
-                        chat["messages"].extend([{"id": uuid.uuid4().hex, "role": "user", "text": text, "demo": False},
-                            {"id": uuid.uuid4().hex, "role": "assistant", "text": reply, "demo": False, "model": config["model"], "cost": cost, "input_tokens": input_tokens, "output_tokens": output_tokens}])
+                        chat["messages"].extend([{"id": uuid.uuid4().hex, "role": "user", "kind": role, "text": text, "demo": False},
+                            {"id": uuid.uuid4().hex, "role": "assistant", "kind": role, "text": reply, "demo": False, "model": config["model"], "cost": cost, "input_tokens": input_tokens, "output_tokens": output_tokens}])
                         chat["updated_at"] = self.stamp()
                         if search_result:
                             chat["messages"][-1]["web_search"] = search_result
@@ -387,7 +410,7 @@ class Provider:
                     db.execute("UPDATE workspace SET value=? WHERE id=1", (json.dumps(workspace),))
             if not reply:
                 raise ValueError("Provider returned no text. Usage was recorded; try a larger output limit or another chat model.")
-            return {"reply": reply, "text": text, "config": config, "key": key, "request_id": request_id,
+            return {"reply": reply, "text": text, "config": config, "connection_config": connection_config, "key": key, "request_id": request_id,
                     "cost": cost, "input_tokens": input_tokens, "output_tokens": output_tokens, "title_ready": title_ready}
         except Exception as error:
             with self.transaction() as state:

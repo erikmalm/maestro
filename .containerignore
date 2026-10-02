@@ -1,0 +1,27 @@
+# Only build inputs enter the context; private workspace files never do.
+**
+!Containerfile
+!backend
+!backend/*.py
+!backend/requirements.txt
+!frontend
+!frontend/package.json
+!frontend/package-lock.json
+!frontend/index.html
+!frontend/tsconfig.json
+!frontend/vite.config.ts
+!frontend/src
+!frontend/src/*.ts
+!frontend/src/*.tsx
+!frontend/src/*.css
+!frontend/public
+!frontend/public/*.svg
+# Keep local secrets excluded even when placed beside source code.
+**/.env*
+**/*.key
+**/*.pem
+**/*.sqlite*
+**/*.db*
+**/*.log
+**/config.local.*
+**/settings.local.*

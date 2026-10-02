@@ -1,7 +1,7 @@
-import { Check, LoaderCircle, ShieldCheck } from "lucide-react";
+import { Check, LoaderCircle } from "lucide-react";
 import * as api from "./api";
 import type { ProviderConfig, ProviderStatus } from "./api";
-import { NumberFields, useSetupForm } from "./SetupForm";
+import { KeyStorage, NumberFields, useSetupForm } from "./SetupForm";
 
 // Standard short-context text rates, checked against https://developers.openai.com/api/docs/pricing.
 // Expired or unlisted rates require manual confirmation; never infer model prices from an ID.
@@ -58,6 +58,14 @@ export default function ProviderSetup({
     ? status.credentials_required !== false
     : !isOllama;
   const models = sameConnection ? status.models : [];
+  const credentials = sameConnection
+    ? status
+    : {
+        ...status,
+        credentials_present: false,
+        managed_credentials: false,
+        credential_error: undefined,
+      };
   const pricesCurrent = pricesAreCurrent();
   const preset = isOpenAI ? openAIPrices(config.model) : undefined;
   const canSave =
@@ -72,7 +80,7 @@ export default function ProviderSetup({
     setConfig({
       base_url:
         provider === "ollama"
-          ? "http://127.0.0.1:11434"
+          ? status.ollama_base_url || "http://127.0.0.1:11434"
           : provider === "openai"
             ? "https://api.openai.com/v1"
             : "",
@@ -83,6 +91,7 @@ export default function ProviderSetup({
             ? "responses"
             : "chat_completions",
       model: "",
+      orchestrator_model: "",
       input_usd_per_million: 0,
       output_usd_per_million: 0,
       pricing_verified: provider === "ollama",
@@ -93,6 +102,7 @@ export default function ProviderSetup({
       isOpenAI && pricesAreCurrent() ? openAIPrices(model) : undefined;
     setConfig({
       model,
+      ...(!isOllama ? { orchestrator_model: "" } : {}),
       ...(prices ? { protocol: "responses" as const } : {}),
       input_usd_per_million: prices?.input ?? 0,
       output_usd_per_million: prices?.output ?? 0,
@@ -187,7 +197,7 @@ export default function ProviderSetup({
         </label>
         <p className="reflection-note">
           {isOllama
-            ? "Use the local Ollama server address without /v1. Chat stays on this computer; remote Ollama addresses are blocked."
+            ? "Use the installed Ollama server address without /v1. Only this computer or the configured container host can be used."
             : "OpenAI or a compatible HTTPS endpoint. A local server can use HTTP on a loopback address. Chat and the API key are sent to this endpoint."}
         </p>
         <div className="reflection-fields">
@@ -249,6 +259,26 @@ export default function ProviderSetup({
             </select>
           </label>
         )}
+        {isOllama && (
+          <label>
+            Orchestrator default model
+            <select
+              value={config.orchestrator_model ?? ""}
+              onChange={(event) =>
+                field("orchestrator_model", event.target.value)
+              }
+            >
+              <option value="">Use the chat default</option>
+              {[...new Set([config.orchestrator_model, ...models])]
+                .filter(Boolean)
+                .map((model) => (
+                  <option key={model} value={model}>
+                    {model}
+                  </option>
+                ))}
+            </select>
+          </label>
+        )}
         {isOllama &&
           sameConnection &&
           status.tested_at &&
@@ -267,6 +297,7 @@ export default function ProviderSetup({
                 autoComplete="new-password"
                 spellCheck={false}
                 maxLength={4096}
+                disabled={credentials.managed_credentials}
                 value={apiKey}
                 onChange={(event) => {
                   setApiKey(event.target.value);
@@ -279,23 +310,11 @@ export default function ProviderSetup({
                 }
               />
             </label>
-            <label className="reflection-check">
-              <input
-                type="checkbox"
-                checked={persist}
-                onChange={(event) => setPersist(event.target.checked)}
-              />
-              Save a new key in Windows Credential Manager
-            </label>
-            <p className="reflection-note">
-              <ShieldCheck size={15} />
-              {persist
-                ? "Keys are kept outside the repository and never returned by the API."
-                : "A new key stays in server memory and is lost when Maestro stops."}
-              {sameConnection &&
-                status.credentials_present &&
-                ` Current source: ${status.credential_source.replaceAll("_", " ")}.`}
-            </p>
+            <KeyStorage
+              status={credentials}
+              persist={persist}
+              onChange={setPersist}
+            />
             <div className="form-section-label">COST ESTIMATES · USD</div>
             <div className="reflection-fields">
               <NumberFields
@@ -438,7 +457,10 @@ export default function ProviderSetup({
               type="button"
               className="button subtle"
               disabled={
-                !!busy || !sameConnection || !status.credentials_present
+                !!busy ||
+                !sameConnection ||
+                !status.credentials_present ||
+                !!status.managed_credentials
               }
               onClick={() => {
                 void act(

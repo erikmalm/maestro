@@ -49,8 +49,8 @@ class ChatTests(unittest.TestCase):
         self.assertEqual(result.status_code, 200, result.text)
         return result.json()["active_chat_id"]
 
-    def send(self, chat_id, text="Plan a quiet weekend"):
-        return self.client.post("/api/chat", headers=self.headers, json={"chat_id": chat_id, "text": text})
+    def send(self, chat_id, text="Plan a quiet weekend", **choices):
+        return self.client.post("/api/chat", headers=self.headers, json={"chat_id": chat_id, "text": text, **choices})
 
     def is_title(self, payload):
         return payload.get("instructions", (payload.get("messages") or [{}])[0].get("content")) == TITLE_INSTRUCTIONS
@@ -109,6 +109,121 @@ class ChatTests(unittest.TestCase):
             fresh.get("/api/session")
             restored = fresh.get("/api/workspace", params={"chat_id": second}).json()
         self.assertEqual(restored["messages"], self.workspace(second)["messages"])
+
+    def test_local_role_preferences_and_overrides_use_actual_models_and_one_history(self):
+        self.configure({**self.config, "orchestrator_model": "synthetic-planner"})
+        chat_id = self.create_chat()
+        choices = [("orchestrator", "", "synthetic-planner"), ("chat", "", "synthetic-chat"),
+                   ("chat", "synthetic-other", "synthetic-other"), ("orchestrator", "synthetic-chat", "synthetic-chat")]
+        with self.mock_http():
+            for index, (role, model, _) in enumerate(choices):
+                result = self.send(chat_id, f"Synthetic turn {index}", model=model, role=role)
+                self.assertEqual(result.status_code, 200, result.text)
+        payloads = [payload for path, payload in self.requests if path == "/api/chat" and not self.is_title(payload)]
+        self.assertEqual([payload["model"] for payload in payloads], [model for _, _, model in choices])
+        self.assertIn("Task execution and delegation are unavailable", payloads[0]["messages"][0]["content"])
+        self.assertNotIn("Task execution and delegation are unavailable", payloads[1]["messages"][0]["content"])
+        self.assertEqual(len(payloads[-1]["messages"]), 8)
+        title = next(payload for _, payload in self.requests if self.is_title(payload))
+        self.assertEqual(title["model"], "synthetic-planner")
+        shows = [payload["model"] for path, payload in self.requests if path == "/api/show"]
+        self.assertEqual(shows, [model for _, _, model in choices])
+        state = self.workspace(chat_id)
+        self.assertEqual([message["model"] for message in state["messages"] if message["role"] == "assistant"], shows)
+        self.assertEqual([message["kind"] for message in state["messages"]], [role for role, _, _ in choices for _ in range(2)])
+        self.assertEqual((state["usage"]["input_tokens"], state["usage"]["output_tokens"], state["usage"]["calls"]), (420, 85, 5))
+        self.assertEqual(state["usage"]["today_usd"], 0)
+        service = Provider(backend.DATABASE, backend.TIMEZONE)
+        self.assertEqual(service.status()["config"]["orchestrator_model"], "synthetic-planner")
+        self.assertEqual([(entry["kind"], entry["model"]) for entry in service.read_state()["ledger"]],
+                         [("orchestrator", "synthetic-planner"), ("title", "synthetic-planner"),
+                          ("chat", "synthetic-chat"), ("chat", "synthetic-other"), ("orchestrator", "synthetic-chat")])
+        self.configure(self.config)
+        with self.mock_http():
+            self.assertEqual(self.send(chat_id, role="orchestrator").status_code, 200)
+        self.assertEqual(self.workspace(chat_id)["messages"][-1]["model"], "synthetic-chat")
+
+    def test_local_choices_require_installed_completion_models_before_generation(self):
+        chat_id = self.create_chat()
+        cases = [("synthetic-missing", 404, {}), ("synthetic-model:cloud", 200, {"details": {"format": "gguf"}, "capabilities": ["completion"]}),
+                 ("synthetic-cloud", 200, {"details": {"format": "gguf"}, "capabilities": ["completion"], "remote_host": "synthetic.invalid"}),
+                 ("synthetic-embedding", 200, {"details": {"format": "gguf"}, "capabilities": ["embedding"]})]
+        for model, status, metadata in cases:
+            calls = []
+            def handler(request):
+                calls.append(request)
+                return httpx.Response(status, json=metadata)
+            with self.subTest(model=model), self.mock_http(handler):
+                response = self.send(chat_id, model=model, role="orchestrator")
+            self.assertEqual(response.status_code, 409, response.text)
+            self.assertEqual([(request.url.path, json.loads(request.content)["model"]) for request in calls], [("/api/show", model)])
+        state = self.workspace(chat_id)
+        self.assertEqual(state["messages"], [])
+        self.assertEqual(state["usage"]["reserved_usd"], 0)
+        self.assertEqual(state["usage"]["uncertain"], [])
+
+    def test_remote_model_choices_preserve_verified_price_accounting(self):
+        remote = {**DEFAULT, "base_url": "https://synthetic.example/v1", "model": "synthetic-paid",
+                  "input_usd_per_million": 1, "output_usd_per_million": 2, "pricing_verified": True}
+        self.configure(remote)
+        chat_id = self.create_chat()
+        with self.mock_http():
+            for model in ("synthetic-other", "synthetic-paid", "synthetic-key"):
+                response = self.send(chat_id, model=model, role="orchestrator")
+                self.assertEqual(response.status_code, 409, response.text)
+                self.assertNotIn(model, response.text)
+        self.assertEqual(self.requests, [])
+        self.assertEqual(Provider(backend.DATABASE, backend.TIMEZONE).read_state()["ledger"], [])
+        rejected = self.client.put("/api/provider", headers=self.headers, json={"config": {**remote, "orchestrator_model": "synthetic-other"}})
+        self.assertEqual(rejected.status_code, 409, rejected.text)
+        self.assertEqual(self.workspace()["provider"]["config"], remote)
+        with self.mock_http():
+            response = self.send(chat_id, role="orchestrator")
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()["messages"][-1]["model"], "synthetic-paid")
+        self.assertAlmostEqual(response.json()["usage"]["today_usd"], 0.00017)
+
+    def test_model_and_role_fields_reject_invalid_or_secret_values_without_echo(self):
+        chat_id = self.create_chat()
+        secret = "synthetic-key"
+        for config in ({**self.config, "orchestrator_model": secret}, {**self.config, "model": secret}):
+            # Both saved roles are checked against the previous remote endpoint's credential.
+            self.configure({**DEFAULT, "model": "synthetic-paid", "pricing_verified": True})
+            response = self.client.put("/api/provider", headers=self.headers, json={"config": config})
+            self.assertEqual(response.status_code, 409, response.text)
+            self.assertNotIn(secret, response.text)
+        self.assertNotIn(secret.encode(), backend.DATABASE.read_bytes())
+        for choices in ({"model": "secret?query"}, {"model": "x" * 201}, {"role": "synthetic-private-role"}):
+            response = self.send(chat_id, **choices)
+            self.assertEqual(response.status_code, 422, response.text)
+            self.assertNotIn(next(iter(choices.values())), response.text)
+        response = self.client.put("/api/provider", headers=self.headers,
+                                   json={"config": {**self.config, "orchestrator_model": "secret?query"}})
+        self.assertEqual(response.status_code, 422, response.text)
+        self.assertNotIn("secret?query", response.text)
+
+    def test_different_roles_and_models_share_the_single_inflight_gate(self):
+        chat_id = self.create_chat()
+        entered, release = threading.Event(), threading.Event()
+        responses = []
+        def handler(request):
+            if request.url.path == "/api/chat" and not self.is_title(json.loads(request.content)):
+                entered.set()
+                self.assertTrue(release.wait(5))
+            return self.handler(request)
+        with self.mock_http(handler):
+            worker = threading.Thread(target=lambda: responses.append(self.send(chat_id, model="synthetic-other")))
+            worker.start()
+            try:
+                self.assertTrue(entered.wait(5))
+                rejected = self.send(chat_id, model="synthetic-planner", role="orchestrator")
+                self.assertEqual(rejected.status_code, 409, rejected.text)
+            finally:
+                release.set()
+                worker.join(5)
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(responses[0].status_code, 200, responses[0].text)
+        self.assertFalse(any(payload.get("model") == "synthetic-planner" for _, payload in self.requests))
 
     def test_legacy_live_history_migrates_exactly_once_without_title_call(self):
         self.workspace()

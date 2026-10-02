@@ -423,6 +423,17 @@ textarea {
   font-size: 15px;
   outline: none;
 }
+.composer-models {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: end;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+.composer-models label {
+  flex: 1;
+  min-width: 130px;
+}
 .composer-bottom {
   display: flex;
   align-items: center;
@@ -601,6 +612,7 @@ textarea {
   align-items: end;
   gap: 10px;
 }
+.composer-models label,
 .limits-form label,
 .entry-form label,
 .reflection-box label {
@@ -609,6 +621,7 @@ textarea {
   font-size: 13px;
   line-height: 1.5;
 }
+.composer-models select,
 .limits-form input,
 .entry-form input,
 .entry-form textarea,

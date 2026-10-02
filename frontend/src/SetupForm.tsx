@@ -1,4 +1,6 @@
 import { useRef, useState } from "react";
+import { ShieldCheck } from "lucide-react";
+import type { CredentialStatus } from "./api";
 
 function unsaved<T extends object>(draft: Partial<T>, saved: T): Partial<T> {
   const changes = { ...draft };
@@ -8,16 +10,16 @@ function unsaved<T extends object>(draft: Partial<T>, saved: T): Partial<T> {
   return changes;
 }
 
-export function useSetupForm<T extends { config: object }>(
-  initialStatus: T,
-  onChange: (status: T) => void,
-  failureMessage: string,
-) {
+export function useSetupForm<
+  T extends { config: object; persist_supported?: boolean },
+>(initialStatus: T, onChange: (status: T) => void, failureMessage: string) {
   const source = useRef(initialStatus);
   const [status, setStatus] = useState(initialStatus);
   const [draft, setDraft] = useState<Partial<T["config"]>>({});
   const [apiKey, setApiKey] = useState("");
-  const [persist, setPersist] = useState(true);
+  const [persist, setPersist] = useState(
+    initialStatus.persist_supported !== false,
+  );
   const submitted = useRef<T["config"] | null>(null);
   const [busy, setBusy] = useState("");
   const [error, setError] = useState("");
@@ -95,6 +97,49 @@ export function useSetupForm<T extends { config: object }>(
     setNotice,
     act,
   };
+}
+
+export function KeyStorage({
+  status,
+  persist,
+  onChange,
+  search = false,
+}: {
+  status: CredentialStatus;
+  persist: boolean;
+  onChange: (persist: boolean) => void;
+  search?: boolean;
+}) {
+  return (
+    <>
+      {!status.managed_credentials && status.persist_supported !== false && (
+        <label className="reflection-check">
+          <input
+            type="checkbox"
+            checked={persist}
+            onChange={(event) => onChange(event.target.checked)}
+          />
+          {search
+            ? "Save search key in Windows Credential Manager"
+            : "Save a new key in Windows Credential Manager"}
+        </label>
+      )}
+      <p
+        className="reflection-note"
+        role={status.credential_error ? "alert" : undefined}
+      >
+        <ShieldCheck size={15} />
+        {status.credential_error && <>{status.credential_error} </>}
+        {status.managed_credentials
+          ? "This key is managed by the server. Update or remove its secret file or environment setting and restart Maestro to change it."
+          : persist
+            ? "Keys are kept outside the repository and never returned by the API."
+            : "New keys stay in server memory until Maestro stops. Durable keys can be supplied as mounted secrets."}
+        {status.credentials_present &&
+          ` Current source: ${status.credential_source.replaceAll("_", " ")}.`}
+      </p>
+    </>
+  );
 }
 
 type NumericKey<T> = {
