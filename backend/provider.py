@@ -15,12 +15,12 @@ import httpx
 
 from backend import credentials
 from backend.web_search import WebSearch, TOOL, SEARCH_INSTRUCTIONS, fit_sources
-from backend.work_config import BACKGROUND_CONTEXT_TOKENS, config_value, select_model
+from backend.work_config import config_value, select_model
 
 DEFAULT = {"base_url": "https://api.openai.com/v1", "protocol": "responses", "model": "", "orchestrator_model": "",
            "input_usd_per_million": 0.0, "output_usd_per_million": 0.0,
-           "pricing_verified": False, "max_output_tokens": 1024,
-           "ollama_context_tokens": 4096, "ollama_threads": 0, "ollama_keep_alive_minutes": 5}
+           "pricing_verified": False, "max_output_tokens": 4096,
+           "ollama_context_tokens": 32768, "ollama_threads": 0, "ollama_keep_alive_minutes": 5}
 INSTRUCTIONS = "You are Maestro, a helpful personal assistant. Be clear and concise. Do not claim to have performed actions or accessed tools that are not available."
 TITLE_INSTRUCTIONS = "Create a short, specific title for this conversation, using at most six words. Return only the title, without quotes or explanation."
 
@@ -317,17 +317,17 @@ class Provider:
     def generate_context(self, instructions, messages, model="", max_output_tokens=None, kind="reflection", job=None, schema=None, deadline=None):
         """Bounded, tool-free local inference using the same reservation and usage ledger."""
         if (kind not in ("reflection", "memory", "coding") or not isinstance(instructions, str) or not instructions.strip()
-                or len(instructions.encode("utf-8")) > 4000
-                or (max_output_tokens is not None and (type(max_output_tokens) is not int or not 1 <= max_output_tokens <= 1024))
+                or len(instructions.encode("utf-8")) > 16000
+                or (max_output_tokens is not None and (type(max_output_tokens) is not int or not 1 <= max_output_tokens <= 16384))
                 or not isinstance(model, str) or len(model) > 200 or not re.fullmatch(r"[A-Za-z0-9_./:-]*", model)
-                or not isinstance(messages, list) or not 1 <= len(messages) <= 32
+                or not isinstance(messages, list) or not 1 <= len(messages) <= 128
                 or any(not isinstance(message, dict) or set(message) != {"role", "content"}
                        or message["role"] not in ("user", "assistant")
                        or not isinstance(message["content"], str) or not message["content"].strip()
                        for message in messages)):
             raise ValueError("Use bounded instructions and user/assistant messages for local work.")
         history = [message.copy() for message in messages]
-        if len(json.dumps(history).encode("utf-8")) > 32000:
+        if len(json.dumps(history).encode("utf-8")) > 256000:
             raise ValueError("Local work context is too large. Process a smaller batch.")
         if job is not None and (kind not in ("reflection", "memory") or model or not isinstance(job, dict)
                                 or kind != job.get("kind", "reflection")):
@@ -364,7 +364,7 @@ class Provider:
             if context:
                 config["ollama_keep_alive_minutes"] = 0
             if job is not None:
-                config["ollama_context_tokens"] = min(config["ollama_context_tokens"], BACKGROUND_CONTEXT_TOKENS)
+                config["ollama_context_tokens"] = min(config["ollama_context_tokens"], job["work_config"]["background_context_tokens"])
             key = None if local else credentials.read(config["base_url"])[0]
             if title and (state["config"] != connection_config or key != title_for["key"]):
                 raise ValueError("Connection settings changed; the first-message title was skipped.")
@@ -433,7 +433,7 @@ class Provider:
             input_bound = len((instructions + json.dumps(history) + (json.dumps(TOOL) if auto_search else "")
                                + (json.dumps(output_schema) if job is not None else "")).encode("utf-8")) + 2048
             if context:
-                work_cap = 1024 if role == "coding" else work_config["max_output_tokens"]
+                work_cap = work_config["max_output_tokens"]
                 output_bound = min(context["max_output_tokens"] or work_cap, work_cap, config["max_output_tokens"])
             else:
                 output_bound = min(64, config["max_output_tokens"] - title_for["output_tokens"]) if title else config["max_output_tokens"]

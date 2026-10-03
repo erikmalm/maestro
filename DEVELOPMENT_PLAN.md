@@ -57,6 +57,8 @@ Acceptance:
 
 Background reflection implements REF-01–03 in the [memory design](docs/MEMORY_AND_REFLECTION.md#recorded-next-tasks), using chat evidence and a worker inside the sole API process. REF-04 now implements optional automatic formation/review; quality evaluation continues. REF-05 adds a persistent six-hour default schedule. The separate task-worker design below still requires ownership-aware recovery before cross-process dispatch.
 
+REF-06 adds optional answer ratings/comments and selects complete exchanges for the same scheduled worker, using a short intent/accuracy/clarity rubric. Feedback uses existing messages and SQLite, with no inference on submission. Background context, exchange sampling and recall are configurable; compare repeated mistakes before/after reviewed lessons to evaluate quality. Per-answer model checks and session summaries remain deferred.
+
 Add one separate task worker using local Ollama and the shared generation service. A manually queued text-only task has selected context, completion criteria, a persisted attempt and a saved result. It can run with the browser closed. Start with one generation slot and show persisted status in Tasks.
 
 Implement claims and leases before allowing another process to dispatch. Associate reservations and results with their owning attempts so API restart cannot interrupt a live worker and stale workers cannot overwrite newer results. Pause/cancel and cumulative call/token/time allowances block subsequent calls; retries keep consumed usage and unresolved reservations.

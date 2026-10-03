@@ -35,7 +35,7 @@ class AutomaticTests(unittest.TestCase):
         if path == "/api/ps":
             return {"models": []}
         context = json.loads(payload["messages"][-1]["content"])
-        if payload["format"] == REVIEW_SCHEMA:
+        if payload["format"]["required"] == REVIEW_SCHEMA["required"]:
             body = {"approved": list(range(len(context["drafts"]))) if self.approved is None else self.approved,
                     "summary": "Independently reviewed the draft against its evidence."}
             phase = 1
@@ -89,6 +89,29 @@ class AutomaticTests(unittest.TestCase):
         self.assertEqual(self.memory.list(), [])
         self.assertEqual(self.store.status()["journal"][0]["outcome"], "abstained")
 
+    def test_duplicate_target_operations_stop_before_independent_review(self):
+        self.queue()
+        self.worker.step()
+        target = self.memory.list()[0]
+        journal = self.store.status()["journal"]
+        for operations in (("remove", "remove"), ("update", "remove")):
+            with self.subTest(operations=operations):
+                self.queue()
+                def drafts(context):
+                    source = context["sources"][-1]
+                    return [{"operation": operation, "memory_id": target["id"], "kind": target["kind"], "scope": target["scope"],
+                             "content": target["content"] if operation == "update" else "",
+                             "source_message_id": source["source_message_id"] if operation == "update" else "",
+                             "evidence": source["text"] if operation == "update" else ""} for operation in operations]
+                self.drafts = drafts
+                calls = len(self.calls)
+                self.worker.step()
+                self.assertEqual(len(self.calls) - calls, 2)
+                self.assertEqual(self.memory.list(), [target])
+                self.assertEqual(self.store.status()["journal"], journal)
+        self.assertEqual(self.store.status()["today_jobs"], 3)
+        self.assertEqual(self.store.status()["today_tokens"], 600)
+
     def test_bad_fact_requests_injection_and_secrets_are_rejected_before_review(self):
         cases = [
             ("I prefer concise Python code.", "User prefers Ruby code."),
@@ -105,6 +128,16 @@ class AutomaticTests(unittest.TestCase):
                 self.worker.step()
                 self.assertEqual(len(self.calls) - before, 2)
                 self.assertEqual(self.memory.list(), [])
+
+    def test_factual_evidence_mismatch_is_observable_and_never_promoted(self):
+        self.queue()
+        self.drafts = [{"operation": "add", "memory_id": "", "kind": "preference", "scope": "workspace",
+                        "content": "User prefers concise Python code.", "source_message_id": "source-0", "evidence": "A fabricated quotation."}]
+        self.worker.step()
+        self.assertIn("evidence did not match its user source", self.store.status()["last_stop_reason"])
+        self.assertEqual(len(self.calls), 2)
+        self.assertEqual(self.memory.list(), [])
+        self.assertEqual(self.store.status()["journal"], [])
 
     def test_periodic_identity_runs_initially_then_every_six_hours_and_keeps_one_profile(self):
         self.enable_periodic()
@@ -204,7 +237,7 @@ class AutomaticTests(unittest.TestCase):
         self.worker.step()
         self.assertEqual(observed[0]["sources"], [])
         self.assertEqual(observed[0]["memories"], [])
-        self.assertEqual(observed[0]["unverified_assistant_responses"], [])
+        self.assertEqual(observed[0]["exchanges"], [])
         self.memory.forget(self.memory.list()[0]["id"])
         self.queue()
         self.workspace["chats"][0]["messages"].append({"id": "reply-2", "role": "assistant", "text": "Another unverified assistant answer."})
@@ -212,7 +245,7 @@ class AutomaticTests(unittest.TestCase):
         self.now += 360 * 60
         self.worker.step()  # Newly queued chat work has priority.
         self.worker.step()
-        self.assertEqual(observed[-1]["unverified_assistant_responses"][0]["text"], "Another unverified assistant answer.")
+        self.assertEqual(observed[-1]["exchanges"][0]["assistant"], "Another unverified assistant answer.")
 
     def test_periodic_profile_and_lesson_updates_do_not_create_cyclic_dependencies(self):
         self.memory.remember("The synthetic project uses SQLite.")

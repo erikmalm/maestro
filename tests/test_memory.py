@@ -8,7 +8,7 @@ import unittest
 from unittest.mock import patch
 from zoneinfo import ZoneInfo
 
-from backend.memory import MemoryStore, MAX_MEMORIES
+from backend.memory import MemoryStore, MAX_CONTENT, MAX_MEMORIES
 
 
 class MemoryTests(unittest.TestCase):
@@ -53,7 +53,7 @@ class MemoryTests(unittest.TestCase):
     def test_invalid_content_scope_and_source_do_not_get_saved(self):
         self.save_workspace()
         invalid = [
-            ("", {}), (" " * 12, {}), ("x" * 1001, {}), ("\x00private", {}), (None, {}),
+            ("", {}), (" " * 12, {}), ("x" * (MAX_CONTENT + 1), {}), ("\x00private", {}), (None, {}),
             ("valid", {"scope": "inferred"}), ("valid", {"scope": "conversation"}),
             ("valid", {"source_message_id": "source"}), ("valid", {"chat_id": "missing"}),
             ("valid", {"chat_id": "first", "source_message_id": "missing"}),
@@ -91,10 +91,10 @@ class MemoryTests(unittest.TestCase):
         self.assertEqual(len(self.store.recall("ÅTERANVÄNDNING", None)), 1)
         for index in range(8):
             self.store.remember(f"Synthetic preference {index} " + "x" * 180)
-        results = self.store.recall("Synthetic preference", None)
+        results = self.store.recall("Synthetic preference", None, limit=5, max_characters=1000)
         self.assertLessEqual(len(results), 5)
         self.assertLessEqual(sum(len(item["content"]) for item in results), 1000)
-        self.assertEqual(results, self.store.recall("Synthetic preference", None))
+        self.assertEqual(results, self.store.recall("Synthetic preference", None, limit=5, max_characters=1000))
         self.assertGreater(len(results), 0)
 
     def test_edits_replace_old_recall_and_pin_an_independent_user_correction(self):
@@ -146,8 +146,9 @@ class MemoryTests(unittest.TestCase):
 
     def test_inventory_has_hard_limit_and_forgetting_frees_capacity(self):
         first = self.store.remember("Synthetic preference 0")
-        for index in range(1, MAX_MEMORIES):
-            self.store.remember(f"Synthetic preference {index}")
+        with self.store.transaction() as db:
+            for index in range(1, MAX_MEMORIES):
+                self.store.insert(db, {**first, "id": str(index), "content": f"Synthetic preference {index}"})
         with self.assertRaisesRegex(ValueError, "full"):
             self.store.remember("Another synthetic preference")
         self.assertEqual(len(self.store.list()), MAX_MEMORIES)

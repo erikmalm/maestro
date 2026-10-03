@@ -4,8 +4,8 @@ test("private memory persists, can be corrected and forgotten, and follows chat 
   page,
 }) => {
   await page.goto("/");
-  const initial = await (await page.request.get("/api/workspace")).json();
   const { csrf } = await (await page.request.get("/api/session")).json();
+  const initial = await (await page.request.get("/api/workspace")).json();
   const headers = { "X-Maestro-CSRF": csrf };
   const ownedMemories = new Set<string>();
   let ownedChat: string | null = null;
@@ -68,12 +68,17 @@ test("private memory persists, can be corrected and forgotten, and follows chat 
     await page.getByRole("button", { name: "Settings", exact: true }).click();
     await memory.getByLabel("What should Maestro remember?").fill(scoped);
     await memory.getByLabel("Use this memory in").selectOption("conversation");
-    await memory.getByRole("button", { name: "Save memory" }).click();
-    await expect(memory.getByText(scoped, { exact: true })).toBeVisible();
-    const records = await (await page.request.get("/api/memory")).json();
-    const conversation = records.find(
-      (item: { content: string }) => item.content === scoped,
+    const savedConversation = page.waitForResponse(
+      (response) =>
+        response.url().endsWith("/api/memory") &&
+        response.request().method() === "POST" &&
+        response.ok(),
     );
+    await memory.getByRole("button", { name: "Save memory" }).click();
+    const conversation = await (await savedConversation).json();
+    await expect(
+      memory.locator(".memory-entry").getByText(scoped, { exact: true }),
+    ).toBeVisible();
     expect(conversation).toMatchObject({
       scope: "conversation",
       chat_id: ownedChat,

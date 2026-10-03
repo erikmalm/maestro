@@ -25,7 +25,7 @@ class ReflectionTests(unittest.TestCase):
         self.enterContext(patch.object(ReflectionStore, "clock", lambda store: self.now))
         self.workspace = {"chats": [{"id": "chat", "messages": []}],
                           "limits": {"max_tokens": 100000, "run_usd": 1, "daily_usd": 5, "monthly_usd": 50},
-                          "work_config": WorkConfig(enabled=True, debounce_seconds=0, idle_seconds=0, max_tokens_per_day=100000).model_dump()}
+                          "work_config": WorkConfig(enabled=True, debounce_seconds=0, idle_seconds=0, max_output_tokens=512, max_tokens_per_day=100000).model_dump()}
         with closing(sqlite3.connect(self.database)) as db, db:
             db.execute("CREATE TABLE workspace (id INTEGER PRIMARY KEY, value TEXT NOT NULL)")
             db.execute("INSERT INTO workspace VALUES (1,?)", (json.dumps(self.workspace),))
@@ -34,7 +34,7 @@ class ReflectionTests(unittest.TestCase):
         self.memory.initialize()
         self.store.initialize()
         self.provider = Provider(self.database, self.timezone)
-        self.provider.configure({**DEFAULT, "protocol": "ollama", "base_url": "http://127.0.0.1:11434", "model": "qwen2.5:7b"}, "", False)
+        self.provider.configure({**DEFAULT, "protocol": "ollama", "base_url": "http://127.0.0.1:11434", "model": "qwen2.5:7b", "max_output_tokens": 512, "ollama_context_tokens": 4096}, "", False)
         with self.provider.transaction() as state:
             state["models"] = ["qwen2.5:7b", "gpt-oss:20b"]
         self.calls = []

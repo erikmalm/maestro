@@ -20,7 +20,9 @@ class WorkConfigTests(unittest.TestCase):
         workspace = {"unrelated": "preserve"}
         config = config_value(workspace)
         self.assertEqual(workspace, {"unrelated": "preserve"})
-        self.assertEqual(config["memory_recall_count"], 5)
+        self.assertEqual(config["memory_recall_count"], 20)
+        self.assertEqual(config["background_context_tokens"], 32768)
+        self.assertEqual(config["max_output_tokens"], 4096)
         self.assertFalse(config["enabled"])
         for kind, expected in (("reflection", "gpt-oss:20b"), ("memory", "qwen2.5:7b"), ("coding", "devstral-small-2:24b")):
             with self.subTest(kind=kind):
@@ -31,8 +33,9 @@ class WorkConfigTests(unittest.TestCase):
 
     def test_types_shape_and_limits_are_strict(self):
         for field, value in (("enabled", "true"), ("debounce_seconds", True), ("idle_seconds", "30"),
-                             ("max_output_tokens", 1025), ("max_jobs_per_day", -1), ("max_tokens_per_day", 10000001),
-                             ("timeout_seconds", 0), ("memory_recall_count", 6), ("memory_recall_characters", 1001),
+                             ("max_output_tokens", 16385), ("max_jobs_per_day", -1), ("max_tokens_per_day", 10000001),
+                             ("background_context_tokens", 131073), ("background_context_tokens", True),
+                             ("timeout_seconds", 0), ("memory_recall_count", 101), ("memory_recall_characters", 200001),
                              ("reflection_model", "remote key with spaces"), ("memory_model", "x" * 201), ("unexpected", 0)):
             with self.subTest(field=field, value=value), self.assertRaises(ValidationError):
                 WorkConfig.model_validate({field: value})
@@ -80,12 +83,12 @@ class WorkGenerationTests(unittest.TestCase):
     def test_installed_recommendations_use_one_ledger_and_no_tools_or_workspace_writes(self):
         before = self.read_workspace()
         with patch("backend.provider.network", side_effect=self.network):
-            for kind, model, cap in (("reflection", "gpt-oss:20b", 512), ("memory", "qwen2.5:7b", 512), ("coding", "devstral-small-2:24b", 1024)):
+            for kind, model in (("reflection", "gpt-oss:20b"), ("memory", "qwen2.5:7b"), ("coding", "devstral-small-2:24b")):
                 with self.subTest(kind=kind):
                     result = self.generate(kind=kind)
                     payload = self.calls[-1][2]
                     self.assertEqual(result["config"]["model"], model)
-                    self.assertEqual(payload["options"]["num_predict"], cap)
+                    self.assertEqual(payload["options"]["num_predict"], 4096)
                     self.assertEqual(payload["keep_alive"], 0)
                     self.assertNotIn("tools", payload)
         self.assertEqual(self.read_workspace(), before)
@@ -106,11 +109,40 @@ class WorkGenerationTests(unittest.TestCase):
             self.assertEqual(self.calls[-1][2]["options"]["num_predict"], 32)
             coding = self.generate(kind="coding", max_output_tokens=800)
             self.assertEqual(coding["config"]["model"], "coder:7b")
-            self.assertEqual(self.calls[-1][2]["options"]["num_predict"], 800)
+            self.assertEqual(self.calls[-1][2]["options"]["num_predict"], 64)
             self.generate(model="per-call:7b")
             self.assertEqual(self.calls[-1][2]["model"], "per-call:7b")
         self.assertEqual(self.provider.read_state()["config"]["model"], "chat:7b")
         self.assertEqual(self.read_workspace()["work_config"]["reflection_model"], "selected:7b")
+
+    def test_large_explicit_work_context_and_output_use_saved_caps_for_all_roles(self):
+        self.save_policy(max_output_tokens=16384)
+        self.provider.configure({**self.provider.read_state()["config"], "ollama_context_tokens": 65536,
+                                 "max_output_tokens": 16384}, "", False)
+        instructions = "Use source-backed facts. " * 300
+        messages = [{"role": "user" if index % 2 == 0 else "assistant", "content": "Synthetic source. " * 55}
+                    for index in range(40)]
+        before = self.read_workspace()
+        with patch("backend.provider.network", side_effect=self.network):
+            for kind in ("reflection", "memory", "coding"):
+                self.provider.generate_context(instructions, messages, kind=kind, max_output_tokens=8192)
+                payload = self.calls[-1][2]
+                self.assertEqual(payload["options"]["num_predict"], 8192)
+                self.assertEqual(payload["options"]["num_ctx"], 65536)
+                self.assertEqual(payload["messages"][1:], messages)
+                self.assertEqual(payload["keep_alive"], 0)
+                self.assertNotIn("tools", payload)
+        self.assertEqual(self.read_workspace(), before)
+        self.assertEqual(self.provider.usage()["calls"], 3)
+
+    def test_explicit_work_byte_message_and_output_limits_fail_before_dispatch(self):
+        base = {"instructions": "Use source-backed facts.", "messages": [{"role": "user", "content": "Synthetic source."}]}
+        for changes in ({"instructions": "é" * 8001}, {"messages": base["messages"] * 129},
+                        {"messages": [{"role": "user", "content": "x" * 256000}]}, {"max_output_tokens": 16385}):
+            with self.subTest(changes=list(changes)), patch("backend.provider.network") as network, self.assertRaises(ValueError):
+                self.provider.generate_context(**{**base, **changes})
+            network.assert_not_called()
+        self.assertEqual(self.provider.read_state()["ledger"], [])
 
     def test_provider_output_cap_also_limits_each_task(self):
         self.save_policy(max_output_tokens=128)

@@ -53,6 +53,17 @@ class WorkspaceTests(unittest.TestCase):
         self.assertTrue(backend.DATABASE.is_file())
         self.assertNotIn(backend.ROOT, backend.DATABASE.parents)
 
+    def test_large_unicode_chat_reaches_generation_without_request_body_rejection(self):
+        chat_id = self.client.post("/api/chats", headers=self.headers).json()["active_chat_id"]
+        text = "聊天" * 16000
+        with patch.object(Provider, "chat") as generate:
+            response = self.client.post("/api/chat", headers=self.headers, json={"chat_id": chat_id, "text": text})
+            self.assertEqual(response.status_code, 200, response.text)
+            generate.assert_called_once_with(text, chat_id, "", "chat")
+            too_long = self.client.post("/api/chat", headers=self.headers, json={"chat_id": chat_id, "text": text + "a"})
+            self.assertEqual(too_long.status_code, 422, too_long.text)
+            self.assertEqual(generate.call_count, 1)
+
     def test_non_ascii_session_and_csrf_tokens_are_rejected(self):
         result = self.client.get("/api/workspace", headers=[(b"cookie", b"maestro_session=caf\xe9")])
         self.assertEqual(result.status_code, 401)

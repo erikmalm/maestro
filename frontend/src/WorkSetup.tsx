@@ -243,18 +243,36 @@ export default function WorkSetup({
               values={config}
               onChange={(key, value) => setConfig({ [key]: value })}
               fields={[
-                ["max_output_tokens", "Reflection output tokens", 1, 1024],
+                [
+                  "background_context_tokens",
+                  "Background context tokens",
+                  8192,
+                  131072,
+                ],
+                [
+                  "reflection_exchange_count",
+                  "Exchanges per periodic review",
+                  1,
+                  32,
+                ],
+                [
+                  "reflection_context_characters",
+                  "Conversation review characters",
+                  1000,
+                  200000,
+                ],
+                ["max_output_tokens", "Reflection output tokens", 1, 16384],
                 ["max_jobs_per_day", "Daily reflection jobs", 0, 1000],
                 ["max_tokens_per_day", "Daily reflection tokens", 0, 10000000],
                 ["debounce_seconds", "Debounce (seconds)", 0, 3600],
                 ["idle_seconds", "Chat idle time (seconds)", 0, 3600],
                 ["timeout_seconds", "Job timeout (seconds)", 1, 1800],
-                ["memory_recall_count", "Memories per reply", 0, 5],
+                ["memory_recall_count", "Memories per reply", 0, 100],
                 [
                   "memory_recall_characters",
                   "Memory context characters",
                   0,
-                  1000,
+                  200000,
                 ],
               ]}
             />
@@ -262,7 +280,10 @@ export default function WorkSetup({
           <p className="reflection-note">
             Set either memory limit to 0 to turn off recall. Saved memory is
             used only in local chat with hosted web search off. Reflection
-            limits apply to each call and the daily allowance.
+            limits apply to each call and the daily allowance. Larger contexts
+            let reviews read more of each exchange and use more memory.
+            Conversation review characters are shared across the sampled
+            exchanges; Ollama's context setting can lower the effective limit.
           </p>
         </details>
         <div className="reflection-actions">

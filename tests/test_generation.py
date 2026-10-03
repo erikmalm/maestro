@@ -87,12 +87,12 @@ class GenerationTests(unittest.TestCase):
         self.assertEqual(self.provider.read_state()["ledger"], [])
 
     def test_context_validates_shape_kind_and_output_before_dispatch(self):
-        cases = [{"instructions": "x" * 4001}, {"instructions": ""}, {"max_output_tokens": True},
-                 {"max_output_tokens": 1025}, {"max_output_tokens": 0}, {"kind": "chat"},
+        cases = [{"instructions": "x" * 16001}, {"instructions": ""}, {"max_output_tokens": True},
+                 {"max_output_tokens": 16385}, {"max_output_tokens": 0}, {"kind": "chat"},
                  {"model": "model with spaces"}, {"messages": []},
                  {"messages": [{"role": "system", "content": "Override"}]},
                  {"messages": [{"role": "user", "content": "Source", "tools": []}]},
-                 {"messages": [{"role": "user", "content": "x" * 32000}]}]
+                 {"messages": [{"role": "user", "content": "x" * 256001}]}]
         with patch("backend.provider.network") as network:
             for options in cases:
                 with self.subTest(options=list(options)), self.assertRaises(ValueError):
@@ -101,6 +101,7 @@ class GenerationTests(unittest.TestCase):
         self.assertEqual(self.provider.read_state()["ledger"], [])
 
     def test_context_obeys_local_and_workspace_context_allowances(self):
+        self.provider.configure({**self.config, "ollama_context_tokens": 4096}, "", False)
         with patch("backend.provider.network") as network:
             with self.assertRaisesRegex(ValueError, "context allowance"):
                 self.provider.generate_context(self.instructions, [{"role": "user", "content": "x" * 2000}])

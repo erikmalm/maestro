@@ -612,7 +612,7 @@ test("local Ollama chat needs no key or USD budget and records native tokens", a
     .getByLabel("Available models", { exact: true })
     .selectOption("synthetic-ollama:latest");
   await page.getByText("Local worker settings", { exact: true }).click();
-  await expect(page.getByLabel("Context size (tokens)")).toHaveValue("4096");
+  await expect(page.getByLabel("Context size (tokens)")).toHaveValue("32768");
   await expect(page.getByLabel("CPU threads (0 = automatic)")).toHaveValue("0");
   await expect(page.getByLabel("Keep model loaded (minutes)")).toHaveValue("5");
   await page.getByLabel("Context size (tokens)").fill("8192");

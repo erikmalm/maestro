@@ -6,13 +6,20 @@ export type Task = {
   done: boolean;
   created_at: string;
 };
+export type MessageFeedback = {
+  rating: "positive" | "negative";
+  comment: string;
+  updated_at: string;
+};
 export type Message = {
   id: string;
   role: "user" | "assistant";
   text: string;
+  demo?: boolean;
   model?: string;
   kind?: "chat" | "orchestrator";
   memory_ids?: string[];
+  feedback?: MessageFeedback | null;
   cost?: number;
   input_tokens?: number;
   output_tokens?: number;
@@ -122,6 +129,22 @@ export const renameChat = (id: string, title: string) =>
   request<Workspace>(`/chats/${encodeURIComponent(id)}`, "PATCH", { title });
 export const deleteChat = (id: string) =>
   request<Workspace>(`/chats/${encodeURIComponent(id)}`, "DELETE");
+export const saveMessageFeedback = (
+  chatId: string,
+  messageId: string,
+  rating: MessageFeedback["rating"] | null,
+  comment: string,
+) =>
+  request<{
+    message_id: string;
+    feedback: MessageFeedback | null;
+    work: WorkStatus;
+    memories: Memory[];
+  }>(
+    `/chats/${encodeURIComponent(chatId)}/messages/${encodeURIComponent(messageId)}/feedback`,
+    "PATCH",
+    { rating, comment },
+  );
 export const addTask = (title: string, details: string, priority: string) =>
   request<Workspace>("/tasks", "POST", { title, details, priority });
 export const toggleTask = (id: string, done: boolean) =>
@@ -247,6 +270,9 @@ export type WorkConfig = {
   auto_curate: boolean;
   periodic_reflection: boolean;
   reflection_interval_minutes: number;
+  background_context_tokens: number;
+  reflection_exchange_count: number;
+  reflection_context_characters: number;
   debounce_seconds: number;
   idle_seconds: number;
   max_output_tokens: number;

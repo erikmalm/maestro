@@ -72,7 +72,9 @@ class WorkConfigAPITests(unittest.TestCase):
             anonymous.close()
         self.assertEqual(self.client.put("/api/work-config", json=config).status_code, 403)
         self.assertEqual(self.client.put("/api/work-config", headers={**self.headers, "Origin": "https://unrelated.example"}, json=config).status_code, 403)
-        for changes in ({"memory_recall_count": 6}, {"memory_recall_characters": 1001},
+        for changes in ({"memory_recall_count": 101}, {"memory_recall_characters": 200001},
+                        {"background_context_tokens": 8191}, {"background_context_tokens": 131073},
+                        {"reflection_exchange_count": 33}, {"reflection_context_characters": 200001},
                         {"idle_seconds": -1}, {"max_jobs_per_day": True}, {"max_output_tokens": "512"},
                         {"auto_curate": "true"}, {"periodic_reflection": 1},
                         {"reflection_interval_minutes": 29}, {"reflection_interval_minutes": 10081},
@@ -165,6 +167,24 @@ class WorkConfigAPITests(unittest.TestCase):
         self.assertEqual(store.recall("Synthetic project", None, limit=0), [])
         self.assertEqual(store.recall("Synthetic project", None, max_characters=10), [])
         self.assertEqual(len(store.list()), 3)
+
+    def test_larger_saved_limits_and_legacy_settings_preserve_explicit_preferences(self):
+        config = self.client.get("/api/work-config").json()["config"]
+        config.update(background_context_tokens=65536, reflection_exchange_count=24,
+                      reflection_context_characters=80000, max_output_tokens=8192,
+                      memory_recall_count=40, memory_recall_characters=64000)
+        saved = self.client.put("/api/work-config", headers=self.headers, json=config)
+        self.assertEqual(saved.status_code, 200, saved.text)
+        self.assertEqual(self.client.get("/api/work-config").json()["config"], config)
+        with backend.workspace_transaction() as state:
+            state["work_config"] = {"memory_recall_count": 0, "max_jobs_per_day": 3,
+                                    "max_output_tokens": 512, "reflection_interval_minutes": 360}
+        legacy = self.client.get("/api/work-config").json()["config"]
+        self.assertEqual(legacy["memory_recall_count"], 0)
+        self.assertEqual(legacy["max_jobs_per_day"], 3)
+        self.assertEqual(legacy["max_output_tokens"], 512)
+        self.assertEqual(legacy["background_context_tokens"], 32768)
+        self.assertEqual(legacy["reflection_exchange_count"], 8)
 
 
 if __name__ == "__main__":

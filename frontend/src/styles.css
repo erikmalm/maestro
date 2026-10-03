@@ -386,6 +386,41 @@ textarea {
   font-size: 12px;
   margin-top: 12px;
 }
+.answer-feedback {
+  margin-top: 10px;
+  color: var(--muted);
+  font-size: 12px;
+}
+.feedback-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+.feedback-actions .icon-button {
+  width: 30px;
+  height: 30px;
+}
+.feedback-actions [aria-pressed="true"] {
+  color: var(--accent);
+  background: #f0edf8;
+}
+.feedback-saved {
+  margin: 0 5px;
+}
+.feedback-form {
+  display: grid;
+  gap: 10px;
+  margin-top: 10px;
+}
+.feedback-form textarea {
+  display: block;
+  width: 100%;
+  margin-top: 6px;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #fff;
+}
 .message-markdown {
   margin-top: 12px;
   font-size: 15px;

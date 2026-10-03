@@ -2,9 +2,6 @@
 from pydantic import BaseModel, ConfigDict, Field
 
 
-BACKGROUND_CONTEXT_TOKENS = 8192
-
-
 class WorkConfig(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True, str_strip_whitespace=True)
 
@@ -17,12 +14,15 @@ class WorkConfig(BaseModel):
     reflection_interval_minutes: int = Field(default=360, ge=30, le=10080)
     debounce_seconds: int = Field(default=60, ge=0, le=3600)
     idle_seconds: int = Field(default=30, ge=0, le=3600)
-    max_output_tokens: int = Field(default=512, ge=1, le=1024)
-    max_jobs_per_day: int = Field(default=10, ge=0, le=1000)
-    max_tokens_per_day: int = Field(default=10000, ge=0, le=10000000)
-    timeout_seconds: int = Field(default=180, ge=1, le=1800)
-    memory_recall_count: int = Field(default=5, ge=0, le=5)
-    memory_recall_characters: int = Field(default=1000, ge=0, le=1000)
+    background_context_tokens: int = Field(default=32768, ge=8192, le=131072)
+    reflection_exchange_count: int = Field(default=8, ge=1, le=32)
+    reflection_context_characters: int = Field(default=24000, ge=1000, le=200000)
+    max_output_tokens: int = Field(default=4096, ge=1, le=16384)
+    max_jobs_per_day: int = Field(default=50, ge=0, le=1000)
+    max_tokens_per_day: int = Field(default=250000, ge=0, le=10000000)
+    timeout_seconds: int = Field(default=600, ge=1, le=1800)
+    memory_recall_count: int = Field(default=20, ge=0, le=100)
+    memory_recall_characters: int = Field(default=16000, ge=0, le=200000)
 
 
 def config_value(workspace):

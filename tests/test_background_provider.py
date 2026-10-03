@@ -14,7 +14,7 @@ import httpx
 
 from backend.provider import BackgroundUncertain, DEFAULT, Provider, background_network
 from backend.memory import MemoryStore
-from backend.reflection import ReflectionStore, OUTPUT_SCHEMA, REVIEW_SCHEMA
+from backend.reflection import ReflectionStore, OUTPUT_SCHEMA
 from backend.work_config import WorkConfig
 
 
@@ -126,7 +126,7 @@ class ClaimedProviderTests(unittest.TestCase):
         self.addCleanup(self.directory.cleanup)
         self.database = Path(self.directory.name) / "workspace.sqlite3"
         self.workspace = {"limits": {"max_tokens": 100000}, "work_config": WorkConfig(
-            enabled=True, debounce_seconds=0, idle_seconds=0).model_dump(), "chats": [{
+            enabled=True, debounce_seconds=0, idle_seconds=0, max_output_tokens=512).model_dump(), "chats": [{
                 "id": "synthetic-chat", "title_source": "manual", "messages": [{
                     "id": "synthetic-user", "role": "user", "text": "I prefer concise Swedish replies."}]}]}
         with closing(sqlite3.connect(self.database)) as db, db:
@@ -155,12 +155,16 @@ class ClaimedProviderTests(unittest.TestCase):
 
     def test_background_context_is_bounded_without_changing_chat_preferences(self):
         self.store.recover()
+        self.workspace["work_config"].update(background_context_tokens=16384, max_output_tokens=4096)
+        with self.store.transaction() as db:
+            db.execute("UPDATE workspace SET value=?", (json.dumps(self.workspace),))
         self.provider.configure({**self.provider.read_state()["config"], "ollama_context_tokens": 131072}, "", False)
         self.prepared = self.store.prepare()
         self.assertEqual(self.prepared["job"]["connection_config"]["ollama_context_tokens"], 131072)
         with patch("backend.provider.background_network", side_effect=self.network):
             result = self.generate()
-        self.assertEqual(self.calls[-1][2]["options"]["num_ctx"], 8192)
+        self.assertEqual(self.calls[-1][2]["options"]["num_ctx"], 16384)
+        self.assertEqual(self.calls[-1][2]["options"]["num_predict"], 4096)
         self.store.complete(self.prepared["job"], result, lambda text: text)
         state = self.provider.read_state()
         self.assertEqual(state["config"]["ollama_context_tokens"], 131072)
@@ -181,7 +185,7 @@ class ClaimedProviderTests(unittest.TestCase):
         def network(config, path, payload, deadline):
             result = self.network(config, path, payload, deadline)
             if path == "/api/chat":
-                result["message"]["content"] = json.dumps({"approved": [0], "summary": "Reviewed."} if payload["format"] == REVIEW_SCHEMA
+                result["message"]["content"] = json.dumps({"approved": [0], "summary": "Reviewed."} if "approved" in payload["format"]["properties"]
                                                           else {"memories": [draft], "summary": "Normalized."})
             return result
         deadline = time.monotonic() + 30
@@ -201,7 +205,7 @@ class ClaimedProviderTests(unittest.TestCase):
             self.store.complete_auto(review["job"], second, review["drafts"], lambda text: text)
         dispatches = [call for call in self.calls if call[1] == "/api/chat"]
         self.assertEqual([call[2]["model"] for call in dispatches], ["form:7b", "review:7b"])
-        self.assertEqual([call[2]["format"] for call in dispatches], [self.prepared["schema"], REVIEW_SCHEMA])
+        self.assertEqual([call[2]["format"] for call in dispatches], [self.prepared["schema"], review["schema"]])
         self.assertTrue(all(call[2]["keep_alive"] == 0 and "tools" not in call[2] for call in dispatches))
         self.assertEqual([call[3] for call in dispatches], [deadline, deadline])
         ledger = self.provider.read_state()["ledger"]
@@ -242,6 +246,7 @@ class ClaimedProviderTests(unittest.TestCase):
         self.assertEqual([call[1] for call in self.calls], ["/api/show", "/api/chat"])
         payload = self.calls[-1][2]
         self.assertEqual(payload["model"], "gpt-oss:20b")
+        self.assertEqual(payload["options"]["num_ctx"], 8192)
         self.assertEqual(payload["format"], OUTPUT_SCHEMA)
         self.assertEqual(payload["keep_alive"], 0)
         self.assertEqual(payload["think"], "low")

@@ -292,7 +292,7 @@ class ProviderTests(unittest.TestCase):
     def test_overrun_settles_reply_without_invalidating_another_configuration(self):
         for change_model in (False, True):
             with self.subTest(change_model=change_model):
-                self.setup_provider()
+                self.setup_provider({**self.config, "max_output_tokens": 1024})
                 def handler(request):
                     if change_model:
                         self.setup_provider({**self.config, "model": "new-chat-model"})
@@ -383,7 +383,7 @@ class ProviderTests(unittest.TestCase):
             payload = json.loads(request.content)
             self.assertEqual(request.url.path, "/v1/chat/completions")
             title = payload["messages"][0]["content"] == TITLE_INSTRUCTIONS
-            self.assertEqual(payload["max_tokens"], 64 if title else 1024)
+            self.assertEqual(payload["max_tokens"], 64 if title else self.config["max_output_tokens"])
             self.assertNotIn("options", payload)
             self.assertNotIn("keep_alive", payload)
             self.assertNotIn("service_tier", payload)  # Compatible providers need not implement OpenAI tiers.

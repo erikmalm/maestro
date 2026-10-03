@@ -53,6 +53,9 @@ test("task models and work limits persist without starting inference", async ({
     ["Coding model", "synthetic-devstral:latest"],
   ] as const;
   const limits = [
+    ["Background context tokens", "32768"],
+    ["Exchanges per periodic review", "8"],
+    ["Conversation review characters", "24000"],
     ["Reflection output tokens", "256"],
     ["Daily reflection jobs", "4"],
     ["Daily reflection tokens", "3000"],

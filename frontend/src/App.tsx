@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import type { FormEvent, ReactNode } from "react";
 import Reply from "./Reply";
+import AnswerFeedback from "./AnswerFeedback";
 import MemorySetup from "./MemorySetup";
 import WorkSetup from "./WorkSetup";
 import {
@@ -21,7 +22,7 @@ import {
   X,
 } from "lucide-react";
 import * as api from "./api";
-import type { Limits, Task, Workspace } from "./api";
+import type { Limits, MessageFeedback, Task, Workspace } from "./api";
 import ProviderSetup from "./ProviderSetup";
 import OllamaSearchSetup from "./OllamaSearchSetup";
 
@@ -273,6 +274,7 @@ export default function App() {
   const [error, setError] = useState("");
   const [chat, setChat] = useState("");
   const [replyId, setReplyId] = useState("");
+  const [feedbackSaving, setFeedbackSaving] = useState(false);
   const [model, setModel] = useState("");
   const modelPicker = useRef<HTMLDivElement>(null);
   const [mobileNav, setMobileNav] = useState(false);
@@ -462,6 +464,42 @@ export default function App() {
   async function saveLimits(limits: Limits) {
     if (await perform("limits", () => api.saveLimits(limits), "Limits saved."))
       setPanel(null);
+  }
+  async function saveFeedback(
+    chatId: string,
+    messageId: string,
+    rating: MessageFeedback["rating"] | null,
+    comment: string,
+  ) {
+    const revision = workspaceRevision.current;
+    setFeedbackSaving(true);
+    try {
+      const result = await api.saveMessageFeedback(
+        chatId,
+        messageId,
+        rating,
+        comment,
+      );
+      if (revision !== workspaceRevision.current) return false;
+      workspaceRevision.current += 1;
+      setWorkspace((current) =>
+        current?.active_chat_id === chatId
+          ? {
+              ...current,
+              work: result.work ?? current.work,
+              memories: result.memories ?? current.memories,
+              messages: current.messages.map((message) =>
+                message.id === result.message_id
+                  ? { ...message, feedback: result.feedback }
+                  : message,
+              ),
+            }
+          : current,
+      );
+      return true;
+    } finally {
+      setFeedbackSaving(false);
+    }
   }
 
   if (!workspace)
@@ -729,6 +767,23 @@ export default function App() {
                         </ol>
                       </div>
                     )}
+                    {message.role === "assistant" &&
+                      !message.demo &&
+                      workspace.active_chat_id && (
+                        <AnswerFeedback
+                          key={`${workspace.active_chat_id}:${message.id}`}
+                          feedback={message.feedback}
+                          disabled={!!busy || feedbackSaving}
+                          onSave={(rating, comment) =>
+                            saveFeedback(
+                              workspace.active_chat_id!,
+                              message.id,
+                              rating,
+                              comment,
+                            )
+                          }
+                        />
+                      )}
                   </div>
                 ))}
                 <div ref={chatEnd} />
@@ -739,7 +794,7 @@ export default function App() {
                 <textarea
                   aria-label="Message Maestro"
                   placeholder="Write a message…"
-                  maxLength={4000}
+                  maxLength={32000}
                   rows={3}
                   value={chat}
                   onChange={(event) => setChat(event.target.value)}
@@ -1003,7 +1058,7 @@ export default function App() {
             </label>
             <label>
               Context & completion criteria
-              <textarea rows={4} maxLength={3000} name="details" />
+              <textarea rows={4} maxLength={16000} name="details" />
             </label>
             <label>
               Priority

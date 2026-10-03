@@ -9,9 +9,10 @@ import sqlite3
 import uuid
 
 
-MAX_CONTENT = 1000
-MAX_RECALL = 5
-MAX_MEMORIES = 200
+MAX_CONTENT = 8000
+MAX_RECALL = 100
+MAX_RECALL_CHARACTERS = 200000
+MAX_MEMORIES = 2000
 STOPWORDS = set("a an and are as at be been but by can could do does for from had has have how i if in is it its me my of on or our should that the their them there these they this to was we were what when where which who will with would you your och att det en ett för från jag med om på till vad vi är".split())
 
 
@@ -21,7 +22,7 @@ def terms(text):
 
 def content_value(content):
     if not isinstance(content, str) or not 1 <= len(content.strip()) <= MAX_CONTENT or "\x00" in content:
-        raise ValueError("Enter a memory between 1 and 1000 characters.")
+        raise ValueError("Enter a memory between 1 and 8000 characters.")
     return content.strip()
 
 
@@ -31,6 +32,10 @@ def revision(record):
 
 def source_fingerprint(source):
     return hashlib.sha256(json.dumps(source, sort_keys=True).encode("utf-8")).hexdigest()
+
+
+def assistant_revision(text, feedback=None):
+    return hashlib.sha256(json.dumps({"text": text, "feedback": feedback}, sort_keys=True).encode("utf-8")).hexdigest()
 
 
 class MemoryStore:
@@ -84,7 +89,7 @@ class MemoryStore:
         if any(db.execute("SELECT 1 FROM memory_tombstones WHERE fingerprint=?", (value,)).fetchone() for value in fingerprints):
             return True
         for source in provenance:
-            if "chat_id" not in source:
+            if "chat_id" not in source or source.get("role") == "assistant":
                 continue
             barrier = db.execute("SELECT source_id FROM memory_barriers WHERE chat_id=?", (source["chat_id"],)).fetchone()
             if barrier:
@@ -149,8 +154,14 @@ class MemoryStore:
                 if target is None or revision(target) != source["hash"] or not self.valid_source(target, chats, memories, seen):
                     return False
             else:
-                message = next((item for item in chats.get(source["chat_id"], {}).get("messages", []) if item.get("id") == source["message_id"] and item.get("role") == "user"), {})
-                if not isinstance(message.get("text"), str) or hashlib.sha256(message["text"].encode("utf-8")).hexdigest() != source["hash"]:
+                role = source.get("role", "user")
+                if role == "assistant" and record["kind"] not in ("identity", "lesson"):
+                    return False
+                message = next((item for item in chats.get(source["chat_id"], {}).get("messages", []) if item.get("id") == source["message_id"] and item.get("role") == role), {})
+                if not isinstance(message.get("text"), str):
+                    return False
+                actual = assistant_revision(message["text"], message.get("feedback")) if role == "assistant" else hashlib.sha256(message["text"].encode("utf-8")).hexdigest()
+                if actual != source["hash"]:
                     return False
         if record["chat_id"] is None:
             return True
@@ -170,6 +181,14 @@ class MemoryStore:
             inventory = {record["id"]: record for record in records}
             return [record for record in records if self.valid_source(record, chats, inventory)
                     and (chat_id is None or record["scope"] == "workspace" or record["chat_id"] == chat_id)]
+
+    def remove_stale(self, db, chats):
+        chats = {chat["id"]: chat for chat in chats} if isinstance(chats, list) else chats
+        records = [self.record(row) for row in db.execute("SELECT * FROM private_memories")]
+        inventory = {record["id"]: record for record in records}
+        removed = [record["id"] for record in records if not record["pinned"] and not self.valid_source(record, chats, inventory)]
+        db.executemany("DELETE FROM private_memories WHERE id=?", [(memory_id,) for memory_id in removed])
+        return removed
 
     def remember(self, content, scope="workspace", chat_id=None, source_message_id=None):
         content = content_value(content)
@@ -248,15 +267,15 @@ class MemoryStore:
             if db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='memory_barriers'").fetchone():
                 db.execute("DELETE FROM memory_barriers WHERE chat_id=?", (chat_id,))
 
-    def recall(self, query, chat_id, local=True, limit=MAX_RECALL, max_characters=MAX_CONTENT):
+    def recall(self, query, chat_id, local=True, limit=20, max_characters=16000):
         if not local or limit <= 0 or max_characters <= 0:
             return []
         query_terms = terms(query)
         ranked = [(len(query_terms & terms(record["content"])) + (100 if record["kind"] in ("identity", "lesson") else 0), record) for record in self.list(chat_id)
                   if record["scope"] == "workspace" or record["chat_id"] == chat_id]
         ranked.sort(key=lambda item: (-item[0], item[1]["id"]))
-        selected, remaining = [], min(max_characters, MAX_CONTENT)
-        reflective_remaining = min(400, remaining)
+        selected, remaining = [], min(max_characters, MAX_RECALL_CHARACTERS)
+        reflective_remaining = min(4000, remaining)
         for relevance, record in ranked:
             if record["kind"] in ("identity", "lesson") and len(record["content"]) > reflective_remaining:
                 continue

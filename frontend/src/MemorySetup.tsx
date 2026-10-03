@@ -102,7 +102,7 @@ export default function MemorySetup({
             {editing ? "Edit memory" : "What should Maestro remember?"}
             <textarea
               required
-              maxLength={1000}
+              maxLength={8000}
               rows={3}
               value={content}
               disabled={busy}

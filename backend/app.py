@@ -24,7 +24,7 @@ from backend.provider import Provider
 from backend import credentials
 from backend.web_search import WebSearch, ENDPOINT as SEARCH_ENDPOINT
 from backend.storage import workspace_owner
-from backend.memory import MemoryStore
+from backend.memory import MAX_CONTENT, MemoryStore
 from backend.work_config import WorkConfig, config_value
 from backend.reflection import ReflectionStore, ReflectionWorker
 
@@ -54,7 +54,7 @@ def identifier() -> str:
 def seed_workspace() -> dict:
     return {
         "tasks": [], "chats": [],
-        "limits": {"run_usd": 1.0, "daily_usd": 5.0, "monthly_usd": 50.0, "max_tokens": 100000},
+        "limits": {"run_usd": 1.0, "daily_usd": 5.0, "monthly_usd": 50.0, "max_tokens": 500000},
         "working_core_migrated": True,
     }
 
@@ -162,7 +162,7 @@ class StrictModel(BaseModel):
 
 class TaskInput(StrictModel):
     title: str = Field(min_length=1, max_length=200)
-    details: str = Field(default="", max_length=3000)
+    details: str = Field(default="", max_length=16000)
     priority: str = Field(default="normal", pattern="^(normal|high)$")
 
 
@@ -171,7 +171,7 @@ class DoneInput(StrictModel):
 
 
 class MemoryContent(StrictModel):
-    content: str = Field(min_length=1, max_length=1000)
+    content: str = Field(min_length=1, max_length=MAX_CONTENT)
 
 
 class MemoryInput(MemoryContent):
@@ -185,7 +185,7 @@ class CandidateInput(StrictModel):
 
 
 class TextInput(StrictModel):
-    text: str = Field(min_length=1, max_length=4000)
+    text: str = Field(min_length=1, max_length=32000)
     chat_id: str | None = Field(default=None, min_length=1, max_length=100)
     model: str = Field(default="", max_length=200, pattern=r"^[A-Za-z0-9_./:-]*$")
     role: Literal["chat", "orchestrator"] = "chat"
@@ -193,6 +193,11 @@ class TextInput(StrictModel):
 
 class ChatTitleInput(StrictModel):
     title: str = Field(min_length=1, max_length=120)
+
+
+class FeedbackInput(StrictModel):
+    rating: Literal["positive", "negative"] | None
+    comment: str = Field(default="", max_length=4000)
 
 
 class LimitsInput(StrictModel):
@@ -214,8 +219,8 @@ class ProviderConfig(StrictModel):
     input_usd_per_million: float = Field(default=0, ge=0, le=10000, allow_inf_nan=False)
     output_usd_per_million: float = Field(default=0, ge=0, le=10000, allow_inf_nan=False)
     pricing_verified: bool = False
-    max_output_tokens: int = Field(default=1024, ge=64, le=32768)
-    ollama_context_tokens: int = Field(default=4096, ge=1024, le=131072)
+    max_output_tokens: int = Field(default=4096, ge=64, le=32768)
+    ollama_context_tokens: int = Field(default=32768, ge=1024, le=131072)
     ollama_threads: int = Field(default=0, ge=0, le=256)
     ollama_keep_alive_minutes: int = Field(default=5, ge=0, le=120)
 
@@ -300,7 +305,7 @@ async def protect_local_workspace(request: Request, call_next):
                 size = int(request.headers.get("content-length", "0"))
             except ValueError:
                 return JSONResponse({"detail": "Invalid request."}, status_code=400)
-            if size > 32768:
+            if size > 262144:
                 return JSONResponse({"detail": "This entry is too large."}, status_code=413)
     response = await call_next(request)
     response.headers["X-Content-Type-Options"] = "nosniff"
@@ -362,6 +367,37 @@ def safe_private_content(content):
         if key and key in content:
             raise ValueError("Remove credentials before saving.")
     return content
+
+
+@app.patch("/api/chats/{chat_id}/messages/{message_id}/feedback")
+def save_feedback(chat_id: str, message_id: str, entry: FeedbackInput):
+    with conflict_errors():
+        if "\x00" in entry.comment or (entry.rating is None and entry.comment):
+            raise ValueError("Choose a rating for your comment, or clear both fields.")
+        safe_private_content(entry.comment)
+        with workspace_transaction(with_db=True) as (state, db):
+            chat = selected_chat(state, chat_id)
+            message = next((item for item in chat["messages"] if item["id"] == message_id
+                            and item.get("role") == "assistant" and not item.get("demo")), None)
+            if message is None:
+                raise HTTPException(404, "That answer could not be found.")
+            previous = message.get("feedback")
+            changed = ((previous or {}).get("rating"), (previous or {}).get("comment", "")) != (entry.rating, entry.comment)
+            if changed:
+                if entry.rating is None:
+                    message.pop("feedback", None)
+                else:
+                    message["feedback"] = {"rating": entry.rating, "comment": entry.comment, "updated_at": now()}
+                memories = MemoryStore(DATABASE, TIMEZONE)
+                memories.initialize_db(db)
+                memories.remove_stale(db, state["chats"])
+                reflection = ReflectionStore(DATABASE, TIMEZONE)
+                reflection.invalidate(db, clear_candidates=False)
+                reflection.touch(state, db)
+                if previous is not None:
+                    db.execute("DELETE FROM reflection_journal")
+    return {"message_id": message_id, "feedback": message.get("feedback"), "work": work_status(state),
+            "memories": MemoryStore(DATABASE, TIMEZONE).list()}
 
 
 @app.get("/api/memory")

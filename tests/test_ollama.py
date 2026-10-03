@@ -229,7 +229,7 @@ class OllamaTests(unittest.TestCase):
             state["models"] = [self.model]
             state["tested_at"] = "synthetic-previous-test"
         status = self.client.get("/api/provider").json()
-        self.assertEqual(status["config"]["ollama_context_tokens"], 4096)
+        self.assertEqual(status["config"]["ollama_context_tokens"], DEFAULT["ollama_context_tokens"])
         self.assertEqual(status["config"]["ollama_threads"], 0)
         self.assertEqual(status["config"]["ollama_keep_alive_minutes"], 5)
         self.assertEqual(status["config"]["orchestrator_model"], "")
@@ -241,12 +241,12 @@ class OllamaTests(unittest.TestCase):
                                      json={"text": "Check old settings still generate"})
         self.assertEqual(reply.status_code, 200, reply.text)
         payload = json.loads(self.reply_requests()[-1].content)
-        self.assertEqual(payload["options"], {"num_ctx": 4096, "num_thread": 0, "num_predict": 256})
+        self.assertEqual(payload["options"], {"num_ctx": DEFAULT["ollama_context_tokens"], "num_thread": 0, "num_predict": 256})
         self.assertEqual(payload["keep_alive"], "5m")
         self.assertEqual(service.read_state()["config"], status["config"])
 
     def test_local_context_guard_stops_before_dispatch_and_preserves_chat(self):
-        self.configure()
+        self.configure({**self.config, "ollama_context_tokens": 4096})
         before = self.client.get("/api/workspace").json()
         with self.mock_http():
             rejected = self.client.post("/api/chat", headers=self.headers,

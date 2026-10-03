@@ -77,6 +77,7 @@ Earlier prototype-only records remain archived in the private database, and old 
 | `POST /api/chats`, `PATCH /api/chats/{id}`, `DELETE /api/chats/{id}` | Create, rename or delete a conversation, retaining accounting. |
 | `POST /api/tasks`, `PATCH /api/tasks/{id}`, `DELETE /api/tasks/{id}` | Manual task persistence. |
 | `POST /api/chat` | Generate a reply for the submitted `chat_id` and persist it in that conversation. |
+| `PATCH /api/chats/{chat_id}/messages/{message_id}/feedback` | Save/edit/clear an optional rating and comment on an existing answer, without inference. |
 | `GET /api/memory`, `POST /api/memory`, `PATCH /api/memory/{id}`, `DELETE /api/memory/{id}` | Inspect, save, edit/pin or forget private memory; snapshots also include records. |
 | `GET /api/work-config`, `PUT /api/work-config` | Saved task models, recall allowances and reflection enable/pause policy. |
 | `GET /api/reflection` | Read-only worker status, daily usage, current memories, journal and legacy proposals. |

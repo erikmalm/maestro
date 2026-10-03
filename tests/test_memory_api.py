@@ -9,7 +9,7 @@ from unittest.mock import patch
 from fastapi.testclient import TestClient
 
 from backend import app as backend
-from backend.memory import MemoryStore
+from backend.memory import MAX_CONTENT, MemoryStore
 from backend.web_search import ENDPOINT as SEARCH_ENDPOINT
 
 
@@ -86,6 +86,12 @@ class MemoryAPITests(unittest.TestCase):
         self.assertEqual(self.client.get("/api/memory", headers={"Origin": "https://unrelated.example"}).status_code, 403)
         self.assertEqual(self.client.get("/api/memory").json(), [memory])
 
+    def test_long_unicode_memory_fits_request_limit_and_round_trips_unchanged(self):
+        content = "记忆" * (MAX_CONTENT // 2)
+        memory = self.remember(content)
+        self.assertEqual(len(memory["content"]), MAX_CONTENT)
+        self.assertEqual(self.client.get("/api/memory").json()[0]["content"], content)
+
     def test_scope_and_provenance_are_validated_and_isolate_recall(self):
         first, second = self.create_chat(), self.create_chat()
         self.add_sources(first)
@@ -107,7 +113,7 @@ class MemoryAPITests(unittest.TestCase):
     def test_validation_errors_and_missing_ids_never_echo_submitted_content(self):
         private = "synthetic-private-do-not-echo"
         invalid = [
-            {"content": ""}, {"content": "x" * 1001}, {"content": private, "scope": "reflection"},
+            {"content": ""}, {"content": "x" * (MAX_CONTENT + 1)}, {"content": private, "scope": "reflection"},
             {"content": private, "origin": "inferred"}, {"content": private, "local": False},
         ]
         for body in invalid:
