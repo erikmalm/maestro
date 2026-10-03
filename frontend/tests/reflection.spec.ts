@@ -355,11 +355,23 @@ test("automatic memory, periodic reflection and the private journal stay inspect
   await expect(interval).toBeDisabled();
   await work.getByLabel("AI curates memory automatically").check();
   await periodic.check();
-  await interval.fill("120");
+  await expect(interval).toHaveAttribute("min", "5");
+  await interval.fill("4");
+  expect(
+    await interval.evaluate(
+      (input: HTMLInputElement) => input.validity.rangeUnderflow,
+    ),
+  ).toBe(true);
+  await interval.fill("15");
+  const savedRequest = page.waitForRequest("**/api/work-config");
   await work
     .getByRole("button", { name: "Save task settings", exact: true })
     .click();
   await expect(work.getByRole("status")).toHaveText("Task settings saved.");
+  expect((await savedRequest).postDataJSON().reflection_interval_minutes).toBe(
+    15,
+  );
+  expect(fixture.work.config.reflection_interval_minutes).toBe(15);
   await page.getByRole("button", { name: "Memory", exact: true }).click();
   await memory.getByRole("button", { name: "List", exact: true }).click();
   await expect(memory.getByLabel("What should Maestro remember?")).toBeHidden();
@@ -495,7 +507,7 @@ test("automatic memory, periodic reflection and the private journal stay inspect
     work.getByLabel("AI curates memory automatically"),
   ).toBeChecked();
   await expect(periodic).toBeChecked();
-  await expect(interval).toHaveValue("120");
+  await expect(interval).toHaveValue("15");
   await work.getByLabel("AI curates memory automatically").uncheck();
   await expect(periodic).not.toBeChecked();
   await expect(periodic).toBeDisabled();

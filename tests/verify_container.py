@@ -248,7 +248,7 @@ def verify(image, tunnel=False):
         calls = latest_calls()
         assert [(call["kind"], call["model"], call["stage"]) for call in calls] == [("memory", MODELS[0], 0), ("reflection", MODELS[1], 1)]
         assert api("/api/reflection")["today_jobs"] == 3
-        api("/api/work-config", {**automatic, "periodic_reflection": True, "auto_create_tasks": True}, method="PUT", headers=headers)
+        api("/api/work-config", {**automatic, "periodic_reflection": True, "auto_create_tasks": True, "reflection_interval_minutes": 15}, method="PUT", headers=headers)
         identity = await_memory("identity")
         assert identity["origin"] == "reflective" and identity["scope"] == "workspace"
         calls = latest_calls()
@@ -256,6 +256,7 @@ def verify(image, tunnel=False):
         reflection = api("/api/reflection")
         assert reflection["today_jobs"] == 4 and reflection["today_tokens"] == 240 and reflection["candidates"] == []
         assert reflection["next_reflection_at"] and [entry["kind"] for entry in reflection["journal"]] == ["reflection", "curation"]
+        assert reflection["config"]["reflection_interval_minutes"] == 15
         assert [entry["models"] for entry in reflection["journal"]] == [[MODELS[1], MODELS[0]], [MODELS[0], MODELS[1]]]
         suggested = next(task for task in reflection["tasks"] if task["initiated_by"] == "maestro")
         assert suggested["suggested_assignee"] == "maestro" and suggested["initiated_model"] == MODELS[1]

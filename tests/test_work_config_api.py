@@ -25,12 +25,14 @@ class WorkConfigAPITests(unittest.TestCase):
     def test_defaults_and_saves_persist_independently_of_provider_without_inference(self):
         initial = self.client.get("/api/work-config").json()
         self.assertEqual(initial["config"], WorkConfig().model_dump())
+        self.assertEqual(initial["config"]["reflection_interval_minutes"], 360)
         self.assertTrue(initial["worker_available"])
         self.assertEqual(initial["candidates"], [])
         self.assertEqual(initial["queued"], 0)
         config = {**initial["config"], "reflection_model": "synthetic-reasoning:20b",
                   "memory_model": "synthetic-small:7b", "coding_model": "synthetic-coding:24b",
-                  "idle_seconds": 90, "max_jobs_per_day": 4, "memory_recall_count": 2}
+                  "idle_seconds": 90, "max_jobs_per_day": 4, "memory_recall_count": 2,
+                  "reflection_interval_minutes": 5}
         before = self.client.get("/api/workspace").json()
         with patch("backend.provider.network", side_effect=AssertionError("Saving configuration must not dispatch")):
             saved = self.client.put("/api/work-config", headers=self.headers, json=config)
@@ -77,7 +79,7 @@ class WorkConfigAPITests(unittest.TestCase):
                         {"reflection_exchange_count": 33}, {"reflection_context_characters": 200001},
                         {"idle_seconds": -1}, {"max_jobs_per_day": True}, {"max_output_tokens": "512"},
                         {"auto_curate": "true"}, {"periodic_reflection": 1},
-                        {"reflection_interval_minutes": 29}, {"reflection_interval_minutes": 10081},
+                        {"reflection_interval_minutes": 4}, {"reflection_interval_minutes": 10081},
                         {"reflection_model": "private model with spaces"}, {"unknown": "private input"}):
             response = self.client.put("/api/work-config", headers=self.headers, json={**config, **changes})
             self.assertEqual(response.status_code, 422, response.text)
@@ -150,7 +152,7 @@ class WorkConfigAPITests(unittest.TestCase):
         future()
         self.assertEqual(self.client.put("/api/work-config", headers=self.headers, json=config).status_code, 200)
         self.assertEqual(deadline(), 123456789)
-        config["reflection_interval_minutes"] = 120
+        config["reflection_interval_minutes"] = 15
         self.assertEqual(self.client.put("/api/work-config", headers=self.headers, json=config).status_code, 200)
         self.assertEqual(deadline(), 0)
         future()

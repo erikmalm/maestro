@@ -5,11 +5,11 @@ Updated: 2026-10-03. Maestro supports manual memory, optional automatic curation
 ## Using background reflection
 
 1. Select Local Ollama in Settings. **Local worker settings → Context tokens** defaults to **32,768**; automatic curation requires at least 8,192. The separate background context setting limits reflection without changing your chat context.
-2. In **Task models & reflection**, enable background reflection and automatic memory curation. Enable independent reflection and choose **360 minutes** for a six-hour interval. Save.
+2. In **Task models & reflection**, enable background reflection and automatic memory curation. Enable independent reflection and choose an interval: **15 minutes** for faster evaluation of recurring passes, or the **360-minute** default for six-hour intervals. Save.
 3. Continue chatting. After the configured quiet period, Maestro can normalize durable facts/preferences and save reviewed changes automatically.
 4. Open **Memory** from the sidebar or **Open memory** in Settings. Read **Private reflection journal** for summaries, changes, source references and model names. Edit or forget any memory; editing pins it against automatic changes.
 
-Independent reflection has an initial pass once the worker is idle, then follows the saved interval. It reviews Maestro's declared capabilities, improvement goals, current memories and working practices; eligible exchanges add observations when available. A pass can assess its practices without new chats or saved memories. It distinguishes observed problems from untested hypotheses and develops concise, revisable identity/lesson notes or measurable experiments. These notes are not consciousness, user facts or new permissions, and changing them does not train model weights.
+Independent reflection has an initial pass once the worker is idle, then follows the saved interval. Chat activity or a running generation can delay a pass; daily job/token allowances can pause dispatch. It reviews Maestro's declared capabilities, improvement goals, current memories and working practices; eligible exchanges add observations when available. A pass can assess its practices without new chats or saved memories. It distinguishes observed problems from untested hypotheses and develops concise, revisable identity/lesson notes or measurable experiments. These notes are not consciousness, user facts or new permissions, and changing them does not train model weights.
 
 Optionally enable **AI can create tasks during reflection** in **Task models & reflection**. Each periodic pass can suggest at most two supported follow-ups or self-improvement experiments and save independently approved ones directly in **Tasks**. Improvement tasks need a concrete outcome or evaluation check; an untested idea cannot claim a demonstrated problem or completed improvement. Rows show **Initiated by** You/Maestro and an editable **Suggested for** You/Maestro choice. This setting defaults off, requires automatic curation and independent reflection, and adds no model call or task execution.
 
@@ -35,7 +35,7 @@ Private work_config settings are validated through GET/PUT /api/work-config. Cha
 | Automatic memory curation | Off | Formation, independent review and automatic promotion. |
 | Independent reflection | Off | Scheduled identity/lesson maintenance and self-improvement review when automatic curation is on. |
 | AI can create tasks during reflection | Off | Allows periodic reflection to add up to two independently approved tasks to the existing list. |
-| Reflection interval | 360 minutes | Initial eligible pass, then six-hour intervals; range 30 minutes to seven days. |
+| Reflection interval | 360 minutes | Initial eligible pass, then the saved interval; range five minutes to seven days. 15 minutes supports faster evaluation. |
 | Reflection / memory / coding model | Recommended installed tag | gpt-oss:20b / qwen2.5:7b / devstral-small-2:24b; otherwise local chat fallback. |
 | Background context tokens | 32,768 | Separate per-call Ollama context, up to 131,072; also bounded by chat context and request limits. |
 | Exchanges per reflection / source characters | 8 / 24,000 | Complete exchange sampling; configurable up to 32 / 200,000, with an additional context fit check. |

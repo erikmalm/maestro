@@ -1,5 +1,6 @@
 """Periodic task suggestions use the same two calls and independent approval."""
 import json
+from datetime import datetime
 import unittest
 
 from backend.memory import MemoryStore, assistant_revision, revision
@@ -135,6 +136,34 @@ class TaskReflectionTests(unittest.TestCase):
         self.assertEqual(journal["tasks_created"], [])
         self.assertEqual(journal["assessment_basis"], "capabilities_and_practices")
         self.assertEqual(self.contexts[-2]["self_review"], self.contexts[-1]["self_review"])
+
+    def test_fifteen_minute_schedule_runs_once_per_due_time_without_replaying_missed_intervals(self):
+        self.workspace["chats"] = []
+        self.workspace["work_config"]["reflection_interval_minutes"] = 15
+        self.task_drafts = []
+        self.save()
+        self.worker.step()
+        self.assertEqual(len(self.contexts), 2)
+        self.assertEqual(len(self.jobs()), 1)
+        self.now += 14 * 60 + 59
+        self.worker.step()
+        self.assertEqual(len(self.contexts), 2)
+        self.assertEqual(len(self.jobs()), 1)
+        self.now += 1
+        self.worker.step()
+        self.assertEqual(len(self.contexts), 4)
+        self.assertEqual(len(self.jobs()), 2)
+        self.now += 5 * 24 * 60 * 60
+        self.worker.step()
+        self.assertEqual(len(self.contexts), 6)
+        self.assertEqual(len(self.jobs()), 3)
+        self.assertEqual(datetime.fromisoformat(self.store.status()["next_reflection_at"]).timestamp(), self.now + 15 * 60)
+        self.worker.step()
+        self.worker.step()
+        self.assertEqual(len(self.contexts), 6)
+        self.assertEqual([state for state, _ in self.jobs()], ["done"] * 3)
+        self.assertTrue(all(not context["sources"] and not context["exchanges"] for context in self.contexts))
+        self.assertEqual(self.tasks(), [])
 
     def test_chat_curation_does_not_receive_independent_self_review_context(self):
         self.workspace["work_config"]["periodic_reflection"] = False

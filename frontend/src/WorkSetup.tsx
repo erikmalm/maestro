@@ -139,7 +139,7 @@ export default function WorkSetup({
           <input
             type="number"
             required
-            min={30}
+            min={5}
             max={10080}
             step={1}
             value={config.reflection_interval_minutes}
@@ -154,9 +154,10 @@ export default function WorkSetup({
           />
         </label>
         <p className="reflection-note">
-          360 minutes is six hours. Periodic reflection starts while idle after
-          enabling, then follows this interval. It can review current practices
-          and propose measurable improvements even without new chats.
+          15 minutes helps evaluate recurring passes; 360 minutes is six hours.
+          Reflection reviews current practices even without new chats. Chat
+          activity or a running generation can delay a pass; daily allowances
+          can pause it.
         </p>
         {dirty && (
           <p className="reflection-note">
