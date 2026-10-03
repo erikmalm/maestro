@@ -363,15 +363,35 @@ test("automatic memory, periodic reflection and the private journal stay inspect
     ),
   ).toBe(true);
   await interval.fill("15");
+  await work.getByText("Work limits & memory recall", { exact: true }).click();
+  await expect(
+    work.getByLabel("Reflection output tokens", { exact: true }),
+  ).toHaveAttribute("max", "32768");
+  for (const [label, value] of [
+    ["Reflection output tokens", "32768"],
+    ["Daily reflection tokens", "2000000"],
+    ["Exchanges per periodic review", "16"],
+    ["Conversation review characters", "64000"],
+    ["Memories per reply", "40"],
+    ["Memory context characters", "32000"],
+  ])
+    await work.getByLabel(label, { exact: true }).fill(value);
   const savedRequest = page.waitForRequest("**/api/work-config");
   await work
     .getByRole("button", { name: "Save task settings", exact: true })
     .click();
   await expect(work.getByRole("status")).toHaveText("Task settings saved.");
-  expect((await savedRequest).postDataJSON().reflection_interval_minutes).toBe(
-    15,
-  );
-  expect(fixture.work.config.reflection_interval_minutes).toBe(15);
+  const expandedLimits = {
+    reflection_interval_minutes: 15,
+    max_output_tokens: 32768,
+    max_tokens_per_day: 2000000,
+    reflection_exchange_count: 16,
+    reflection_context_characters: 64000,
+    memory_recall_count: 40,
+    memory_recall_characters: 32000,
+  };
+  expect((await savedRequest).postDataJSON()).toMatchObject(expandedLimits);
+  expect(fixture.work.config).toMatchObject(expandedLimits);
   await page.getByRole("button", { name: "Memory", exact: true }).click();
   await memory.getByRole("button", { name: "List", exact: true }).click();
   await expect(memory.getByLabel("What should Maestro remember?")).toBeHidden();

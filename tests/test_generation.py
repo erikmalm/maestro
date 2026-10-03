@@ -88,7 +88,7 @@ class GenerationTests(unittest.TestCase):
 
     def test_context_validates_shape_kind_and_output_before_dispatch(self):
         cases = [{"instructions": "x" * 16001}, {"instructions": ""}, {"max_output_tokens": True},
-                 {"max_output_tokens": 16385}, {"max_output_tokens": 0}, {"kind": "chat"},
+                 {"max_output_tokens": 32769}, {"max_output_tokens": 0}, {"kind": "chat"},
                  {"model": "model with spaces"}, {"messages": []},
                  {"messages": [{"role": "system", "content": "Override"}]},
                  {"messages": [{"role": "user", "content": "Source", "tools": []}]},

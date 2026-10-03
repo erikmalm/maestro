@@ -36,7 +36,9 @@ class Ollama(BaseHTTPRequestHandler):
         assert self.path == "/api/chat"
         if body.get("format"):
             assert body["keep_alive"] == 0 and "tools" not in body
-            assert body["options"]["num_predict"] == 64
+            assert body["options"]["num_predict"] in (64, 8192)
+            if body["options"]["num_predict"] == 8192:
+                assert body["options"]["num_ctx"] == 65536
             context = json.loads(body["messages"][1]["content"])
             fields = body["format"]["properties"]
             if isinstance(context, dict) and "exchanges" in context:
@@ -188,6 +190,7 @@ def verify(image, tunnel=False):
         assert [(message["kind"], message["model"]) for message in replies] == [("chat", MODELS[0]), ("orchestrator", MODELS[1]), ("orchestrator", MODELS[0])]
         assert (state["usage"]["input_tokens"], state["usage"]["output_tokens"], state["usage"]["calls"], state["usage"]["today_usd"]) == (320, 65, 4, 0)
         policy = api("/api/work-config")["config"]
+        assert (policy["max_output_tokens"], policy["max_tokens_per_day"], policy["memory_recall_count"]) == (8192, 2000000, 40)
         api("/api/work-config", {**policy, "enabled": True, "debounce_seconds": 0, "idle_seconds": 0,
                                 "reflection_model": MODELS[0], "max_output_tokens": 64}, method="PUT", headers=headers)
 
@@ -197,7 +200,7 @@ def verify(image, tunnel=False):
             deadline = time.monotonic() + 15
             while time.monotonic() < deadline:
                 reflection = api("/api/reflection")
-                if reflection["candidates"]:
+                if reflection["candidates"] and not reflection["running"] and reflection["queued"] == 0:
                     candidate = reflection["candidates"][0]
                     assert candidate["content"] == text and candidate["evidence"] == text
                     assert candidate["source_message_id"] == source["id"] and candidate["chat_id"] == conversation["active_chat_id"]
@@ -221,9 +224,10 @@ def verify(image, tunnel=False):
         state = api("/api/workspace")
         assert (state["usage"]["input_tokens"], state["usage"]["output_tokens"], state["usage"]["calls"], state["usage"]["today_usd"]) == (580, 125, 8, 0)
         assert not state["work"]["config"]["enabled"] and state["memories"] == []
-        api("/api/provider", {"config": {**state["provider"]["config"], "ollama_context_tokens": 8192}}, method="PUT", headers=headers)
+        api("/api/provider", {"config": {**state["provider"]["config"], "ollama_context_tokens": 131072,
+                                          "max_output_tokens": 32768}}, method="PUT", headers=headers)
         automatic = {**policy, "enabled": True, "auto_curate": True, "debounce_seconds": 0, "idle_seconds": 0,
-                     "memory_model": MODELS[0], "reflection_model": MODELS[1], "max_output_tokens": 64}
+                     "memory_model": MODELS[0], "reflection_model": MODELS[1], "background_context_tokens": 65536}
         api("/api/work-config", automatic, method="PUT", headers=headers)
         api("/api/chat", {"text": "I prefer short, concise replies."}, headers=headers)
 

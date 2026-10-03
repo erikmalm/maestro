@@ -1,4 +1,5 @@
 """Managed memories evolve in place while user pins and source lineage remain intact."""
+import json
 import unittest
 
 from backend.memory import MemoryStore, assistant_revision, revision
@@ -98,7 +99,7 @@ class EvolutionTests(unittest.TestCase):
         profile = self.record("profile", "Maintain a concise, revisable working identity.", kind="identity")
         for index in range(30):
             self.record(f"pin-{index:02}", f"Synthetic project decision {index}.", kind="fact", origin="explicit")
-        managed = {f"managed-{index:02}" for index in range(35)}
+        managed = {f"managed-{index:02}" for index in range(70)}
         for name in sorted(managed):
             self.record(name, "Review this specific working observation " + name + ".")
         self.drafts = []
@@ -117,7 +118,61 @@ class EvolutionTests(unittest.TestCase):
             previous |= batch
             self.now += 360 * 60
         self.assertEqual(selected, managed)
-        self.assertEqual(len(self.memory.list()), 66)
+        self.assertEqual(len(self.memory.list()), 101)
+
+    def test_expanded_review_and_recall_preserve_context_limits_and_room_for_facts(self):
+        self.workspace["work_config"].update(background_context_tokens=65536, max_output_tokens=8192)
+        with self.provider.transaction() as state:
+            state["config"].update(ollama_context_tokens=65536, max_output_tokens=8192)
+        self.save()
+        for index in range(6):
+            self.record(f"practice-{index}", f"Synthetic practice {index}: " + "a" * 1480)
+        fact = self.memory.remember("The synthetic project uses SQLite.")
+        for index in range(30):
+            self.record(f"fact-{index:02}", f"Synthetic project detail {index}.", kind="fact", origin="explicit")
+        prepared = self.store.prepare()
+        self.assertGreater(len(prepared["context"]["memories"]), 20)
+        self.assertLessEqual(len(prepared["context"]["memories"]), 40)
+        recalled = self.memory.recall("synthetic project SQLite", None, max_characters=12000)
+        notes = [record for record in recalled if record["kind"] == "lesson"]
+        self.assertGreater(sum(len(record["content"]) for record in notes), 4000)
+        self.assertLessEqual(sum(len(record["content"]) for record in notes), 8000)
+        self.assertLessEqual(sum(len(record["content"]) for record in recalled), 12000)
+        self.assertIn(fact["id"], {record["id"] for record in recalled})
+
+    def test_rich_inventory_leaves_room_for_task_titles_and_complete_feedback_exchange(self):
+        self.workspace["work_config"].update(background_context_tokens=65536, max_output_tokens=8192, auto_create_tasks=True)
+        with self.provider.transaction() as state:
+            state["config"].update(ollama_context_tokens=65536, max_output_tokens=8192)
+        self.workspace["tasks"] = [{"id": str(index), "title": f"Synthetic task {index}: " + "a" * 90, "done": False} for index in range(100)]
+        answer = "A synthetic answer to assess. " * 120 + "The final caveat matters."
+        self.pair("negative", answer, "negative", "The explanation missed a caveat.")
+        for index in range(40):
+            self.record(f"practice-{index:02}", f"Synthetic working practice {index}: " + "a" * 650)
+        prepared = self.store.prepare()
+        context = prepared["context"]
+        self.assertTrue(context["memories"])
+        self.assertTrue(context["existing_tasks"])
+        self.assertEqual(context["existing_tasks"][0]["title"], self.workspace["tasks"][0]["title"])
+        self.assertEqual(context["exchanges"][0]["assistant"], answer)
+        self.assertEqual(context["exchanges"][0]["feedback"]["rating"], "negative")
+        self.assertEqual(prepared["job"]["assistant_versions"][0]["id"], "negative-answer")
+        size = len((prepared["instructions"] + json.dumps(prepared["messages"]) + json.dumps(prepared["schema"])).encode("utf-8"))
+        self.assertLessEqual(size + 2048 + 8192, 65536)
+
+    def test_no_chat_reflection_can_review_full_memory_inventory(self):
+        self.workspace["chats"] = []
+        self.workspace["work_config"].update(background_context_tokens=65536, max_output_tokens=8192, auto_create_tasks=True)
+        with self.provider.transaction() as state:
+            state["config"].update(ollama_context_tokens=65536, max_output_tokens=8192)
+        self.save()
+        for index in range(40):
+            self.record(f"practice-{index:02}", f"Synthetic working practice {index}: " + "a" * 650)
+        context = self.store.prepare()["context"]
+        self.assertEqual(len(context["memories"]), 40)
+        self.assertEqual(context["existing_tasks"], [])
+        self.assertEqual(context["exchanges"], [])
+        self.assertTrue(context["self_review"])
 
     def test_curation_finds_an_older_matching_preference_without_pin_starvation(self):
         relevant_pin = self.record("pin-python", "The synthetic Python project needs verifiable changes.", kind="fact", origin="explicit", stamp="2020-01-01T00:00:00+01:00")

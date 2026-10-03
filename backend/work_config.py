@@ -1,6 +1,8 @@
 """Saved task models and bounded policy for local background work."""
 from pydantic import BaseModel, ConfigDict, Field
 
+MAX_BACKGROUND_OUTPUT_TOKENS = 32768
+
 
 class WorkConfig(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True, str_strip_whitespace=True)
@@ -16,14 +18,14 @@ class WorkConfig(BaseModel):
     debounce_seconds: int = Field(default=60, ge=0, le=3600)
     idle_seconds: int = Field(default=30, ge=0, le=3600)
     background_context_tokens: int = Field(default=32768, ge=8192, le=131072)
-    reflection_exchange_count: int = Field(default=8, ge=1, le=32)
-    reflection_context_characters: int = Field(default=24000, ge=1000, le=200000)
-    max_output_tokens: int = Field(default=4096, ge=1, le=16384)
+    reflection_exchange_count: int = Field(default=16, ge=1, le=32)
+    reflection_context_characters: int = Field(default=64000, ge=1000, le=200000)
+    max_output_tokens: int = Field(default=8192, ge=1, le=MAX_BACKGROUND_OUTPUT_TOKENS)
     max_jobs_per_day: int = Field(default=50, ge=0, le=1000)
-    max_tokens_per_day: int = Field(default=250000, ge=0, le=10000000)
+    max_tokens_per_day: int = Field(default=2000000, ge=0, le=10000000)
     timeout_seconds: int = Field(default=600, ge=1, le=1800)
-    memory_recall_count: int = Field(default=20, ge=0, le=100)
-    memory_recall_characters: int = Field(default=16000, ge=0, le=200000)
+    memory_recall_count: int = Field(default=40, ge=0, le=100)
+    memory_recall_characters: int = Field(default=32000, ge=0, le=200000)
 
 
 def config_value(workspace):

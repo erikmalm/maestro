@@ -244,15 +244,15 @@ class TaskReflectionTests(unittest.TestCase):
         self.assertEqual(self.store.status()["today_tokens"], 300)
 
     def test_dedup_uses_all_completed_tasks_and_dismissed_titles_outside_context(self):
-        self.workspace["tasks"] = [{"id": str(index), "title": "Synthetic unrelated work " + str(index), "details": "", "priority": "normal", "done": False, "created_at": self.store.stamp()} for index in range(55)]
+        self.workspace["tasks"] = [{"id": str(index), "title": "Synthetic unrelated work " + str(index), "details": "", "priority": "normal", "done": False, "created_at": self.store.stamp()} for index in range(105)]
         completed = {"id": "completed", **self.task_drafts[0], "done": True, "created_at": self.store.stamp()}
         self.workspace["tasks"].append(completed)
         dismiss_task(self.workspace, {**self.task_drafts[1], "initiated_by": "maestro"})
         self.task_drafts[0]["title"] = "  REVIEW the synthetic TEST plan!  "
         self.save()
         self.worker.step()
-        self.assertEqual(len(self.tasks()), 56)
-        self.assertLessEqual(len(self.contexts[0]["existing_tasks"]), 50)
+        self.assertEqual(len(self.tasks()), 106)
+        self.assertLessEqual(len(self.contexts[0]["existing_tasks"]), 100)
         self.assertNotIn(completed["title"], [task["title"] for task in self.contexts[0]["existing_tasks"]])
         self.assertEqual(self.store.status()["journal"][0]["tasks_created"], [])
         self.assertEqual(self.store.status()["journal"][0]["outcome"], "abstained")

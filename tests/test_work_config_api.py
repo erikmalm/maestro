@@ -173,7 +173,7 @@ class WorkConfigAPITests(unittest.TestCase):
     def test_larger_saved_limits_and_legacy_settings_preserve_explicit_preferences(self):
         config = self.client.get("/api/work-config").json()["config"]
         config.update(background_context_tokens=65536, reflection_exchange_count=24,
-                      reflection_context_characters=80000, max_output_tokens=8192,
+                      reflection_context_characters=80000, max_output_tokens=32768,
                       memory_recall_count=40, memory_recall_characters=64000)
         saved = self.client.put("/api/work-config", headers=self.headers, json=config)
         self.assertEqual(saved.status_code, 200, saved.text)
@@ -186,7 +186,10 @@ class WorkConfigAPITests(unittest.TestCase):
         self.assertEqual(legacy["max_jobs_per_day"], 3)
         self.assertEqual(legacy["max_output_tokens"], 512)
         self.assertEqual(legacy["background_context_tokens"], 32768)
-        self.assertEqual(legacy["reflection_exchange_count"], 8)
+        self.assertEqual(legacy["reflection_exchange_count"], 16)
+        self.assertEqual(legacy["max_tokens_per_day"], 2000000)
+        self.assertEqual(legacy["reflection_context_characters"], 64000)
+        self.assertEqual(legacy["memory_recall_characters"], 32000)
 
 
 if __name__ == "__main__":

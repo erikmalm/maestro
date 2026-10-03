@@ -205,7 +205,7 @@ export default function WorkSetup({
                   1000,
                   200000,
                 ],
-                ["max_output_tokens", "Reflection output tokens", 1, 16384],
+                ["max_output_tokens", "Reflection output tokens", 1, 32768],
                 ["max_jobs_per_day", "Daily reflection jobs", 0, 1000],
                 ["max_tokens_per_day", "Daily reflection tokens", 0, 10000000],
                 ["debounce_seconds", "Debounce (seconds)", 0, 3600],
@@ -224,10 +224,11 @@ export default function WorkSetup({
           <p className="reflection-note">
             Set either memory limit to 0 to turn off recall. Saved memory is
             used only in local chat with hosted web search off. Reflection
-            limits apply to each call and the daily allowance. Larger contexts
-            let reviews read more of each exchange and use more memory.
-            Conversation review characters are shared across the sampled
-            exchanges; Ollama's context setting can lower the effective limit.
+            output is also capped by Model connection. Reviewed exchanges,
+            memory text and output share the model's context; larger contexts
+            use more memory. Conversation review characters are shared across
+            the sampled exchanges. A larger daily token allowance permits more
+            work without requiring longer answers.
           </p>
         </details>
         <div className="reflection-actions">

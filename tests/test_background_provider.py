@@ -175,10 +175,13 @@ class ClaimedProviderTests(unittest.TestCase):
 
     def test_two_phases_use_separate_saved_models_and_schemas_with_one_job_budget(self):
         self.workspace["work_config"].update(auto_curate=True, memory_model="form:7b", reflection_model="review:7b",
-                                             max_jobs_per_day=1, max_tokens_per_day=100000)
+                                             max_jobs_per_day=1, max_tokens_per_day=100000,
+                                             background_context_tokens=65536, max_output_tokens=32768)
         self.store.recover()
         with self.store.transaction() as db:
             db.execute("UPDATE workspace SET value=?", (json.dumps(self.workspace),))
+        self.provider.configure({**self.provider.read_state()["config"], "ollama_context_tokens": 131072,
+                                 "max_output_tokens": 32768}, "", False)
         self.prepared = self.store.prepare()
         draft = {"operation": "add", "memory_id": "", "kind": "preference", "scope": "conversation",
                  "content": "I prefer concise Swedish replies.", "source_message_id": "synthetic-user", "evidence": "I prefer concise Swedish replies."}
@@ -206,6 +209,8 @@ class ClaimedProviderTests(unittest.TestCase):
         dispatches = [call for call in self.calls if call[1] == "/api/chat"]
         self.assertEqual([call[2]["model"] for call in dispatches], ["form:7b", "review:7b"])
         self.assertEqual([call[2]["format"] for call in dispatches], [self.prepared["schema"], review["schema"]])
+        self.assertEqual([call[2]["options"]["num_predict"] for call in dispatches], [32768, 32768])
+        self.assertEqual([call[2]["options"]["num_ctx"] for call in dispatches], [65536, 65536])
         self.assertTrue(all(call[2]["keep_alive"] == 0 and "tools" not in call[2] for call in dispatches))
         self.assertEqual([call[3] for call in dispatches], [deadline, deadline])
         ledger = self.provider.read_state()["ledger"]
@@ -214,6 +219,8 @@ class ClaimedProviderTests(unittest.TestCase):
         self.assertEqual(ledger[0]["attempt"], ledger[1]["attempt"])
         self.assertEqual(self.store.status()["today_jobs"], 1)
         self.assertEqual(self.store.status()["today_tokens"], 80)
+        self.assertEqual(self.provider.read_state()["config"]["ollama_context_tokens"], 131072)
+        self.assertEqual(self.provider.read_state()["config"]["max_output_tokens"], 32768)
         self.assertEqual(MemoryStore(self.database, timezone.utc).list()[0]["origin"], "curated")
 
     def test_background_kind_schema_and_deadline_are_checked_before_reserving(self):

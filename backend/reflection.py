@@ -455,6 +455,10 @@ class ReflectionStore:
             cap = min(config["ollama_context_tokens"], policy["background_context_tokens"], workspace["limits"]["max_tokens"]) - output - 2048
             # Leave room for a draft, then verify the actual review before dispatch.
             formation_cap = cap - min(output * 2, max(0, cap // 3)) if automatic else cap
+            # Inventory must leave room for new evidence and task titles when present.
+            source_space = formation_cap // 4 if job["sources"] else 0
+            task_space = min(12000, formation_cap // 4) if job["tasks_enabled"] and workspace.get("tasks") else 0
+            memory_cap = formation_cap - source_space - task_space
             instructions, schema = instructions_for(job), schema_for(job)
             role = BASE_ROLE if job["mode"] == "periodic" else "Sources are USER statements. I/my refers to the user, never Maestro. Curate user memory; do not describe the assistant."
             assessment = {"self_review": SELF_REVIEW} if job["mode"] == "periodic" else {}
@@ -464,18 +468,18 @@ class ReflectionStore:
                         and (record["scope"] == "workspace" or (job["mode"] != "periodic" and record["chat_id"] == job["chat_id"]))]
             if automatic:
                 memories = self.ordered_memories(db, job, memories, source_text)
-            selected, memory_context, memory_space = [], [], min(12000, policy["reflection_context_characters"])
+            selected, memory_context, memory_space = [], [], min(32000, policy["reflection_context_characters"])
             for record in memories if automatic else []:
                 entry = {key: record[key] for key in ("id", "kind", "origin", "scope", "content", "pinned")}
                 if record["kind"] in ("fact", "preference"):
                     entry["evidence"] = record["evidence"]
                 size = len(record["content"]) + len(entry.get("evidence") or "")
                 proposed = [{"role": "user", "content": json.dumps({"role": role, "sources": [], "memories": [*memory_context, entry], **assessment})}]
-                if size <= memory_space and len((instructions + json.dumps(proposed) + json.dumps(schema)).encode("utf-8")) <= formation_cap - 1000:
+                if size <= memory_space and len((instructions + json.dumps(proposed) + json.dumps(schema)).encode("utf-8")) <= memory_cap - 1000:
                     selected.append(record)
                     memory_context.append(entry)
                     memory_space -= size
-                if len(selected) == 20:
+                if len(selected) == 40:
                     break
             job["editable_memory_ids"] = [record["id"] for record in selected if not record["pinned"] and (job["mode"] == "periodic" or record["kind"] in ("fact", "preference"))]
             if job["mode"] == "curate" and any(record["scope"] == "conversation" for record in memories):
@@ -487,9 +491,9 @@ class ReflectionStore:
                 for task in workspace.get("tasks", []):
                     entry = {"title": task["title"], "done": task["done"]}
                     proposed = [{"role": "user", "content": json.dumps({**context, "existing_tasks": [*context["existing_tasks"], entry]})}]
-                    if len(context["existing_tasks"]) >= 50 or len(json.dumps(context["existing_tasks"])) + len(json.dumps(entry)) > 6000:
+                    if len(context["existing_tasks"]) >= 100 or len(json.dumps(context["existing_tasks"])) + len(json.dumps(entry)) > 12000:
                         break
-                    if len((instructions + json.dumps(proposed) + json.dumps(schema)).encode("utf-8")) <= formation_cap:
+                    if len((instructions + json.dumps(proposed) + json.dumps(schema)).encode("utf-8")) <= formation_cap - source_space:
                         context["existing_tasks"].append(entry)
             refs, available, data = [], policy["reflection_context_characters"], []
             if job["mode"] == "periodic":

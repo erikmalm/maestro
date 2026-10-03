@@ -273,7 +273,7 @@ class MemoryStore:
             if db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='memory_barriers'").fetchone():
                 db.execute("DELETE FROM memory_barriers WHERE chat_id=?", (chat_id,))
 
-    def recall(self, query, chat_id, local=True, limit=20, max_characters=16000):
+    def recall(self, query, chat_id, local=True, limit=40, max_characters=32000):
         if not local or limit <= 0 or max_characters <= 0:
             return []
         query_terms = terms(query)
@@ -281,7 +281,7 @@ class MemoryStore:
                   if record["scope"] == "workspace" or record["chat_id"] == chat_id]
         ranked.sort(key=lambda item: (-item[0], item[1]["id"]))
         selected, remaining = [], min(max_characters, MAX_RECALL_CHARACTERS)
-        reflective_remaining = min(4000, remaining)
+        reflective_remaining = min(8000, remaining)
         for relevance, record in ranked:
             if record["kind"] in ("identity", "lesson") and len(record["content"]) > reflective_remaining:
                 continue

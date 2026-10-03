@@ -32,7 +32,7 @@ class ReflectionAPITests(unittest.TestCase):
         backend.provider().configure({**DEFAULT, "protocol": "ollama", "model": "synthetic:7b",
                                       "base_url": "http://127.0.0.1:11434", "ollama_context_tokens": 8192}, "", False)
         with backend.workspace_transaction(with_db=True) as (workspace, db):
-            workspace["work_config"] = WorkConfig(enabled=True, debounce_seconds=0, idle_seconds=0).model_dump()
+            workspace["work_config"] = WorkConfig(enabled=True, debounce_seconds=0, idle_seconds=0, max_output_tokens=512).model_dump()
             chat = backend.create_chat_record("Synthetic source", [
                 {"id": "source-user", "role": "user", "text": content},
                 {"id": "source-assistant", "role": "assistant", "text": "Synthetic reply."},
