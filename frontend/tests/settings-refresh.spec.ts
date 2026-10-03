@@ -415,7 +415,7 @@ for (const change of [
       await expect(key).toHaveValue("");
     } else {
       const search = page.locator(".ollama-search-setup");
-      await expect(search.getByText(/1 \/ 20 searches today/)).toBeVisible();
+      await expect(search.getByText(/1 \/ 20 searches today/)).toHaveCount(0);
       if (change === "search authentication") {
         await expect(search.locator(".badge")).toHaveText("Disabled");
         await expect(search.getByText(/Search connection tested/)).toHaveCount(
@@ -432,6 +432,19 @@ for (const change of [
           page.getByRole("button", { name: "Test search connection" }),
         ).toBeDisabled();
       }
+      await page
+        .getByRole("button", { name: "Open usage", exact: true })
+        .click();
+      const usage = page.getByRole("dialog", {
+        name: "Usage & limits",
+        exact: true,
+      });
+      await expect(
+        usage.getByText("Web searches today", { exact: true }).locator(".."),
+      ).toContainText("1 / 20");
+      await usage.getByRole("button", { name: "Close dialog" }).click();
+      await expect(draft).toHaveValue("30");
+      await expect(key).toHaveValue("synthetic-unsaved-key");
     }
   });
 }

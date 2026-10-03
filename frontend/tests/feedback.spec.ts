@@ -239,7 +239,7 @@ test("feedback clear refreshes derived memory and journal while paused without r
   await page.getByRole("button", { name: "Clear feedback" }).click();
   await expect.poll(fixture.held).toBeTruthy();
   const calls = fixture.workspaceCalls();
-  await page.getByRole("button", { name: "Settings", exact: true }).click();
+  await page.getByRole("button", { name: "Memory", exact: true }).click();
   await page
     .locator(".memory-setup")
     .getByRole("button", { name: "List", exact: true })
@@ -249,18 +249,24 @@ test("feedback clear refreshes derived memory and journal while paused without r
       exact: true,
     }),
   ).toBeVisible();
+  await page.getByRole("button", { name: "Settings", exact: true }).click();
   await page.getByText("Work limits & memory recall", { exact: true }).click();
   await page.getByLabel("Daily reflection jobs", { exact: true }).fill("93");
   await fixture.release();
+  await expect(
+    page.getByLabel("Daily reflection jobs", { exact: true }),
+  ).toHaveValue("93");
+  await expect(page.getByText(/Unsaved changes/)).toBeVisible();
+  await page.getByRole("button", { name: "Memory", exact: true }).click();
   await expect(
     page.getByText("A synthetic practice derived from feedback.", {
       exact: true,
     }),
   ).toHaveCount(0);
-  await page.getByText("Private reflection journal", { exact: true }).click();
   await expect(
     page.getByText("No reflections recorded yet.", { exact: true }),
   ).toBeVisible();
+  await page.getByRole("button", { name: "Settings", exact: true }).click();
   await expect(
     page.getByLabel("Daily reflection jobs", { exact: true }),
   ).toHaveValue("93");
@@ -326,7 +332,7 @@ test("expanded review and text limits are available in the forms", async ({
   await expect(
     page.getByRole("textbox", { name: "Message Maestro" }),
   ).toHaveAttribute("maxlength", "32000");
-  await page.getByRole("button", { name: "Settings", exact: true }).click();
+  await page.getByRole("button", { name: "Memory", exact: true }).click();
   const memory = page.locator("section").filter({
     has: page.getByRole("heading", { name: "Private memory", exact: true }),
   });
@@ -339,6 +345,7 @@ test("expanded review and text limits are available in the forms", async ({
   await expect(
     memory.getByRole("textbox", { name: "What should Maestro remember?" }),
   ).toHaveAttribute("maxlength", "8000");
+  await page.getByRole("button", { name: "Settings", exact: true }).click();
   await page.getByText("Work limits & memory recall", { exact: true }).click();
   for (const [label, minimum, maximum] of [
     ["Background context tokens", "8192", "131072"],

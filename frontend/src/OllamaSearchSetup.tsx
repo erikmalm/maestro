@@ -84,9 +84,8 @@ export default function OllamaSearchSetup({
         }}
       >
         <p className="reflection-note">
-          {status.searches_today} / {status.config.daily_limit} searches today ·{" "}
-          {status.remaining_today} remaining. One search maximum per message.
-          Search fees are not reported or included in LLM cost estimates.
+          One search maximum per message. Search fees are not reported or
+          included in LLM cost estimates.
         </p>
         {inCooldown && status.paused_until && (
           <p role="status" className="reflection-note">

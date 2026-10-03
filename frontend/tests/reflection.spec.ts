@@ -96,7 +96,7 @@ async function reflectionFixture(page: Page) {
     } else throw new Error(`Unexpected reflection request: ${path}`);
   });
   await page.reload();
-  await page.getByRole("button", { name: "Settings", exact: true }).click();
+  await page.getByRole("button", { name: "Memory", exact: true }).click();
   await page
     .locator(".memory-setup")
     .getByRole("button", { name: "List", exact: true })
@@ -111,6 +111,157 @@ async function reflectionFixture(page: Page) {
     pending: () => hold,
   };
 }
+
+test("Settings keeps memory evidence and reflection history on the separate Memory page", async ({
+  page,
+}) => {
+  const fixture = await reflectionFixture(page);
+  const content = "A synthetic preference reserved for the Memory page.";
+  const evidence = "I prefer the synthetic Memory page for reviewing evidence.";
+  const summary = "A synthetic reflection entry reserved for Memory.";
+  fixture.state.memories!.push({
+    id: "separated-memory",
+    content,
+    evidence,
+    kind: "preference",
+    origin: "curated",
+    pinned: false,
+    scope: "workspace",
+    chat_id: "source-chat",
+    source_message_id: "separated-source",
+    created_at: "2026-10-03",
+    updated_at: "2026-10-03",
+  });
+  fixture.work.queued = 2;
+  fixture.work.today_jobs = 3;
+  fixture.work.today_tokens = 1234;
+  fixture.work.journal = [
+    {
+      id: "separated-journal",
+      created_at: "2026-10-03",
+      kind: "reflection",
+      summary,
+      changes: [],
+      sources: [{ chat_id: "source-chat", message_id: "separated-source" }],
+      models: ["synthetic-reflection", "synthetic-memory"],
+    },
+  ];
+  await page.reload();
+  await page.getByRole("button", { name: "Settings", exact: true }).click();
+  const settings = page.getByRole("main").filter({
+    has: page.getByRole("heading", { name: "Settings", exact: true }),
+  });
+  await expect(
+    page.getByRole("heading", { name: "Settings", exact: true }),
+  ).toBeVisible();
+  await expect(page.getByRole("main")).toHaveCount(1);
+  await expect(page.locator(".memory-setup")).toBeHidden();
+  await expect(settings.locator(".memory-setup")).toHaveCount(0);
+  await expect(
+    page.getByRole("heading", {
+      name: "Private reflection journal",
+      exact: true,
+    }),
+  ).toHaveCount(0);
+  for (const text of [
+    content,
+    evidence,
+    summary,
+    "Synthetic conversation preference",
+  ])
+    await expect(settings.getByText(text, { exact: true })).toHaveCount(0);
+  await expect(page.getByText(summary, { exact: true })).toBeHidden();
+  await expect(page.getByText(/2 queued/)).toBeHidden();
+  await expect(
+    page.getByText("Estimated spend today", { exact: true }),
+  ).toHaveCount(0);
+  await page.getByText("Work limits & memory recall", { exact: true }).click();
+  await page
+    .getByLabel("Chat idle time (seconds)", { exact: true })
+    .fill("123");
+  await page.getByRole("button", { name: "Open memory", exact: true }).click();
+  const memory = page.locator(".memory-setup");
+  await expect(memory).toBeVisible();
+  await memory.getByRole("button", { name: "List", exact: true }).click();
+  const entry = memory.locator(".memory-entry").filter({ hasText: content });
+  await expect(entry.getByText(content, { exact: true })).toBeVisible();
+  await entry.getByText("Source", { exact: true }).click();
+  await expect(entry.getByText(evidence, { exact: true })).toBeVisible();
+  await expect(page.getByText(summary, { exact: true })).toBeVisible();
+  await expect(page.getByText(/2 queued/)).toBeVisible();
+  await memory
+    .getByLabel("What should Maestro remember?")
+    .fill("Keep this unsaved memory draft.");
+  await page
+    .getByRole("button", { name: "Memory settings", exact: true })
+    .click();
+  await expect(
+    page.getByLabel("Chat idle time (seconds)", { exact: true }),
+  ).toHaveValue("123");
+  await expect(page.getByText(/Unsaved changes/)).toBeVisible();
+  await expect(memory).toBeHidden();
+  await expect(settings.locator(".memory-setup")).toHaveCount(0);
+  await page.getByRole("button", { name: "Open memory", exact: true }).click();
+  await expect(memory.getByLabel("What should Maestro remember?")).toHaveValue(
+    "Keep this unsaved memory draft.",
+  );
+});
+
+test("uncertain charges are inspected and reconciled in the usage dialog", async ({
+  page,
+}) => {
+  const fixture = await reflectionFixture(page);
+  fixture.state.usage.uncertain = [
+    {
+      id: "synthetic-uncertain",
+      at: "2026-10-03T12:00:00Z",
+      reserved_usd: 0.6,
+    },
+  ];
+  fixture.state.usage.reserved_usd = 0.6;
+  let reconciled = 0;
+  await page.route(
+    "**/api/provider/charges/synthetic-uncertain/reconcile",
+    async (route) => {
+      expect(route.request().method()).toBe("POST");
+      expect(route.request().postDataJSON()).toEqual({ billed_usd: 0.25 });
+      expect(route.request().headers()["x-maestro-csrf"]).toBe(
+        "synthetic-csrf",
+      );
+      reconciled += 1;
+      fixture.state.usage.uncertain = [];
+      fixture.state.usage.reserved_usd = 0;
+      await route.fulfill({ json: fixture.state });
+    },
+  );
+  await page.reload();
+  await page.getByRole("button", { name: "Settings", exact: true }).click();
+  await expect(
+    page.getByRole("heading", { name: "Spending limits", exact: true }),
+  ).toBeVisible();
+  await expect(
+    page.getByLabel("Verified billed USD", { exact: true }),
+  ).toHaveCount(0);
+  await expect(page.getByText("Input tokens", { exact: true })).toHaveCount(0);
+  await page.getByRole("button", { name: "Open usage", exact: true }).click();
+  const dialog = page.getByRole("dialog", {
+    name: "Usage & limits",
+    exact: true,
+  });
+  await expect(dialog.getByText("Input tokens", { exact: true })).toBeVisible();
+  await expect(dialog.getByText(/Unknown charge from/)).toContainText(
+    "$0.60 reserved",
+  );
+  await dialog.getByLabel("Verified billed USD", { exact: true }).fill("0.25");
+  await dialog
+    .getByRole("button", { name: "Reconcile charge", exact: true })
+    .click();
+  await expect(dialog.locator(".charge-form")).toHaveCount(0);
+  expect(reconciled).toBe(1);
+  await expect(dialog.getByText(/Reserved or uncertain spend:/)).toContainText(
+    "$0.00",
+  );
+});
 
 test("reflection suggestions require acceptance, preserve scope, and stay accepted or rejected after reload", async ({
   page,
@@ -164,7 +315,7 @@ test("reflection suggestions require acceptance, preserve scope, and stay accept
     memory.getByRole("button", { name: "Accept memory", exact: true }),
   ).toHaveCount(0);
   await page.reload();
-  await page.getByRole("button", { name: "Settings", exact: true }).click();
+  await page.getByRole("button", { name: "Memory", exact: true }).click();
   await page
     .locator(".memory-setup")
     .getByRole("button", { name: "List", exact: true })
@@ -199,6 +350,7 @@ test("automatic memory, periodic reflection and the private journal stay inspect
     "Reflect periodically on identity and working style",
   );
   const interval = work.getByLabel("Reflection interval (minutes)");
+  await page.getByRole("button", { name: "Settings", exact: true }).click();
   await expect(periodic).toBeDisabled();
   await expect(interval).toBeDisabled();
   await work.getByLabel("AI curates memory automatically").check();
@@ -208,6 +360,8 @@ test("automatic memory, periodic reflection and the private journal stay inspect
     .getByRole("button", { name: "Save task settings", exact: true })
     .click();
   await expect(work.getByRole("status")).toHaveText("Task settings saved.");
+  await page.getByRole("button", { name: "Memory", exact: true }).click();
+  await memory.getByRole("button", { name: "List", exact: true }).click();
   await expect(memory.getByLabel("What should Maestro remember?")).toBeHidden();
   fixture.work.candidates = [];
   const records: Memory[] = [
@@ -263,8 +417,6 @@ test("automatic memory, periodic reflection and the private journal stay inspect
       models: ["qwen2.5:7b", "gpt-oss:20b"],
     },
   ];
-  await work.getByText("Work limits & memory recall", { exact: true }).click();
-  await work.getByLabel("Daily reflection jobs", { exact: true }).fill("123");
   await page.clock.fastForward(3000);
   const fact = memory
     .locator(".memory-entry")
@@ -290,26 +442,31 @@ test("automatic memory, periodic reflection and the private journal stay inspect
       exact: true,
     }),
   ).toBeVisible();
-  await work.getByText("Private reflection journal", { exact: true }).click();
+  const journal = page.locator("section").filter({
+    has: page.getByRole("heading", {
+      name: "Private reflection journal",
+      exact: true,
+    }),
+  });
   await expect(
-    work.getByText("Kept the project fact and clarified working style.", {
+    journal.getByText("Kept the project fact and clarified working style.", {
       exact: true,
     }),
   ).toBeVisible();
-  await expect(work.getByText(/qwen2.5:7b → gpt-oss:20b/)).toBeVisible();
-  await work
+  await expect(journal.getByText(/qwen2.5:7b → gpt-oss:20b/)).toBeVisible();
+  await journal
     .getByText("3 memory changes · 1 source messages", { exact: true })
     .click();
   await expect(
-    work.getByText(/Added identity: I favor small, measured changes/),
+    journal.getByText(/Added identity: I favor small, measured changes/),
   ).toBeVisible();
   await expect(
-    work.getByText("Forgot preference: memory obsolete-preference", {
+    journal.getByText("Forgot preference: memory obsolete-preference", {
       exact: true,
     }),
   ).toBeVisible();
   await expect(
-    work.getByText("Source conversation · message source-style", {
+    journal.getByText("Source conversation · message source-style", {
       exact: true,
     }),
   ).toBeVisible();
@@ -328,24 +485,23 @@ test("automatic memory, periodic reflection and the private journal stay inspect
   await expect(
     memory.getByText(/Working identity · User-pinned/),
   ).toBeVisible();
-  await expect(
-    work.getByLabel("Daily reflection jobs", { exact: true }),
-  ).toHaveValue("123");
   await fact.getByRole("button", { name: "Forget saved memory" }).click();
   await expect(
     memory.getByText(records[0].content, { exact: true }),
   ).toHaveCount(0);
   await page.reload();
   await page.getByRole("button", { name: "Settings", exact: true }).click();
-  await page
-    .locator(".memory-setup")
-    .getByRole("button", { name: "List", exact: true })
-    .click();
   await expect(
     work.getByLabel("AI curates memory automatically"),
   ).toBeChecked();
   await expect(periodic).toBeChecked();
   await expect(interval).toHaveValue("120");
+  await work.getByLabel("AI curates memory automatically").uncheck();
+  await expect(periodic).not.toBeChecked();
+  await expect(periodic).toBeDisabled();
+  await expect(interval).toBeDisabled();
+  await page.getByRole("button", { name: "Memory", exact: true }).click();
+  await memory.getByRole("button", { name: "List", exact: true }).click();
   await expect(
     memory.getByText("I make small changes and verify their effect.", {
       exact: true,
@@ -354,10 +510,6 @@ test("automatic memory, periodic reflection and the private journal stay inspect
   await expect(
     memory.getByText(records[0].content, { exact: true }),
   ).toHaveCount(0);
-  await work.getByLabel("AI curates memory automatically").uncheck();
-  await expect(periodic).not.toBeChecked();
-  await expect(periodic).toBeDisabled();
-  await expect(interval).toBeDisabled();
 });
 
 test("reflection polling preserves drafts, avoids overlap, and ignores late status after pause", async ({
@@ -371,6 +523,7 @@ test("reflection polling preserves drafts, avoids overlap, and ignores late stat
       exact: true,
     }),
   });
+  await page.getByRole("button", { name: "Settings", exact: true }).click();
   await work.getByText("Work limits & memory recall", { exact: true }).click();
   await work
     .getByLabel("Chat idle time (seconds)", { exact: true })
@@ -382,7 +535,10 @@ test("reflection polling preserves drafts, avoids overlap, and ignores late stat
   expect(fixture.polls()).toBe(1);
   fixture.work.queued = 2;
   await fixture.pending()!.fulfill({ json: fixture.work });
-  await expect(work.getByText(/2 queued/)).toBeVisible();
+  await expect(page.getByText(/2 queued/)).toBeHidden();
+  await page.getByRole("button", { name: "Memory", exact: true }).click();
+  await expect(page.getByText(/2 queued/)).toBeVisible();
+  await page.getByRole("button", { name: "Settings", exact: true }).click();
   await expect(
     work.getByLabel("Chat idle time (seconds)", { exact: true }),
   ).toHaveValue("123");
@@ -418,10 +574,6 @@ test("reflection polling preserves drafts, avoids overlap, and ignores late stat
   fixture.work.config.enabled = true;
   await page.reload();
   await page.getByRole("button", { name: "Settings", exact: true }).click();
-  await page
-    .locator(".memory-setup")
-    .getByRole("button", { name: "List", exact: true })
-    .click();
   fixture.holdNext();
   await page.clock.fastForward(3000);
   await expect.poll(fixture.polls).toBe(3);

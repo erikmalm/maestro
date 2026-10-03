@@ -32,7 +32,7 @@ flowchart LR
     Chat --> Search[Optional hosted Ollama web search]
 ```
 
-The built frontend is served by FastAPI on one loopback origin. Workspace contains chat, Tasks contains manual to-dos, and Settings configures the active model, credentials, search and limits. The header and usage view report actual model usage and estimated spend.
+The built frontend is served by FastAPI on one loopback origin. Workspace contains chat, Tasks contains manual to-dos, and Memory contains the map/list, source evidence, proposals and reflection journal. Settings configures models, credentials, search, reflection and limits, with links to Memory and usage. The header and usage view report actual model usage and estimated spend.
 
 `backend/app.py` owns session/CSRF protection, validation, CRUD and the application lifespan. `backend/provider.py` owns the single connection, shared generation slot and usage ledger. `backend/reflection.py` owns durable idle jobs, source validation, two-stage curation, scheduled working notes and a private journal. `backend/work_config.py` validates private task models and worker policy; `backend/memory.py` owns accepted records and read-only recall. `backend/web_search.py` owns search readiness and limits. Reads avoid writes after initialization. SQLite writes use immediate transactions; generation runs outside locks. One worker runs inside the sole API process under exclusive workspace ownership.
 

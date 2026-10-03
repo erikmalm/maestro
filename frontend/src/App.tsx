@@ -4,6 +4,7 @@ import Reply from "./Reply";
 import AnswerFeedback from "./AnswerFeedback";
 import MemorySetup from "./MemorySetup";
 import WorkSetup from "./WorkSetup";
+import ReflectionJournal from "./ReflectionJournal";
 import {
   ArrowRight,
   Check,
@@ -13,6 +14,7 @@ import {
   LoaderCircle,
   Menu,
   MessageCircle,
+  Network,
   Pencil,
   Plus,
   Settings2,
@@ -22,11 +24,18 @@ import {
   X,
 } from "lucide-react";
 import * as api from "./api";
-import type { Limits, MessageFeedback, Task, Workspace } from "./api";
+import type {
+  Limits,
+  MessageFeedback,
+  Task,
+  WorkConfig,
+  WorkStatus,
+  Workspace,
+} from "./api";
 import ProviderSetup from "./ProviderSetup";
 import OllamaSearchSetup from "./OllamaSearchSetup";
 
-type Page = "workspace" | "tasks" | "settings";
+type Page = "workspace" | "tasks" | "memory" | "settings";
 type Panel = "task" | "usage" | "rename-chat" | "delete-chat" | null;
 const money = (value: number) =>
   `$${value.toFixed(value > 0 && value < 0.01 ? 4 : 2)}`;
@@ -35,6 +44,7 @@ const tokens = (value: number) =>
 const navigation = [
   { id: "workspace", name: "Workspace", icon: MessageCircle },
   { id: "tasks", name: "Tasks", icon: CheckSquare },
+  { id: "memory", name: "Memory", icon: Network },
   { id: "settings", name: "Settings", icon: Settings2 },
 ] as const;
 
@@ -282,6 +292,12 @@ export default function App() {
   const navigationMenu = useRef<HTMLButtonElement>(null);
   const chatEnd = useRef<HTMLDivElement>(null);
   const workspaceRevision = useRef(0);
+  const reflectionPolling = useRef(false);
+  const [reflectionActions, setReflectionActions] = useState(0);
+  const reflectionVisible = page === "settings" || page === "memory";
+  const reflectionEnabled = workspace?.work?.config.enabled;
+  const reflectionPending =
+    !!workspace?.work && (workspace.work.queued > 0 || workspace.work.running);
 
   useEffect(() => {
     let active = true;
@@ -305,6 +321,53 @@ export default function App() {
   useEffect(() => {
     chatEnd.current?.scrollIntoView({ behavior: "smooth", block: "nearest" });
   }, [workspace?.messages.length]);
+  useEffect(() => {
+    if (
+      !reflectionVisible ||
+      busy ||
+      feedbackSaving ||
+      reflectionActions ||
+      !(reflectionEnabled || reflectionPending)
+    )
+      return;
+    let active = true;
+    async function poll() {
+      if (!active || document.hidden || reflectionPolling.current) return;
+      reflectionPolling.current = true;
+      const revision = workspaceRevision.current;
+      try {
+        const work = await api.loadReflection();
+        if (active && !document.hidden) applyReflection(work, revision);
+      } catch (reason) {
+        if (
+          active &&
+          !document.hidden &&
+          revision === workspaceRevision.current
+        )
+          setError(
+            reason instanceof Error
+              ? reason.message
+              : "Could not refresh reflection.",
+          );
+      } finally {
+        reflectionPolling.current = false;
+      }
+    }
+    const timer = window.setInterval(() => void poll(), 3000);
+    document.addEventListener("visibilitychange", poll);
+    return () => {
+      active = false;
+      window.clearInterval(timer);
+      document.removeEventListener("visibilitychange", poll);
+    };
+  }, [
+    reflectionVisible,
+    busy,
+    feedbackSaving,
+    reflectionActions,
+    reflectionEnabled,
+    reflectionPending,
+  ]);
   useEffect(() => {
     if (!mobileNav) return;
     const mobile = window.matchMedia("(max-width: 760px)");
@@ -374,6 +437,39 @@ export default function App() {
       .catch((reason: Error) => {
         if (workspaceRevision.current === revision) setError(reason.message);
       });
+  }
+  function applyReflection(work: WorkStatus, revision: number) {
+    setWorkspace((current) =>
+      current && workspaceRevision.current === revision
+        ? {
+            ...current,
+            work,
+            ...(work.memories ? { memories: work.memories } : {}),
+          }
+        : current,
+    );
+  }
+  async function reflectionAction<T>(action: () => Promise<T>) {
+    workspaceRevision.current += 1;
+    setReflectionActions((count) => count + 1);
+    try {
+      return await action();
+    } catch (reason) {
+      refreshWorkspace();
+      throw reason;
+    } finally {
+      setReflectionActions((count) => count - 1);
+    }
+  }
+  function saveWorkConfig(config: WorkConfig) {
+    return reflectionAction(async () => {
+      const revision = workspaceRevision.current;
+      const work = await api.saveWorkConfig(config);
+      if (workspaceRevision.current === revision)
+        applyReflection(work, revision);
+      else refreshWorkspace();
+      return work;
+    });
   }
   async function perform(
     key: string,
@@ -528,7 +624,6 @@ export default function App() {
     (thread) => thread.id === workspace.active_chat_id,
   );
   const local = workspace.provider.config.protocol === "ollama";
-  const statusRevision = workspaceRevision.current;
   const requestedModel = local ? model : "";
   const defaultModel = workspace.provider.config.model;
   const selectedModel = requestedModel || defaultModel;
@@ -948,89 +1043,44 @@ export default function App() {
           </main>
         )}
 
-        {page === "settings" && (
-          <main className="page-content">
+        {reflectionVisible && (
+          <main className="page-content" hidden={page !== "settings"}>
             <div className="page-heading">
               <div>
                 <h1>Settings</h1>
                 <p>Configure your model, optional search and usage limits.</p>
               </div>
+              <button
+                className="button secondary"
+                onClick={() => navigate("memory")}
+              >
+                <Network size={16} />
+                Open memory
+              </button>
             </div>
             <div className="settings-layout">
               <div className="card settings-card">
-                <h2>Usage & limits</h2>
-                <UsageDetails workspace={workspace} />
+                <h2>Spending limits</h2>
                 <LimitsForm
                   limits={workspace.limits}
                   onSave={(limits) => void saveLimits(limits)}
                   busy={!!busy}
                 />
-                {workspace.usage.uncertain.map((entry) => (
-                  <form
-                    className="entry-form charge-form"
-                    key={entry.id}
-                    onSubmit={(event) => {
-                      event.preventDefault();
-                      const data = new FormData(event.currentTarget);
-                      void perform("reconcile", () =>
-                        api.reconcileProviderCharge(
-                          entry.id,
-                          Number(data.get("cost")),
-                        ),
-                      );
-                    }}
-                  >
-                    <p>
-                      Unknown charge from {new Date(entry.at).toLocaleString()}:{" "}
-                      {money(entry.reserved_usd)} reserved. Confirm actual
-                      billed USD from your provider before retrying.
-                    </p>
-                    <label>
-                      Verified billed USD
-                      <input
-                        name="cost"
-                        type="number"
-                        required
-                        min="0"
-                        max="100000"
-                        step="any"
-                      />
-                    </label>
-                    <button className="button secondary" disabled={!!busy}>
-                      Reconcile charge
-                    </button>
-                  </form>
-                ))}
+                <button
+                  className="button secondary"
+                  onClick={() => setPanel("usage")}
+                >
+                  Open usage
+                </button>
               </div>
               <div className="settings-side">
                 {workspace.work && (
                   <WorkSetup
                     initialStatus={workspace.work}
                     provider={workspace.provider}
-                    chats={workspace.chats}
-                    onChange={(work) => {
-                      if (workspaceRevision.current === statusRevision)
-                        setWorkspace(
-                          (current) =>
-                            current && {
-                              ...current,
-                              work,
-                              ...(work.memories
-                                ? { memories: work.memories }
-                                : {}),
-                            },
-                        );
-                    }}
+                    onSave={saveWorkConfig}
                   />
                 )}
-                <MemorySetup
-                  memories={workspace.memories ?? []}
-                  candidates={workspace.work?.candidates ?? []}
-                  automatic={workspace.work?.config.auto_curate ?? false}
-                  chats={workspace.chats}
-                  chatId={workspace.active_chat_id}
-                  onChange={refreshWorkspace}
-                />
                 <ProviderSetup
                   initialStatus={workspace.provider}
                   onChange={refreshWorkspace}
@@ -1041,6 +1091,43 @@ export default function App() {
                   onChange={refreshWorkspace}
                 />
               </div>
+            </div>
+          </main>
+        )}
+        {reflectionVisible && (
+          <main className="page-content" hidden={page !== "memory"}>
+            <div className="page-heading">
+              <div>
+                <h1>Memory</h1>
+                <p>
+                  Explore private memories, their sources and reflection
+                  history.
+                </p>
+              </div>
+              <button
+                className="button secondary"
+                onClick={() => navigate("settings")}
+              >
+                <Settings2 size={16} />
+                Memory settings
+              </button>
+            </div>
+            <div className="settings-side">
+              <MemorySetup
+                memories={workspace.memories ?? []}
+                candidates={workspace.work?.candidates ?? []}
+                automatic={workspace.work?.config.auto_curate ?? false}
+                chats={workspace.chats}
+                chatId={workspace.active_chat_id}
+                onChange={refreshWorkspace}
+                onAction={reflectionAction}
+              />
+              {workspace.work && (
+                <ReflectionJournal
+                  status={workspace.work}
+                  chats={workspace.chats}
+                />
+              )}
             </div>
           </main>
         )}
@@ -1097,6 +1184,42 @@ export default function App() {
             onSave={(limits) => void saveLimits(limits)}
             busy={!!busy}
           />
+          {workspace.usage.uncertain.map((entry) => (
+            <form
+              className="entry-form charge-form"
+              key={entry.id}
+              onSubmit={(event) => {
+                event.preventDefault();
+                const data = new FormData(event.currentTarget);
+                void perform("reconcile", () =>
+                  api.reconcileProviderCharge(
+                    entry.id,
+                    Number(data.get("cost")),
+                  ),
+                );
+              }}
+            >
+              <p>
+                Unknown charge from {new Date(entry.at).toLocaleString()}:{" "}
+                {money(entry.reserved_usd)} reserved. Confirm actual billed USD
+                from your provider before retrying.
+              </p>
+              <label>
+                Verified billed USD
+                <input
+                  name="cost"
+                  type="number"
+                  required
+                  min="0"
+                  max="100000"
+                  step="any"
+                />
+              </label>
+              <button className="button secondary" disabled={!!busy}>
+                Reconcile charge
+              </button>
+            </form>
+          ))}
         </Modal>
       )}
       {panel === "rename-chat" && activeChat && (

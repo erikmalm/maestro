@@ -18,6 +18,7 @@ export default function MemorySetup({
   chats,
   chatId,
   onChange,
+  onAction,
 }: {
   memories: Memory[];
   candidates: MemoryCandidate[];
@@ -25,6 +26,7 @@ export default function MemorySetup({
   chats: Chat[];
   chatId: string | null;
   onChange: () => void;
+  onAction: (action: () => Promise<unknown>) => Promise<unknown>;
 }) {
   const [content, setContent] = useState("");
   const [scope, setScope] = useState<Memory["scope"]>("workspace");
@@ -58,7 +60,7 @@ export default function MemorySetup({
     setError("");
     setNotice("");
     try {
-      await action();
+      await onAction(action);
       onChange();
       if (clearDraft) {
         setContent("");

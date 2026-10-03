@@ -1,74 +1,20 @@
-import { useEffect, useRef } from "react";
 import { Check, LoaderCircle } from "lucide-react";
-import * as api from "./api";
-import type { Chat, ProviderStatus, WorkStatus } from "./api";
+import type { ProviderStatus, WorkConfig, WorkStatus } from "./api";
 import { NumberFields, useSetupForm } from "./SetupForm";
-
-const changeLabels = { add: "Added", update: "Updated", remove: "Forgot" };
 
 export default function WorkSetup({
   initialStatus,
   provider,
-  chats,
-  onChange,
+  onSave,
 }: {
   initialStatus: WorkStatus;
   provider: ProviderStatus;
-  chats: Chat[];
-  onChange: (status: WorkStatus) => void;
+  onSave: (config: WorkConfig) => Promise<WorkStatus>;
 }) {
-  const {
-    status,
-    config,
-    setConfig,
-    dirty,
-    busy,
-    error,
-    setError,
-    notice,
-    act,
-  } = useSetupForm(initialStatus, onChange, "Could not update task settings.");
+  const { status, config, setConfig, dirty, busy, error, notice, act } =
+    useSetupForm(initialStatus, () => {}, "Could not update task settings.");
   const local = provider.config.protocol === "ollama";
   const models = local ? provider.models : [];
-  const polling = useRef(false);
-  const pollRevision = useRef(0);
-  const changed = useRef(onChange);
-  changed.current = onChange;
-  const enabled = status.config.enabled;
-  const pending = status.queued > 0 || status.running;
-
-  useEffect(() => {
-    if (busy || !(enabled || pending)) return;
-    let active = true;
-    async function poll() {
-      if (!active || document.hidden || polling.current) return;
-      polling.current = true;
-      const revision = pollRevision.current;
-      const apply = changed.current;
-      try {
-        const next = await api.loadReflection();
-        if (active && !document.hidden && revision === pollRevision.current)
-          apply(next);
-      } catch (reason) {
-        if (active && !document.hidden)
-          setError(
-            reason instanceof Error
-              ? reason.message
-              : "Could not refresh reflection.",
-          );
-      } finally {
-        polling.current = false;
-      }
-    }
-    const timer = window.setInterval(() => void poll(), 3000);
-    document.addEventListener("visibilitychange", poll);
-    return () => {
-      active = false;
-      window.clearInterval(timer);
-      document.removeEventListener("visibilitychange", poll);
-    };
-  }, [busy, enabled, pending]);
-
   return (
     <section className="card reflection-box">
       <div className="reflection-title">
@@ -80,25 +26,9 @@ export default function WorkSetup({
           </p>
         </div>
         <span className="badge neutral">
-          {status.worker_available
-            ? status.waiting_for_ollama
-              ? "Waiting for Ollama"
-              : status.running
-                ? "Reflecting"
-                : enabled
-                  ? "Enabled"
-                  : "Paused"
-            : "Not running"}
+          {status.config.enabled ? "Enabled" : "Paused"}
         </span>
       </div>
-      {status.worker_available && (
-        <p className="reflection-note">
-          {status.queued} queued · {status.today_jobs} /{" "}
-          {status.config.max_jobs_per_day} jobs today · {status.today_tokens} /{" "}
-          {status.config.max_tokens_per_day} tokens today
-          {status.last_stop_reason && <> · {status.last_stop_reason}</>}
-        </p>
-      )}
       {error && (
         <div className="error-banner" role="alert">
           {error}
@@ -108,12 +38,7 @@ export default function WorkSetup({
       <form
         onSubmit={(event) => {
           event.preventDefault();
-          pollRevision.current += 1;
-          void act(
-            "save",
-            () => api.saveWorkConfig(config),
-            "Task settings saved.",
-          );
+          void act("save", () => onSave(config), "Task settings saved.");
         }}
       >
         {(
@@ -211,9 +136,6 @@ export default function WorkSetup({
         <p className="reflection-note">
           360 minutes is six hours. Periodic reflection starts while idle after
           enabling, then follows this interval.
-          {status.next_reflection_at && (
-            <> Next: {new Date(status.next_reflection_at).toLocaleString()}.</>
-          )}
         </p>
         {dirty && (
           <p className="reflection-note">
@@ -297,55 +219,6 @@ export default function WorkSetup({
           </button>
         </div>
       </form>
-      <details className="reflection-cleanup">
-        <summary>Private reflection journal</summary>
-        <p className="reflection-note">
-          Brief outcomes, memory changes and source references are saved only on
-          this computer.
-        </p>
-        {!status.journal?.length && (
-          <p className="reflection-note">No reflections recorded yet.</p>
-        )}
-        {status.journal?.map((entry) => (
-          <div className="memory-entry" key={entry.id}>
-            <div>
-              <p>{entry.summary}</p>
-              <small>
-                {entry.kind === "reflection"
-                  ? "Working-style reflection"
-                  : "Memory curation"}{" "}
-                · {new Date(entry.created_at).toLocaleString()}
-                {entry.outcome && <> · {entry.outcome}</>}
-                {entry.models.length > 0 && <> · {entry.models.join(" → ")}</>}
-              </small>
-              <details>
-                <summary>
-                  {entry.changes.length} memory changes · {entry.sources.length}{" "}
-                  source messages
-                </summary>
-                <ul>
-                  {entry.changes.map((change, index) => (
-                    <li key={`${change.memory_id}:${index}`}>
-                      {changeLabels[change.operation]} {change.kind}:{" "}
-                      {change.content || `memory ${change.memory_id}`}
-                    </li>
-                  ))}
-                </ul>
-                {entry.sources.map((source) => (
-                  <p
-                    className="reflection-note"
-                    key={`${source.chat_id}:${source.message_id}`}
-                  >
-                    {chats.find((chat) => chat.id === source.chat_id)?.title ||
-                      "Conversation"}{" "}
-                    · message {source.message_id}
-                  </p>
-                ))}
-              </details>
-            </div>
-          </div>
-        ))}
-      </details>
     </section>
   );
 }

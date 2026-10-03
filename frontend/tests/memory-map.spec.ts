@@ -132,7 +132,7 @@ async function mapFixture(page: Page, many = false) {
     } else throw new Error(`Unexpected memory-map request: ${path}`);
   });
   await page.reload();
-  await page.getByRole("button", { name: "Settings", exact: true }).click();
+  await page.getByRole("button", { name: "Memory", exact: true }).click();
   return { state, memory: page.locator(".memory-setup") };
 }
 
@@ -261,7 +261,7 @@ test("selected memory can be corrected, pinned and forgotten through both views"
     memory.locator("[data-memory-link='fact:identity']"),
   ).toHaveCount(0);
   await page.reload();
-  await page.getByRole("button", { name: "Settings", exact: true }).click();
+  await page.getByRole("button", { name: "Memory", exact: true }).click();
   await memory.getByRole("button", { name: "List", exact: true }).click();
   await expect(memory.locator(".memory-entry")).toHaveCount(6);
   await memory
@@ -273,7 +273,7 @@ test("selected memory can be corrected, pinned and forgotten through both views"
     memory.getByText("Verify every synthetic change.", { exact: true }),
   ).toHaveCount(0);
   await page.reload();
-  await page.getByRole("button", { name: "Settings", exact: true }).click();
+  await page.getByRole("button", { name: "Memory", exact: true }).click();
   await expect(
     memory.getByRole("button", {
       name: "Select memory: Verify every synthetic change.",
@@ -344,18 +344,22 @@ test("synthetic memory map desktop and mobile visual previews", async ({
   await memory
     .getByRole("button", { name: "Reset memory map view", exact: true })
     .click();
-  const directory = join(tmpdir(), "Maestro-map");
+  const directory =
+    process.env.MAESTRO_MAP_SCREENSHOTS ||
+    join(tmpdir(), "Maestro-memory-view");
   await mkdir(directory, { recursive: true });
-  await memory.screenshot({
+  await page.screenshot({
     path: join(directory, "desktop.png"),
+    fullPage: true,
     animations: "disabled",
   });
   await page.setViewportSize({ width: 390, height: 844 });
   await expect(
     memory.getByRole("button", { name: "Map", exact: true }),
   ).toBeVisible();
-  await memory.screenshot({
+  await page.screenshot({
     path: join(directory, "mobile.png"),
+    fullPage: true,
     animations: "disabled",
   });
 });
@@ -367,7 +371,7 @@ test("selected node follows its page when an earlier record is removed by backgr
   const { memory, state } = await mapFixture(page, true);
   state.work!.config.enabled = true;
   await page.reload();
-  await page.getByRole("button", { name: "Settings", exact: true }).click();
+  await page.getByRole("button", { name: "Memory", exact: true }).click();
   for (let pageIndex = 0; pageIndex < 2; pageIndex++)
     await memory
       .getByRole("button", { name: "Next facts", exact: true })
