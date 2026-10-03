@@ -155,6 +155,8 @@ class AutomaticTests(unittest.TestCase):
         self.assertEqual(self.calls.__len__(), calls)
         self.assertEqual(self.database.read_bytes(), before)
         self.now += 360 * 60
+        self.drafts = [{"operation": "update", "memory_id": record["id"], "kind": "identity", "scope": "workspace",
+                        "content": "Prioritize concise, verifiable help and distinguish evidence from assumptions.", "source_message_id": "", "evidence": ""}]
         self.worker.step()
         self.assertEqual(len(self.memory.list()), 1)
         self.assertEqual(self.memory.list()[0]["id"], record["id"])
@@ -252,7 +254,7 @@ class AutomaticTests(unittest.TestCase):
         self.enable_periodic()
         def notes(context):
             targets = {record["kind"]: record for record in context["memories"] if record["origin"] == "reflective"}
-            return [{"operation": "update" if kind in targets else "add", "memory_id": targets[kind]["id"] if kind in targets else "", "kind": kind, "scope": "workspace", "content": content, "source_message_id": "", "evidence": ""}
+            return [{"operation": "update" if kind in targets else "add", "memory_id": targets[kind]["id"] if kind in targets else "", "kind": kind, "scope": "workspace", "content": content + (" Revisit after new evidence." if kind in targets else ""), "source_message_id": "", "evidence": ""}
                     for kind, content in (("identity", "Prioritize clear and verifiable help."), ("lesson", "Check assumptions before recommending a database."))]
         self.drafts = notes
         self.worker.step()
@@ -317,6 +319,7 @@ class AutomaticTests(unittest.TestCase):
         def cleanup(context):
             target = next(record for record in context["memories"] if record["id"] == legacy["id"])
             self.assertEqual(target["origin"], "curated")
+            self.assertEqual(target["evidence"], legacy["content"])
             return [
                 {"operation": "remove", "memory_id": target["id"], "kind": target["kind"], "scope": target["scope"], "content": "", "source_message_id": "", "evidence": ""},
                 {"operation": "add", "memory_id": "", "kind": "identity", "scope": "workspace", "content": "Maintain a concise, revisable working identity and honest limits.", "source_message_id": "", "evidence": ""},

@@ -97,6 +97,10 @@ async function reflectionFixture(page: Page) {
   });
   await page.reload();
   await page.getByRole("button", { name: "Settings", exact: true }).click();
+  await page
+    .locator(".memory-setup")
+    .getByRole("button", { name: "List", exact: true })
+    .click();
   return {
     state,
     work,
@@ -161,6 +165,10 @@ test("reflection suggestions require acceptance, preserve scope, and stay accept
   ).toHaveCount(0);
   await page.reload();
   await page.getByRole("button", { name: "Settings", exact: true }).click();
+  await page
+    .locator(".memory-setup")
+    .getByRole("button", { name: "List", exact: true })
+    .click();
   await expect(
     memory.getByText("Synthetic conversation preference", { exact: true }),
   ).toBeVisible();
@@ -277,7 +285,10 @@ test("automatic memory, periodic reflection and the private journal stay inspect
   ).toBeVisible();
   await identity.getByText("Source", { exact: true }).click();
   await expect(
-    identity.getByText("Memory: The user works on Maestro.", { exact: true }),
+    identity.getByRole("button", {
+      name: "Source memory: The user works on Maestro.",
+      exact: true,
+    }),
   ).toBeVisible();
   await work.getByText("Private reflection journal", { exact: true }).click();
   await expect(
@@ -326,6 +337,10 @@ test("automatic memory, periodic reflection and the private journal stay inspect
   ).toHaveCount(0);
   await page.reload();
   await page.getByRole("button", { name: "Settings", exact: true }).click();
+  await page
+    .locator(".memory-setup")
+    .getByRole("button", { name: "List", exact: true })
+    .click();
   await expect(
     work.getByLabel("AI curates memory automatically"),
   ).toBeChecked();
@@ -403,6 +418,10 @@ test("reflection polling preserves drafts, avoids overlap, and ignores late stat
   fixture.work.config.enabled = true;
   await page.reload();
   await page.getByRole("button", { name: "Settings", exact: true }).click();
+  await page
+    .locator(".memory-setup")
+    .getByRole("button", { name: "List", exact: true })
+    .click();
   fixture.holdNext();
   await page.clock.fastForward(3000);
   await expect.poll(fixture.polls).toBe(3);

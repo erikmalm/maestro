@@ -1,5 +1,6 @@
 import { useState } from "react";
-import { Pencil, Trash2 } from "lucide-react";
+import { List, Network, Pencil, Trash2 } from "lucide-react";
+import MemoryMap from "./MemoryMap";
 import * as api from "./api";
 import type { Chat, Memory, MemoryCandidate } from "./api";
 
@@ -31,6 +32,21 @@ export default function MemorySetup({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
+  const [view, setView] = useState<"map" | "list">("map");
+  const [search, setSearch] = useState("");
+  const [filterScope, setFilterScope] = useState("all");
+  const [selectedId, setSelectedId] = useState("");
+  const filtered = memories.filter(
+    (memory) =>
+      memory.content
+        .toLocaleLowerCase()
+        .includes(search.trim().toLocaleLowerCase()) &&
+      (filterScope === "all" ||
+        (memory.scope === filterScope &&
+          (filterScope !== "conversation" || memory.chat_id === chatId))),
+  );
+  const selected =
+    filtered.find((memory) => memory.id === selectedId) ?? filtered[0];
 
   async function save(
     action: () => Promise<unknown>,
@@ -218,79 +234,160 @@ export default function MemorySetup({
           ))}
         </details>
       )}
-      {memories.map((memory) => (
-        <div className="memory-entry" key={memory.id}>
-          <div>
-            <p>{memory.content}</p>
-            <small>
-              {kindLabels[memory.kind ?? "fact"]}
-              {" · "}
-              {memory.pinned || memory.origin === "explicit"
-                ? "User-pinned"
-                : memory.origin === "reflective"
-                  ? "AI reflection"
-                  : "AI-curated"}
-              {" · "}
-              {memory.scope === "workspace"
-                ? "All local chats"
-                : chats.find((chat) => chat.id === memory.chat_id)?.title ||
-                  "Conversation"}
-            </small>
-            {(memory.evidence ||
-              memory.source_message_id ||
-              !!memory.provenance?.length) && (
-              <details>
-                <summary>Source</summary>
-                {memory.evidence && (
-                  <blockquote className="reflection-note">
-                    {memory.evidence}
-                  </blockquote>
-                )}
-                {memory.provenance?.length
-                  ? memory.provenance.map((source, index) => (
-                      <p className="reflection-note" key={index}>
-                        {"memory_id" in source
-                          ? `Memory: ${memories.find((item) => item.id === source.memory_id)?.content || source.memory_id}`
-                          : `${chats.find((chat) => chat.id === source.chat_id)?.title || "Conversation"} · message ${source.message_id}`}
-                      </p>
-                    ))
-                  : memory.source_message_id && (
-                      <p className="reflection-note">
-                        {chats.find((chat) => chat.id === memory.chat_id)
-                          ?.title || "Conversation"}{" "}
-                        · message {memory.source_message_id}
-                      </p>
-                    )}
-              </details>
-            )}
-          </div>
-          <button
-            className="icon-button"
-            aria-label="Edit saved memory"
-            disabled={busy}
-            onClick={() => {
-              setEditing(memory.id);
-              setContent(memory.content);
-              setNotice("");
-            }}
-          >
-            <Pencil size={16} />
-          </button>
-          <button
-            className="icon-button"
-            aria-label="Forget saved memory"
-            disabled={busy}
-            onClick={() =>
-              void save(
-                () => api.forgetMemory(memory.id),
-                "Memory forgotten. Earlier chat messages and backups are retained.",
-              )
-            }
-          >
-            <Trash2 size={16} />
-          </button>
+      <div className="memory-view-controls">
+        <div
+          className="memory-view-toggle"
+          role="group"
+          aria-label="Memory view"
+        >
+          {(
+            [
+              ["map", "Map", Network],
+              ["list", "List", List],
+            ] as const
+          ).map(([value, label, Icon]) => (
+            <button
+              key={value}
+              type="button"
+              className="button secondary"
+              aria-pressed={view === value}
+              onClick={() => setView(value)}
+            >
+              <Icon size={15} />
+              {label}
+            </button>
+          ))}
         </div>
-      ))}
+        <label>
+          Search memories
+          <input
+            type="search"
+            placeholder="Find a fact, preference or note…"
+            value={search}
+            onChange={(event) => setSearch(event.target.value)}
+          />
+        </label>
+        <label>
+          Memory scope
+          <select
+            value={filterScope}
+            onChange={(event) => setFilterScope(event.target.value)}
+          >
+            <option value="all">All memories</option>
+            <option value="workspace">All local chats</option>
+            <option value="conversation" disabled={!chatId}>
+              This conversation
+            </option>
+          </select>
+        </label>
+      </div>
+      {view === "map" && (
+        <MemoryMap
+          memories={filtered}
+          chats={chats}
+          selectedId={selected?.id}
+          filterKey={`${search}:${filterScope}:${chatId}`}
+          onSelect={setSelectedId}
+        />
+      )}
+      {!filtered.length && (
+        <p className="reflection-note">
+          {memories.length
+            ? "No memories match these filters."
+            : "No saved memories yet. Add a memory or let Maestro learn from your conversations."}
+        </p>
+      )}
+      {(view === "map" ? (selected ? [selected] : []) : filtered).map(
+        (memory) => (
+          <div className="memory-entry" key={memory.id}>
+            <div>
+              <p>{memory.content}</p>
+              <small>
+                {kindLabels[memory.kind ?? "fact"]}
+                {" · "}
+                {memory.pinned || memory.origin === "explicit"
+                  ? "User-pinned"
+                  : memory.origin === "reflective"
+                    ? "AI reflection"
+                    : "AI-curated"}
+                {" · "}
+                {memory.scope === "workspace"
+                  ? "All local chats"
+                  : chats.find((chat) => chat.id === memory.chat_id)?.title ||
+                    "Conversation"}
+              </small>
+              {(memory.evidence ||
+                memory.source_message_id ||
+                !!memory.provenance?.length) && (
+                <details open={view === "map"}>
+                  <summary>Source</summary>
+                  {memory.evidence && (
+                    <blockquote className="reflection-note">
+                      {memory.evidence}
+                    </blockquote>
+                  )}
+                  {memory.provenance?.length
+                    ? memory.provenance.map((source, index) => (
+                        <p className="reflection-note" key={index}>
+                          {"memory_id" in source ? (
+                            <button
+                              type="button"
+                              className="memory-source-link"
+                              onClick={() => {
+                                setView("map");
+                                setSearch("");
+                                setFilterScope("all");
+                                setSelectedId(source.memory_id);
+                              }}
+                            >
+                              Source memory:{" "}
+                              {memories.find(
+                                (item) => item.id === source.memory_id,
+                              )?.content || source.memory_id}
+                            </button>
+                          ) : (
+                            `${chats.find((chat) => chat.id === source.chat_id)?.title || "Conversation"} · message ${source.message_id}`
+                          )}
+                        </p>
+                      ))
+                    : memory.source_message_id && (
+                        <p className="reflection-note">
+                          {chats.find((chat) => chat.id === memory.chat_id)
+                            ?.title || "Conversation"}{" "}
+                          · message {memory.source_message_id}
+                        </p>
+                      )}
+                </details>
+              )}
+            </div>
+            <button
+              className="icon-button"
+              aria-label="Edit saved memory"
+              disabled={busy}
+              onClick={() => {
+                setEditing(memory.id);
+                setContent(memory.content);
+                setNotice("");
+              }}
+            >
+              <Pencil size={16} />
+            </button>
+            <button
+              className="icon-button"
+              aria-label="Forget saved memory"
+              disabled={busy}
+              onClick={() =>
+                void save(
+                  () => api.forgetMemory(memory.id),
+                  "Memory forgotten. Earlier chat messages and backups are retained.",
+                )
+              }
+            >
+              <Trash2 size={16} />
+            </button>
+          </div>
+        ),
+      )}
       <p className="reflection-note">
         Saved privately on this computer. Keep passwords and API keys out of
         memory. Forgetting removes future recall; it does not erase earlier

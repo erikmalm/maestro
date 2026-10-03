@@ -18,7 +18,7 @@ The first supported setup is one user on one Windows computer. Deliver each capa
 - **Tasks:** manual create, complete/reopen and delete operations without model calls.
 - **Settings and usage:** one connection with chat/orchestrator model preferences, per-message local choices, OS/session/mounted credentials, search setup, output/context controls, spend/token limits, actual model usage and uncertain-charge reconciliation.
 - **Private storage:** SQLite outside Git; real conversations and accounting survive restart. Previous live history migrates into one conversation. Earlier prototype-only records remain archived privately, with simulated messages excluded from active chat.
-- **Private memory:** save/edit/forget in Settings, workspace/conversation scopes and bounded lexical recall. Memory and derived replies stay local; relevant IDs are recorded. Human edits pin records; optional automatic curation preserves provenance and deletion barriers.
+- **Private memory:** interactive map and searchable list in Settings, save/edit/forget, workspace/conversation scopes and bounded lexical recall. Memory and derived replies stay local; relevant IDs are recorded. Human edits pin records; optional automatic curation preserves provenance and deletion barriers.
 - **Background reflection:** durable chat jobs plus periodic working-note maintenance, formation/review with at most two calls, one idle worker, conservative budgets, source/revision rechecks, restart recovery and private journal.
 - **Task configuration:** independent saved reflection/extraction/coding models, output/recall caps and worker timing/budgets. Reflection can be enabled or paused; see [saved configuration](docs/MEMORY_AND_REFLECTION.md#saved-configuration).
 
@@ -58,6 +58,8 @@ Acceptance:
 Background reflection implements REF-01–03 in the [memory design](docs/MEMORY_AND_REFLECTION.md#recorded-next-tasks), using chat evidence and a worker inside the sole API process. REF-04 now implements optional automatic formation/review; quality evaluation continues. REF-05 adds a persistent six-hour default schedule. The separate task-worker design below still requires ownership-aware recovery before cross-process dispatch.
 
 REF-06 adds optional answer ratings/comments and selects complete exchanges for the same scheduled worker, using a short intent/accuracy/clarity rubric. Feedback uses existing messages and SQLite, with no inference on submission. Background context, exchange sampling and recall are configurable; compare repeated mistakes before/after reviewed lessons to evaluate quality. Per-answer model checks and session summaries remain deferred.
+
+MEM-02 adds the interactive map of existing memory and source references. REF-07 makes the same worker prefer useful refinement, working-note consolidation, removal or abstention; it rotates managed records, retains pins, skips identical updates and handles overlapping dependency removals. Evaluate whether repeated passes preserve unique information and reduce generic or duplicate notes. Both increments reuse existing storage and generation; general task delegation remains the later execution step.
 
 Add one separate task worker using local Ollama and the shared generation service. A manually queued text-only task has selected context, completion criteria, a persisted attempt and a saved result. It can run with the browser closed. Start with one generation slot and show persisted status in Tasks.
 

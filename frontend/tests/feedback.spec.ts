@@ -240,6 +240,10 @@ test("feedback clear refreshes derived memory and journal while paused without r
   await expect.poll(fixture.held).toBeTruthy();
   const calls = fixture.workspaceCalls();
   await page.getByRole("button", { name: "Settings", exact: true }).click();
+  await page
+    .locator(".memory-setup")
+    .getByRole("button", { name: "List", exact: true })
+    .click();
   await expect(
     page.getByText("A synthetic practice derived from feedback.", {
       exact: true,

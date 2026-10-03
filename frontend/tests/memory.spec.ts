@@ -18,6 +18,7 @@ test("private memory persists, can be corrected and forgotten, and follows chat 
 
   try {
     await page.getByRole("button", { name: "Settings", exact: true }).click();
+    await memory.getByRole("button", { name: "List", exact: true }).click();
     await memory.getByLabel("What should Maestro remember?").fill(content);
     const saved = page.waitForResponse(
       (response) =>
@@ -32,6 +33,7 @@ test("private memory persists, can be corrected and forgotten, and follows chat 
     await expect(memory.getByText(content, { exact: true })).toBeVisible();
     await page.reload();
     await page.getByRole("button", { name: "Settings", exact: true }).click();
+    await memory.getByRole("button", { name: "List", exact: true }).click();
     await expect(memory.getByText(content, { exact: true })).toBeVisible();
 
     const entry = memory.locator(".memory-entry").filter({ hasText: content });
@@ -44,6 +46,7 @@ test("private memory persists, can be corrected and forgotten, and follows chat 
     await expect(memory.getByText(content, { exact: true })).not.toBeVisible();
     await page.reload();
     await page.getByRole("button", { name: "Settings", exact: true }).click();
+    await memory.getByRole("button", { name: "List", exact: true }).click();
     await expect(memory.getByText(corrected, { exact: true })).toBeVisible();
     await memory
       .locator(".memory-entry")
@@ -55,6 +58,7 @@ test("private memory persists, can be corrected and forgotten, and follows chat 
     ).not.toBeVisible();
     await page.reload();
     await page.getByRole("button", { name: "Settings", exact: true }).click();
+    await memory.getByRole("button", { name: "List", exact: true }).click();
     await expect(
       memory.getByText(corrected, { exact: true }),
     ).not.toBeVisible();
@@ -66,6 +70,7 @@ test("private memory persists, can be corrected and forgotten, and follows chat 
     ownedChat = new URL(page.url()).searchParams.get("chat");
     expect(ownedChat).toBeTruthy();
     await page.getByRole("button", { name: "Settings", exact: true }).click();
+    await memory.getByRole("button", { name: "List", exact: true }).click();
     await memory.getByLabel("What should Maestro remember?").fill(scoped);
     await memory.getByLabel("Use this memory in").selectOption("conversation");
     const savedConversation = page.waitForResponse(
@@ -86,6 +91,7 @@ test("private memory persists, can be corrected and forgotten, and follows chat 
     ownedMemories.add(conversation.id);
     await page.reload();
     await page.getByRole("button", { name: "Settings", exact: true }).click();
+    await memory.getByRole("button", { name: "List", exact: true }).click();
     await expect(memory.getByText(scoped, { exact: true })).toBeVisible();
 
     await page.getByRole("button", { name: "Workspace", exact: true }).click();
@@ -98,6 +104,7 @@ test("private memory persists, can be corrected and forgotten, and follows chat 
       .click();
     await expect(dialog).not.toBeVisible();
     await page.getByRole("button", { name: "Settings", exact: true }).click();
+    await memory.getByRole("button", { name: "List", exact: true }).click();
     await expect(memory.getByText(scoped, { exact: true })).not.toBeVisible();
     await page.reload();
     const after = await (await page.request.get("/api/workspace")).json();

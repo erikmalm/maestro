@@ -136,7 +136,7 @@ class FeedbackTests(unittest.TestCase):
         self.drafts = self.notes(80)[:1]
         self.drafts[0].update(source_message_id="provenance-user", evidence="Please explain the synthetic project clearly.")
         prepared = self.store.prepare()
-        fields = prepared["schema"]["properties"]["memories"]["items"]["properties"]
+        fields = prepared["schema"]["properties"]["memories"]["items"]["anyOf"][0]["properties"]
         self.assertEqual(fields["source_message_id"], {"enum": [""]})
         self.assertEqual(fields["evidence"], {"enum": [""]})
         result = self.provider.generate_context(prepared["instructions"], prepared["messages"], kind="reflection", job=prepared["job"], schema=prepared["schema"])

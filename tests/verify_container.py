@@ -42,7 +42,7 @@ class Ollama(BaseHTTPRequestHandler):
             if "approved" in fields:
                 result = {"approved": list(range(len(context["drafts"]))), "summary": "Reviewed the synthetic changes."}
             else:
-                periodic = body["messages"][0]["content"].startswith("Reflect as Maestro")
+                periodic = isinstance(context, dict) and "exchanges" in context
                 if periodic:
                     proposal = {"content": "I use concise, verifiable steps and respect user control.", "evidence": "", "source_message_id": ""}
                 else:

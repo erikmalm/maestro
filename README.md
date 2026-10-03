@@ -68,7 +68,7 @@ Rejected key/account access disables automatic search until the key is successfu
 
 ## Private memory
 
-In **Settings → Private memory**, save a fact/preference for all local chats or just the current conversation. You can edit or forget it later. Facts/preferences use scoped keyword recall; working-identity notes use the same small context allowance. Memory stays in local Ollama chat without hosted search. Saving memory makes no model call.
+In **Settings → Private memory**, explore the interactive map of facts, preferences, working identity and lessons. Select a memory to read its sources, edit it or forget it. Search and scope filters narrow the map; **List** provides a text view. You can also save a fact/preference for all local chats or just the current conversation. Facts/preferences use scoped keyword recall; working notes share the configured recall allowance. Memory stays in local Ollama chat without hosted search. Saving memory makes no model call.
 
 Memories and replies derived from them stay local: start a new conversation before switching that history to a remote provider or active hosted search. Chat deletion removes scoped/source-linked memory and reflection proposals; unlinked workspace records remain. Forgetting affects future recall and retains earlier messages/backups.
 

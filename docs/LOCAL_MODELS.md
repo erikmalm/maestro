@@ -53,6 +53,12 @@ A first live pass with complete exchanges was rejected before promotion because 
 After both schema fixes, the deployed six-hour workflow completed at 13:31 local time: gpt-oss formed a working lesson, Qwen independently approved it, and Maestro saved the lesson and journal entry. Both models unloaded; the next pass was scheduled for 19:30. No private prose was copied into this report.
 
 The synthetic smoke and hardware checks used no personal chats; live validation and its disposable copies kept private text local and reported only status and validation categories. These checks establish end-to-end execution only. Repeated Swedish/English correction, scope, abstention and sanitation-quality trials remain MODEL-03/REF-04 work; no additional model or dependency was installed.
+### Memory maintenance smoke (2026-10-03)
+
+A disposable synthetic workspace supplied three older lessons, a misclassified clarification and a pinned preference. The first formation was rejected because an add operation used an existing memory ID; separate add/edit schema branches now constrain that relationship. A second one-job trial completed with gpt-oss formation and Qwen review: one existing lesson was refined under the same ID, the pinned record remained byte-for-byte unchanged, both calls used 2,222 actual tokens, and both models unloaded. No new memory was added in that successful pass. The fixture and output stayed outside the checkout.
+
+This demonstrates real same-ID refinement, not comprehensive cleanup quality: that pass did not remove all redundant or misclassified records. Synthetic regressions separately cover consolidation, removal, preserved historical sources, pin protection, no-ops and older-record rotation. Continue REF-07 quality evaluation over repeated passes; no model download or agent framework was added.
+
 ## Diversification and next measurements
 
 Use one model at a time and bounded context. Unloaded installed models consume no inference memory; an idle background worker should not keep an LLM resident. Devstral's observed offload/slower throughput make it a poor frequent-reflection default on this GPU. gpt-oss is the stronger first reflection candidate here; Qwen is faster for ordinary interaction. Compare both before choosing automation defaults.
