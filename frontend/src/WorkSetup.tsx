@@ -21,8 +21,8 @@ export default function WorkSetup({
         <div>
           <h2>Task models &amp; reflection</h2>
           <p>
-            Build private memory and reflect on working style while chat is
-            idle.
+            Build private memory and explore improvements to Maestro's working
+            style while chat is idle.
           </p>
         </div>
         <span className="badge neutral">
@@ -131,8 +131,8 @@ export default function WorkSetup({
           AI can create tasks during reflection
         </label>
         <p className="reflection-note">
-          Reviewed suggestions are added to Tasks with an initiator and
-          suggested assignee.
+          Reviewed follow-ups and self-improvement experiments are added to
+          Tasks with an initiator and suggested assignee.
         </p>
         <label>
           Reflection interval (minutes)
@@ -155,7 +155,8 @@ export default function WorkSetup({
         </label>
         <p className="reflection-note">
           360 minutes is six hours. Periodic reflection starts while idle after
-          enabling, then follows this interval.
+          enabling, then follows this interval. It can review current practices
+          and propose measurable improvements even without new chats.
         </p>
         {dirty && (
           <p className="reflection-note">

@@ -52,13 +52,21 @@ export default function ReflectionJournal({
           <div>
             <p>{entry.summary}</p>
             <small>
-              {entry.kind === "reflection"
-                ? "Working-style reflection"
-                : "Memory curation"}{" "}
+              {entry.assessment_basis === "capabilities_and_practices"
+                ? "Self-improvement reflection"
+                : entry.kind === "reflection"
+                  ? "Working-style reflection"
+                  : "Memory curation"}{" "}
               · {new Date(entry.created_at).toLocaleString()}
               {entry.outcome && <> · {entry.outcome}</>}
               {entry.models.length > 0 && <> · {entry.models.join(" → ")}</>}
             </small>
+            {entry.assessment_basis === "capabilities_and_practices" && (
+              <p className="reflection-note">
+                Reviewed Maestro's capabilities and current practices. Ideas
+                without chat evidence are experiments to evaluate.
+              </p>
+            )}
             <details>
               <summary>
                 {entry.changes.length} memory changes · {entry.sources.length}{" "}

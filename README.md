@@ -76,7 +76,7 @@ Memories and replies derived from them stay local: start a new conversation befo
 
 Optional thumbs and comments on answers provide local feedback for the next scheduled reflection. It reviews complete selected exchanges against intent, accuracy and clarity without adding a model call when you rate an answer. Background context defaults to 32,768 tokens, with eight exchanges, 4,096 output tokens per call, 50 jobs/250,000 tokens per day, and recall of up to 20 memories/16,000 characters. These limits are configurable separately from chat; saved settings retain their values after upgrades.
 
-Enable **AI can create tasks during reflection** in **Task models & reflection** to let independent reflection turn supported follow-up work into to-dos. It defaults off and reuses the same two model calls, source checks and budgets. Results appear in **Tasks**, labeled **Initiated by** and **Suggested for**, with attribution in the private reflection journal. There is no task runner or automatic execution.
+Independent reflection also reviews Maestro's capabilities and working practices without new chats. It can refine practices and propose measurable self-improvement experiments, distinguishing untested ideas from observed issues. Enable **AI can create tasks during reflection** in **Task models & reflection** to save reviewed follow-ups and improvement ideas as to-dos. It defaults off and reuses the same two model calls, source checks and budgets. Results appear in **Tasks**, labeled **Initiated by** and **Suggested for**, with attribution in the private reflection journal. There is no task runner or automatic execution.
 
 ## Usage and limits
 

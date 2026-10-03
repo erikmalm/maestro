@@ -63,6 +63,10 @@ This demonstrates real same-ID refinement, not comprehensive cleanup quality: th
 
 A temporary synthetic workspace exercised task suggestions through the existing periodic workflow: gpt-oss formed two tasks and Qwen independently approved them, one suggested for the user and one for Maestro. The calls used 1,682 actual tokens with a 32,768-token context and a 2,048-token output cap; both tasks retained source provenance and both models unloaded afterward. This verifies task creation, not execution or planning quality over repeated passes. No private chats, additional model calls in the regular workflow, dependencies or downloads were needed.
 
+### Independent self-improvement smoke (2026-10-03)
+
+Two temporary workspaces with no chats exercised the expanded periodic assessment: one empty and one with an untested synthetic retrieval practice. gpt-oss formation and Qwen review completed using 1,322 and 1,492 actual tokens respectively, recorded the capabilities-and-practices basis with zero source messages, and left no loaded models. Neither trial created a task; the first ended with no memories and the second with one working note. This verifies the independent workflow, not useful improvement quality; synthetic regressions separately cover reviewed no-chat creation and later refinement. Both trials used 32,768 context tokens and a 2,048-token output cap, without private data or task execution.
+
 ## Diversification and next measurements
 
 Use one model at a time and bounded context. Unloaded installed models consume no inference memory; an idle background worker should not keep an LLM resident. Devstral's observed offload/slower throughput make it a poor frequent-reflection default on this GPU. gpt-oss is the stronger first reflection candidate here; Qwen is faster for ordinary interaction. Compare both before choosing automation defaults.

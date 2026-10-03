@@ -241,6 +241,7 @@ test("Tasks receives reviewed AI tasks without replacing a draft or restoring st
     {
       id: "task-journal",
       kind: "reflection",
+      assessment_basis: "capabilities_and_practices",
       created_at: "2026-10-03",
       summary: "Added one reviewed synthetic task.",
       changes: [],
@@ -284,6 +285,15 @@ test("Tasks receives reviewed AI tasks without replacing a draft or restoring st
   });
   await expect(
     journal.getByText("Added one reviewed synthetic task.", { exact: true }),
+  ).toBeVisible();
+  await expect(journal.getByText(/Self-improvement reflection/)).toBeVisible();
+  await expect(
+    journal.getByText(
+      /Ideas without chat evidence are experiments to evaluate/,
+    ),
+  ).toBeVisible();
+  await expect(
+    journal.getByText("0 memory changes · 0 source messages", { exact: true }),
   ).toBeVisible();
   await journal.getByText("1 tasks created", { exact: true }).click();
   await expect(

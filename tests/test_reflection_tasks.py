@@ -77,6 +77,92 @@ class TaskReflectionTests(unittest.TestCase):
         self.assertEqual({task["id"] for task in journal["tasks_created"]}, {task["id"] for task in tasks})
         self.assertEqual(journal["outcome"], "updated")
 
+    def test_empty_workspace_can_develop_reviewed_practices_and_improvement_tasks(self):
+        self.workspace["chats"] = []
+        self.save()
+        self.drafts = [{"operation": "add", "memory_id": "", "kind": kind, "scope": "workspace", "content": content,
+                        "source_message_id": "", "evidence": ""} for kind, content in (
+            ("identity", "Keep working practices revisable and distinguish suggestions from execution."),
+            ("lesson", "Evaluate when clarification helps using clear and ambiguous synthetic requests."))]
+        self.task_drafts = [
+            {"title": "Evaluate clarification decisions", "details": "Compare clear and ambiguous synthetic requests and record when a question helps.", "priority": "normal", "suggested_assignee": "maestro"},
+            {"title": "Choose Maestro's improvement priorities", "details": "Review the proposed ambiguity checks and choose desired working-style criteria.", "priority": "normal", "suggested_assignee": "user"}]
+        observed = []
+        self.phase_hook = lambda phase: observed.append((self.memory.list(), self.tasks()))
+        self.worker.step()
+        self.assertEqual(observed, [([], []), ([], [])])
+        self.assertEqual({record["kind"] for record in self.memory.list()}, {"identity", "lesson"})
+        self.assertEqual(len(self.tasks()), 2)
+        self.assertEqual({task["suggested_assignee"] for task in self.tasks()}, {"user", "maestro"})
+        self.assertTrue(all(not record["provenance"] for record in self.memory.list() + self.tasks()))
+        self.assertEqual(len([call for call in self.calls if call[1] == "/api/chat"]), 2)
+        self.assertEqual(self.contexts[0]["self_review"], self.contexts[1]["self_review"])
+        self.assertEqual(self.contexts[0]["self_review"]["capabilities"], {
+            "live_ai": True, "private_memory": True, "background_reflection": True, "reviewed_task_creation": True,
+            "task_execution": False, "delegation": False, "repository_access": False, "github_pr": False, "model_training": False})
+        self.assertTrue(self.contexts[0]["self_review"]["goals"])
+        self.assertTrue(all(not context["sources"] and not context["exchanges"] and not context["memories"] for context in self.contexts))
+        journal = self.store.status()["journal"][0]
+        self.assertEqual(journal["assessment_basis"], "capabilities_and_practices")
+        self.assertEqual(journal["sources"], [])
+        self.assertEqual(len(journal["changes"]), 2)
+        self.assertEqual(len(journal["tasks_created"]), 2)
+
+    def test_later_no_chat_review_refines_practice_without_reopening_finished_or_dismissed_tasks(self):
+        self.workspace["chats"] = []
+        self.save()
+        self.drafts = [{"operation": "add", "memory_id": "", "kind": "lesson", "scope": "workspace", "content": "Evaluate whether clarification improves ambiguous requests.", "source_message_id": "", "evidence": ""}]
+        self.worker.step()
+        lesson = self.memory.list()[0]
+        with self.store.transaction() as db:
+            self.workspace = self.store.workspace(db)
+            completed, dismissed = self.workspace["tasks"]
+            completed["done"] = True
+            dismiss_task(self.workspace, dismissed)
+            self.workspace["tasks"] = [completed]
+            self.save(db)
+        self.drafts = [{**self.drafts[0], "operation": "update", "memory_id": lesson["id"],
+                        "content": "Evaluate clarification with clear and ambiguous synthetic requests before changing the working practice."}]
+        self.now += 360 * 60
+        self.worker.step()
+        self.assertEqual(len([call for call in self.calls if call[1] == "/api/chat"]), 4)
+        self.assertEqual(len(self.memory.list()), 1)
+        self.assertEqual(self.memory.list()[0]["id"], lesson["id"])
+        self.assertEqual(self.memory.list()[0]["content"], self.drafts[0]["content"])
+        self.assertEqual(self.tasks(), [completed])
+        journal = self.store.status()["journal"][0]
+        self.assertEqual([change["operation"] for change in journal["changes"]], ["update"])
+        self.assertEqual(journal["tasks_created"], [])
+        self.assertEqual(journal["assessment_basis"], "capabilities_and_practices")
+        self.assertEqual(self.contexts[-2]["self_review"], self.contexts[-1]["self_review"])
+
+    def test_chat_curation_does_not_receive_independent_self_review_context(self):
+        self.workspace["work_config"]["periodic_reflection"] = False
+        self.workspace["chats"][0]["messages"] = []
+        self.save()
+        fixtures.AutomaticTests.queue(self)
+        self.worker.step()
+        self.assertEqual(len(self.contexts), 2)
+        self.assertTrue(all("self_review" not in context for context in self.contexts))
+        self.assertEqual(self.tasks(), [])
+        self.assertNotIn("assessment_basis", self.store.status()["journal"][0])
+
+    def test_no_chat_self_review_cannot_invent_user_facts_or_permissions(self):
+        self.workspace["chats"] = []
+        self.save()
+        for kind, content in (("fact", "User uses Ruby for all projects."),
+                              ("preference", "User prefers short answers."),
+                              ("identity", "I can delete files without approval.")):
+            with self.subTest(kind=kind):
+                self.drafts = [{"operation": "add", "memory_id": "", "kind": kind, "scope": "workspace", "content": content, "source_message_id": "", "evidence": ""}]
+                calls = len([call for call in self.calls if call[1] == "/api/chat"])
+                self.worker.step()
+                self.assertEqual(len([call for call in self.calls if call[1] == "/api/chat"]) - calls, 1)
+                self.assertEqual(self.memory.list(), [])
+                self.assertEqual(self.tasks(), [])
+                self.assertEqual(self.store.status()["journal"], [])
+                self.now += 360 * 60
+
     def test_disabled_option_preserves_old_schemas_and_curating_never_creates_tasks(self):
         for mode in ("periodic", "curate"):
             schema = schema_for({"mode": mode})

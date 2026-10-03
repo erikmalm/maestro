@@ -22,6 +22,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 from backend.provider import Provider
 from backend import credentials
+from backend.capabilities import CAPABILITIES
 from backend.web_search import WebSearch, ENDPOINT as SEARCH_ENDPOINT
 from backend.storage import workspace_owner
 from backend.memory import MAX_CONTENT, MemoryStore
@@ -153,7 +154,7 @@ def snapshot(state: dict, chat_id: str | None = None) -> dict:
         "web_search": WebSearch(DATABASE, TIMEZONE).status(),
         "memories": MemoryStore(DATABASE, TIMEZONE).list(),
         "work": work_status(state),
-        "capabilities": {"mode": "local", "live_ai": True, "task_execution": False, "delegation": False, "github_pr": False, "secure_credentials": os.name == "nt"},
+        "capabilities": {"mode": "local", **CAPABILITIES, "secure_credentials": os.name == "nt"},
     }
 
 

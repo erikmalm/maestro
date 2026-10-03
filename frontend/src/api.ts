@@ -321,6 +321,7 @@ export type ReflectionJournalEntry = {
   id: string;
   created_at: string;
   kind: "curation" | "reflection";
+  assessment_basis?: "capabilities_and_practices";
   summary: string;
   outcome?: string;
   changes: {

@@ -39,6 +39,9 @@ class Ollama(BaseHTTPRequestHandler):
             assert body["options"]["num_predict"] == 64
             context = json.loads(body["messages"][1]["content"])
             fields = body["format"]["properties"]
+            if isinstance(context, dict) and "exchanges" in context:
+                assert context["self_review"]["goals"]
+                assert not context["self_review"]["capabilities"]["task_execution"]
             if "approved" in fields:
                 result = {"approved": list(range(len(context["drafts"]))), "summary": "Reviewed the synthetic changes."}
                 if "approved_tasks" in fields:
@@ -257,6 +260,7 @@ def verify(image, tunnel=False):
         suggested = next(task for task in reflection["tasks"] if task["initiated_by"] == "maestro")
         assert suggested["suggested_assignee"] == "maestro" and suggested["initiated_model"] == MODELS[1]
         assert reflection["journal"][0]["tasks_created"][0]["id"] == suggested["id"]
+        assert reflection["journal"][0]["assessment_basis"] == "capabilities_and_practices"
         reassigned = api(f"/api/tasks/{suggested['id']}", {"suggested_assignee": "user"}, method="PATCH", headers=headers)["tasks"][0]
         assert reassigned["initiated_by"] == "maestro" and reassigned["suggested_assignee"] == "user"
         api(f"/api/tasks/{suggested['id']}", method="DELETE", headers=headers)
