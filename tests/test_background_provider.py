@@ -14,7 +14,7 @@ import httpx
 
 from backend.provider import BackgroundUncertain, DEFAULT, Provider, background_network
 from backend.memory import MemoryStore
-from backend.reflection import ReflectionStore, OUTPUT_SCHEMA
+from backend.reflection import ReflectionStore, OUTPUT_SCHEMA, REVIEW_SCHEMA
 from backend.work_config import WorkConfig
 
 
@@ -149,8 +149,67 @@ class ClaimedProviderTests(unittest.TestCase):
             return {"details": {"format": "gguf"}, "capabilities": ["completion"], "thinking": {"values": ["low", "high"]}}
         return {"done": True, "message": {"content": '{"memories": []}'}, "prompt_eval_count": 30, "eval_count": 10}
 
-    def generate(self):
-        return self.provider.generate_context(self.prepared["instructions"], self.prepared["messages"], job=self.prepared["job"])
+    def generate(self, **options):
+        options.setdefault("kind", self.prepared["job"].get("kind", "reflection"))
+        return self.provider.generate_context(self.prepared["instructions"], self.prepared["messages"], job=self.prepared["job"], **options)
+
+    def test_two_phases_use_separate_saved_models_and_schemas_with_one_job_budget(self):
+        self.workspace["work_config"].update(auto_curate=True, memory_model="form:7b", reflection_model="review:7b",
+                                             max_jobs_per_day=1, max_tokens_per_day=100000)
+        self.store.recover()
+        with self.store.transaction() as db:
+            db.execute("UPDATE workspace SET value=?", (json.dumps(self.workspace),))
+        self.prepared = self.store.prepare()
+        draft = {"operation": "add", "memory_id": "", "kind": "preference", "scope": "conversation",
+                 "content": "I prefer concise Swedish replies.", "source_message_id": "synthetic-user", "evidence": "I prefer concise Swedish replies."}
+        def network(config, path, payload, deadline):
+            result = self.network(config, path, payload, deadline)
+            if path == "/api/chat":
+                result["message"]["content"] = json.dumps({"approved": [0], "summary": "Reviewed."} if payload["format"] == REVIEW_SCHEMA
+                                                          else {"memories": [draft], "summary": "Normalized."})
+            return result
+        deadline = time.monotonic() + 30
+        with patch("backend.provider.background_network", side_effect=network):
+            result = self.generate(schema=self.prepared["schema"], deadline=deadline)
+            review = self.store.record_stage_result(self.prepared["job"], result, lambda text: text, self.prepared["context"])
+            self.assertEqual(MemoryStore(self.database, timezone.utc).list(), [])
+            with self.assertRaisesRegex(ValueError, "source or settings"):
+                self.generate(schema=self.prepared["schema"], deadline=deadline)
+            with self.assertRaisesRegex(ValueError, "deadline"):
+                self.provider.generate_context(review["instructions"], review["messages"], kind=review["job"]["kind"],
+                                               job=review["job"], schema=review["schema"], deadline=0)
+            self.assertEqual(len(self.provider.read_state()["ledger"]), 1)
+            self.assertEqual(self.store.status()["today_tokens"], 40)
+            second = self.provider.generate_context(review["instructions"], review["messages"], kind=review["job"]["kind"],
+                                                    job=review["job"], schema=review["schema"], deadline=deadline)
+            self.store.complete_auto(review["job"], second, review["drafts"], lambda text: text)
+        dispatches = [call for call in self.calls if call[1] == "/api/chat"]
+        self.assertEqual([call[2]["model"] for call in dispatches], ["form:7b", "review:7b"])
+        self.assertEqual([call[2]["format"] for call in dispatches], [self.prepared["schema"], REVIEW_SCHEMA])
+        self.assertTrue(all(call[2]["keep_alive"] == 0 and "tools" not in call[2] for call in dispatches))
+        self.assertEqual([call[3] for call in dispatches], [deadline, deadline])
+        ledger = self.provider.read_state()["ledger"]
+        self.assertEqual([(entry["kind"], entry["stage"]) for entry in ledger], [("memory", 0), ("reflection", 1)])
+        self.assertEqual(ledger[0]["job_id"], ledger[1]["job_id"])
+        self.assertEqual(ledger[0]["attempt"], ledger[1]["attempt"])
+        self.assertEqual(self.store.status()["today_jobs"], 1)
+        self.assertEqual(self.store.status()["today_tokens"], 80)
+        self.assertEqual(MemoryStore(self.database, timezone.utc).list()[0]["origin"], "curated")
+
+    def test_background_kind_schema_and_deadline_are_checked_before_reserving(self):
+        for options in ({"kind": "memory"}, {"kind": "coding"}, {"schema": {"type": "object"}},
+                        {"deadline": 0}, {"deadline": float("inf")}, {"deadline": True}):
+            with self.subTest(options=options), patch("backend.provider.background_network") as request, self.assertRaises(ValueError):
+                self.generate(**options)
+            request.assert_not_called()
+            self.assertEqual(self.provider.read_state()["ledger"], [])
+        for changes in ({"kind": "memory"}, {"mode": "curate"}):
+            forged = {**self.prepared["job"], **changes}
+            with self.subTest(changes=changes), patch("backend.provider.background_network") as request, self.assertRaisesRegex(ValueError, "source or settings"):
+                self.provider.generate_context(self.prepared["instructions"], self.prepared["messages"], kind=forged["kind"], job=forged)
+            request.assert_not_called()
+            self.assertEqual(self.provider.read_state()["ledger"], [])
+        self.assertEqual(self.store.status()["today_jobs"], 0)
 
     def test_claim_and_ledger_are_committed_before_one_tool_free_structured_dispatch(self):
         def inspect_dispatch(config, path, payload, deadline):

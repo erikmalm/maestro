@@ -97,13 +97,14 @@ class MemoryTests(unittest.TestCase):
         self.assertEqual(results, self.store.recall("Synthetic preference", None))
         self.assertGreater(len(results), 0)
 
-    def test_edits_replace_old_recall_and_keep_source_annotation(self):
+    def test_edits_replace_old_recall_and_pin_an_independent_user_correction(self):
         self.save_workspace()
         original = self.store.remember("Synthetic project uses Postgres.", chat_id="first", source_message_id="source")
         updated = self.store.update(original["id"], "Synthetic project uses SQLite.")
         self.assertEqual(updated["id"], original["id"])
         self.assertEqual(updated["created_at"], original["created_at"])
-        self.assertEqual(updated["source_message_id"], "source")
+        self.assertIsNone(updated["source_message_id"])
+        self.assertEqual(updated["provenance"], [])
         self.assertEqual(self.store.recall("Postgres", "first"), [])
         self.assertEqual(self.store.recall("SQLite", "second"), [updated])
         self.store.forget(updated["id"])

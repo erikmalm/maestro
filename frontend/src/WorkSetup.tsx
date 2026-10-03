@@ -1,16 +1,20 @@
 import { useEffect, useRef } from "react";
 import { Check, LoaderCircle } from "lucide-react";
 import * as api from "./api";
-import type { ProviderStatus, WorkStatus } from "./api";
+import type { Chat, ProviderStatus, WorkStatus } from "./api";
 import { NumberFields, useSetupForm } from "./SetupForm";
+
+const changeLabels = { add: "Added", update: "Updated", remove: "Forgot" };
 
 export default function WorkSetup({
   initialStatus,
   provider,
+  chats,
   onChange,
 }: {
   initialStatus: WorkStatus;
   provider: ProviderStatus;
+  chats: Chat[];
   onChange: (status: WorkStatus) => void;
 }) {
   const {
@@ -71,7 +75,8 @@ export default function WorkSetup({
         <div>
           <h2>Task models &amp; reflection</h2>
           <p>
-            Review local conversations and propose useful memories while idle.
+            Build private memory and reflect on working style while chat is
+            idle.
           </p>
         </div>
         <span className="badge neutral">
@@ -140,9 +145,9 @@ export default function WorkSetup({
         <p className="reflection-note">
           Automatic choices prefer gpt-oss for reflection, Qwen for memory
           extraction, and Devstral for coding, then use the local chat default.
-          An explicit choice stays selected if a model is removed. Background
-          reflection uses only the reflection model. Memory extraction and
-          coding choices are saved for future task paths.
+          Automatic memory uses the memory model to form ideas and the
+          reflection model to review them. An explicit choice stays selected if
+          a model is removed. Coding tasks do not run.
           {!local &&
             " Select Ollama in Model connection to use local task models."}
         </p>
@@ -157,6 +162,59 @@ export default function WorkSetup({
           />
           Enable background reflection
         </label>
+        <label className="reflection-check">
+          <input
+            type="checkbox"
+            checked={config.auto_curate}
+            disabled={!!busy}
+            onChange={(event) =>
+              setConfig({
+                auto_curate: event.target.checked,
+                ...(!event.target.checked
+                  ? { periodic_reflection: false }
+                  : {}),
+              })
+            }
+          />
+          AI curates memory automatically
+        </label>
+        <label className="reflection-check">
+          <input
+            type="checkbox"
+            checked={config.periodic_reflection}
+            disabled={!!busy || !config.auto_curate}
+            onChange={(event) =>
+              setConfig({ periodic_reflection: event.target.checked })
+            }
+          />
+          Reflect periodically on identity and working style
+        </label>
+        <label>
+          Reflection interval (minutes)
+          <input
+            type="number"
+            required
+            min={30}
+            max={10080}
+            step={1}
+            value={config.reflection_interval_minutes}
+            disabled={
+              !!busy || !config.auto_curate || !config.periodic_reflection
+            }
+            onChange={(event) =>
+              setConfig({
+                reflection_interval_minutes: Number(event.target.value),
+              })
+            }
+          />
+        </label>
+        <p className="reflection-note">
+          360 minutes is six hours. Periodic reflection starts while idle after
+          enabling, then follows this interval.
+          {status.next_reflection_at && (
+            <> Next: {new Date(status.next_reflection_at).toLocaleString()}.</>
+          )}
+        </p>
         {dirty && (
           <p className="reflection-note">
             Unsaved changes. Save task settings to apply them.
@@ -164,9 +222,11 @@ export default function WorkSetup({
         )}
         {status.worker_available && (
           <p className="reflection-note">
-            One local call runs after new conversation activity and only while
-            chat is idle. Proposed memories need your acceptance. Coding tasks
-            do not run. Pausing stops new calls; a running call may finish.
+            {config.auto_curate
+              ? "Memories are maintained automatically after model review. You can edit or forget them; your edits are protected from automation. Identity and working-style notes remain distinct from user facts."
+              : "Conversation activity produces suggestions for your review; memories are saved only when you accept them."}{" "}
+            Calls run locally while chat is idle and models unload afterward.
+            Pausing stops new calls; a running call may finish.
           </p>
         )}
         {!status.worker_available && (
@@ -216,6 +276,55 @@ export default function WorkSetup({
           </button>
         </div>
       </form>
+      <details className="reflection-cleanup">
+        <summary>Private reflection journal</summary>
+        <p className="reflection-note">
+          Brief outcomes, memory changes and source references are saved only on
+          this computer.
+        </p>
+        {!status.journal?.length && (
+          <p className="reflection-note">No reflections recorded yet.</p>
+        )}
+        {status.journal?.map((entry) => (
+          <div className="memory-entry" key={entry.id}>
+            <div>
+              <p>{entry.summary}</p>
+              <small>
+                {entry.kind === "reflection"
+                  ? "Working-style reflection"
+                  : "Memory curation"}{" "}
+                · {new Date(entry.created_at).toLocaleString()}
+                {entry.outcome && <> · {entry.outcome}</>}
+                {entry.models.length > 0 && <> · {entry.models.join(" → ")}</>}
+              </small>
+              <details>
+                <summary>
+                  {entry.changes.length} memory changes · {entry.sources.length}{" "}
+                  source messages
+                </summary>
+                <ul>
+                  {entry.changes.map((change, index) => (
+                    <li key={`${change.memory_id}:${index}`}>
+                      {changeLabels[change.operation]} {change.kind}:{" "}
+                      {change.content || `memory ${change.memory_id}`}
+                    </li>
+                  ))}
+                </ul>
+                {entry.sources.map((source) => (
+                  <p
+                    className="reflection-note"
+                    key={`${source.chat_id}:${source.message_id}`}
+                  >
+                    {chats.find((chat) => chat.id === source.chat_id)?.title ||
+                      "Conversation"}{" "}
+                    · message {source.message_id}
+                  </p>
+                ))}
+              </details>
+            </div>
+          </div>
+        ))}
+      </details>
     </section>
   );
 }

@@ -952,10 +952,18 @@ export default function App() {
                   <WorkSetup
                     initialStatus={workspace.work}
                     provider={workspace.provider}
+                    chats={workspace.chats}
                     onChange={(work) => {
                       if (workspaceRevision.current === statusRevision)
                         setWorkspace(
-                          (current) => current && { ...current, work },
+                          (current) =>
+                            current && {
+                              ...current,
+                              work,
+                              ...(work.memories
+                                ? { memories: work.memories }
+                                : {}),
+                            },
                         );
                     }}
                   />
@@ -963,6 +971,7 @@ export default function App() {
                 <MemorySetup
                   memories={workspace.memories ?? []}
                   candidates={workspace.work?.candidates ?? []}
+                  automatic={workspace.work?.config.auto_curate ?? false}
                   chats={workspace.chats}
                   chatId={workspace.active_chat_id}
                   onChange={refreshWorkspace}

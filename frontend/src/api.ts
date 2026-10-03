@@ -214,7 +214,13 @@ export type Memory = {
   scope: "workspace" | "conversation";
   chat_id: string | null;
   source_message_id: string | null;
-  origin: "explicit";
+  origin: "explicit" | "curated" | "reflective";
+  kind?: "fact" | "preference" | "identity" | "lesson";
+  pinned?: boolean;
+  evidence?: string | null;
+  provenance?: ((
+    { chat_id: string; message_id: string } | { memory_id: string }
+  ) & { hash?: string })[];
   created_at: string;
   updated_at: string;
 };
@@ -238,6 +244,9 @@ export type WorkConfig = {
   memory_model: string;
   coding_model: string;
   enabled: boolean;
+  auto_curate: boolean;
+  periodic_reflection: boolean;
+  reflection_interval_minutes: number;
   debounce_seconds: number;
   idle_seconds: number;
   max_output_tokens: number;
@@ -257,6 +266,25 @@ export type WorkStatus = {
   candidates: MemoryCandidate[];
   today_jobs: number;
   today_tokens: number;
+  memories?: Memory[];
+  journal?: ReflectionJournalEntry[];
+  next_reflection_at?: string | null;
+};
+export type ReflectionJournalEntry = {
+  id: string;
+  created_at: string;
+  kind: "curation" | "reflection";
+  summary: string;
+  outcome?: string;
+  changes: {
+    operation: "add" | "update" | "remove";
+    memory_id: string;
+    kind: NonNullable<Memory["kind"]>;
+    scope?: Memory["scope"];
+    content: string;
+  }[];
+  sources: { chat_id: string; message_id: string }[];
+  models: string[];
 };
 export type MemoryCandidate = {
   id: string;

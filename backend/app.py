@@ -404,18 +404,25 @@ def put_work_config(entry: WorkConfig):
         connection = provider().read_state()["config"]
         if entry.enabled and (connection["protocol"] != "ollama" or not connection["model"]):
             raise ValueError("Select a local Ollama chat model before enabling reflection.")
+        if entry.enabled and entry.auto_curate and connection["ollama_context_tokens"] < 8192:
+            raise ValueError("Automatic memory curation needs at least 8192 context tokens. Update Local worker settings first.")
         for model in (entry.reflection_model, entry.memory_model, entry.coding_model):
             safe_private_content(model)
         with workspace_transaction(with_db=True) as (state, db):
-            if config_value(state) != entry.model_dump():
+            previous = config_value(state)
+            if previous != entry.model_dump():
                 ReflectionStore(DATABASE, TIMEZONE).invalidate(db, clear_candidates=False)
+                if entry.enabled and entry.auto_curate and entry.periodic_reflection and (
+                        not all(previous[field] for field in ("enabled", "auto_curate", "periodic_reflection"))
+                        or previous["reflection_interval_minutes"] != entry.reflection_interval_minutes):
+                    db.execute("UPDATE reflection_schedule SET next_due=0 WHERE id=1")
             state["work_config"] = entry.model_dump()
     return work_status(state)
 
 
 @app.get("/api/reflection")
 def get_reflection():
-    return work_status(read_workspace())
+    return {**work_status(read_workspace()), "memories": MemoryStore(DATABASE, TIMEZONE).list()}
 
 
 @app.post("/api/reflection/candidates/{candidate_id}/accept")

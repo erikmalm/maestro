@@ -9,6 +9,7 @@ from unittest.mock import patch
 from fastapi.testclient import TestClient
 from backend import app as backend
 from backend.memory import MemoryStore
+from backend.reflection import ReflectionStore
 from backend.work_config import WorkConfig
 
 
@@ -73,6 +74,8 @@ class WorkConfigAPITests(unittest.TestCase):
         self.assertEqual(self.client.put("/api/work-config", headers={**self.headers, "Origin": "https://unrelated.example"}, json=config).status_code, 403)
         for changes in ({"memory_recall_count": 6}, {"memory_recall_characters": 1001},
                         {"idle_seconds": -1}, {"max_jobs_per_day": True}, {"max_output_tokens": "512"},
+                        {"auto_curate": "true"}, {"periodic_reflection": 1},
+                        {"reflection_interval_minutes": 29}, {"reflection_interval_minutes": 10081},
                         {"reflection_model": "private model with spaces"}, {"unknown": "private input"}):
             response = self.client.put("/api/work-config", headers=self.headers, json={**config, **changes})
             self.assertEqual(response.status_code, 422, response.text)
@@ -96,6 +99,27 @@ class WorkConfigAPITests(unittest.TestCase):
             self.assertEqual(response.status_code, 200, response.text)
             self.assertFalse(response.json()["config"]["enabled"])
 
+    def test_automatic_curation_requires_context_and_preserves_the_six_hour_schedule(self):
+        config = self.client.get("/api/work-config").json()["config"]
+        provider = self.client.get("/api/provider").json()["config"]
+        local = {**provider, "protocol": "ollama", "base_url": "http://127.0.0.1:11434",
+                 "model": "synthetic:7b", "ollama_context_tokens": 4096}
+        automatic = {**config, "enabled": True, "auto_curate": True, "periodic_reflection": True}
+        self.assertEqual(automatic["reflection_interval_minutes"], 360)
+        with patch("backend.provider.network", side_effect=AssertionError("Saving settings must not infer")):
+            self.assertEqual(self.client.put("/api/provider", headers=self.headers,
+                json={"config": local, "persist": False}).status_code, 200)
+            response = self.client.put("/api/work-config", headers=self.headers, json=automatic)
+            self.assertEqual(response.status_code, 409, response.text)
+            self.assertIn("8192", response.json()["detail"])
+            self.assertEqual(self.client.get("/api/work-config").json()["config"], config)
+            self.assertEqual(self.client.put("/api/provider", headers=self.headers,
+                json={"config": {**local, "ollama_context_tokens": 8192}, "persist": False}).status_code, 200)
+            response = self.client.put("/api/work-config", headers=self.headers, json=automatic)
+            self.assertEqual(response.status_code, 200, response.text)
+            self.assertEqual(response.json()["config"], automatic)
+            self.assertEqual(self.client.get("/api/work-config").json()["config"], automatic)
+
     def test_configured_keys_cannot_be_saved_as_model_names(self):
         config = self.client.get("/api/work-config").json()["config"]
         key = "synthetic-configured-key"
@@ -105,6 +129,32 @@ class WorkConfigAPITests(unittest.TestCase):
                 self.assertEqual(response.status_code, 409, response.text)
                 self.assertNotIn(key, response.text)
         self.assertNotIn(key.encode(), backend.DATABASE.read_bytes())
+
+    def test_schedule_changes_take_effect_without_resetting_unchanged_saves(self):
+        self.client.get("/api/workspace")
+        provider = self.client.get("/api/provider").json()["config"]
+        self.client.put("/api/provider", headers=self.headers, json={"config": {
+            **provider, "protocol": "ollama", "base_url": "http://127.0.0.1:11434",
+            "model": "synthetic:7b", "ollama_context_tokens": 8192}, "persist": False})
+        config = {**WorkConfig().model_dump(), "enabled": True, "auto_curate": True, "periodic_reflection": True}
+        self.assertEqual(self.client.put("/api/work-config", headers=self.headers, json=config).status_code, 200)
+        store = ReflectionStore(backend.DATABASE, backend.TIMEZONE)
+        def deadline():
+            with closing(sqlite3.connect(backend.DATABASE)) as db:
+                return db.execute("SELECT next_due FROM reflection_schedule WHERE id=1").fetchone()[0]
+        def future():
+            with store.transaction() as db:
+                db.execute("UPDATE reflection_schedule SET next_due=123456789 WHERE id=1")
+        future()
+        self.assertEqual(self.client.put("/api/work-config", headers=self.headers, json=config).status_code, 200)
+        self.assertEqual(deadline(), 123456789)
+        config["reflection_interval_minutes"] = 120
+        self.assertEqual(self.client.put("/api/work-config", headers=self.headers, json=config).status_code, 200)
+        self.assertEqual(deadline(), 0)
+        future()
+        self.client.put("/api/work-config", headers=self.headers, json={**config, "periodic_reflection": False})
+        self.client.put("/api/work-config", headers=self.headers, json=config)
+        self.assertEqual(deadline(), 0)
 
     def test_recall_controls_can_reduce_or_disable_context_without_erasing_records(self):
         self.client.get("/api/workspace")

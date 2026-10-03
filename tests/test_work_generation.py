@@ -159,6 +159,23 @@ class WorkGenerationTests(unittest.TestCase):
             self.provider.generate("Synthetic query", "synthetic-chat")
         recall.assert_called_once_with("Synthetic query", "synthetic-chat", local=True, limit=0, max_characters=100)
 
+    def test_local_chat_preserves_reflection_note_kind_as_untrusted_context(self):
+        note = {"id": "synthetic-note", "content": "My working style is concise.", "origin": "reflective", "kind": "identity"}
+        with patch.object(MemoryStore, "recall", return_value=[note]), patch("backend.provider.network", side_effect=self.network):
+            self.provider.generate("Synthetic query", "synthetic-chat")
+        payload = self.calls[-1][2]
+        self.assertIn("not user facts", payload["messages"][0]["content"])
+        supplied = json.loads(payload["messages"][1]["content"].split("\n", 1)[1])
+        self.assertEqual(supplied, [note])
+
+    def test_only_local_chat_marks_future_periodic_evidence(self):
+        with patch("backend.provider.network", side_effect=self.network):
+            self.provider.generate("Synthetic user preference", "synthetic-chat")
+            self.provider.generate("Synthetic planning request", "synthetic-chat", role="orchestrator")
+        messages = self.read_workspace()["chats"][0]["messages"]
+        self.assertTrue(messages[0]["reflection_eligible"])
+        self.assertFalse(messages[2]["reflection_eligible"])
+
 
 if __name__ == "__main__":
     unittest.main()

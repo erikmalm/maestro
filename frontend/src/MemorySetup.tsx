@@ -3,15 +3,24 @@ import { Pencil, Trash2 } from "lucide-react";
 import * as api from "./api";
 import type { Chat, Memory, MemoryCandidate } from "./api";
 
+const kindLabels = {
+  fact: "User fact",
+  preference: "Preference",
+  identity: "Working identity",
+  lesson: "Lesson",
+};
+
 export default function MemorySetup({
   memories,
   candidates,
+  automatic,
   chats,
   chatId,
   onChange,
 }: {
   memories: Memory[];
   candidates: MemoryCandidate[];
+  automatic: boolean;
   chats: Chat[];
   chatId: string | null;
   onChange: () => void;
@@ -54,13 +63,15 @@ export default function MemorySetup({
       <div className="reflection-title">
         <div>
           <h2>Private memory</h2>
-          <p>Save preferences and facts for later local chats.</p>
+          <p>Private facts, preferences and notes on working style.</p>
         </div>
         <span className="badge">{memories.length} saved</span>
       </div>
       <p className="reflection-note">
-        You control what is saved. Relevant memories are used in local chats
-        when hosted web search is off.
+        {automatic
+          ? "Maestro maintains memory automatically. Edit to pin a correction, or forget any entry."
+          : "You choose which memories are saved."}{" "}
+        Relevant memories are used in local chats when hosted web search is off.
       </p>
       {error && (
         <p className="error-banner" role="alert">
@@ -68,70 +79,83 @@ export default function MemorySetup({
         </p>
       )}
       {notice && <p role="status">{notice}</p>}
-      <form
-        onSubmit={(event) => {
-          event.preventDefault();
-          if (!content.trim()) return;
-          void save(
-            () =>
-              editing
-                ? api.correctMemory(editing, content)
-                : api.remember(content, scope, chatId),
-            editing ? "Memory updated." : "Memory saved.",
-            true,
-          );
-        }}
+      <details
+        className="reflection-cleanup"
+        open={!automatic || !!editing || !!content}
       >
-        <label>
-          {editing ? "Edit memory" : "What should Maestro remember?"}
-          <textarea
-            required
-            maxLength={1000}
-            rows={3}
-            value={content}
-            disabled={busy}
-            onChange={(event) => setContent(event.target.value)}
-          />
-        </label>
-        {!editing && (
+        <summary>{editing ? "Edit memory" : "Add a memory"}</summary>
+        <form
+          onSubmit={(event) => {
+            event.preventDefault();
+            if (!content.trim()) return;
+            void save(
+              () =>
+                editing
+                  ? api.correctMemory(editing, content)
+                  : api.remember(content, scope, chatId),
+              editing ? "Memory updated." : "Memory saved.",
+              true,
+            );
+          }}
+        >
           <label>
-            Use this memory in
-            <select
-              value={scope}
+            {editing ? "Edit memory" : "What should Maestro remember?"}
+            <textarea
+              required
+              maxLength={1000}
+              rows={3}
+              value={content}
               disabled={busy}
-              onChange={(event) =>
-                setScope(event.target.value as Memory["scope"])
-              }
-            >
-              <option value="workspace">All local chats</option>
-              <option value="conversation" disabled={!chatId}>
-                This conversation
-              </option>
-            </select>
+              onChange={(event) => setContent(event.target.value)}
+            />
           </label>
-        )}
-        <div className="reflection-actions">
-          <button className="button primary" disabled={busy || !content.trim()}>
-            {editing ? "Update memory" : "Save memory"}
-          </button>
-          {editing && (
-            <button
-              type="button"
-              className="button secondary"
-              disabled={busy}
-              onClick={() => {
-                setEditing("");
-                setContent("");
-              }}
-            >
-              Cancel edit
-            </button>
+          {!editing && (
+            <label>
+              Use this memory in
+              <select
+                value={scope}
+                disabled={busy}
+                onChange={(event) =>
+                  setScope(event.target.value as Memory["scope"])
+                }
+              >
+                <option value="workspace">All local chats</option>
+                <option value="conversation" disabled={!chatId}>
+                  This conversation
+                </option>
+              </select>
+            </label>
           )}
-        </div>
-      </form>
+          <div className="reflection-actions">
+            <button
+              className="button primary"
+              disabled={busy || !content.trim()}
+            >
+              {editing ? "Update memory" : "Save memory"}
+            </button>
+            {editing && (
+              <button
+                type="button"
+                className="button secondary"
+                disabled={busy}
+                onClick={() => {
+                  setEditing("");
+                  setContent("");
+                }}
+              >
+                Cancel edit
+              </button>
+            )}
+          </div>
+        </form>
+      </details>
       {!!candidates.length && (
-        <div>
-          <h3>Proposed memories</h3>
+        <details className="reflection-cleanup" open={!automatic}>
+          <summary>
+            {automatic
+              ? "Earlier suggestions awaiting review"
+              : "Proposed memories"}
+          </summary>
           <p className="reflection-note">
             These suggestions are not used until you accept them.
           </p>
@@ -192,18 +216,53 @@ export default function MemorySetup({
               </div>
             </div>
           ))}
-        </div>
+        </details>
       )}
       {memories.map((memory) => (
         <div className="memory-entry" key={memory.id}>
           <div>
             <p>{memory.content}</p>
             <small>
+              {kindLabels[memory.kind ?? "fact"]}
+              {" · "}
+              {memory.pinned || memory.origin === "explicit"
+                ? "User-pinned"
+                : memory.origin === "reflective"
+                  ? "AI reflection"
+                  : "AI-curated"}
+              {" · "}
               {memory.scope === "workspace"
                 ? "All local chats"
                 : chats.find((chat) => chat.id === memory.chat_id)?.title ||
                   "Conversation"}
             </small>
+            {(memory.evidence ||
+              memory.source_message_id ||
+              !!memory.provenance?.length) && (
+              <details>
+                <summary>Source</summary>
+                {memory.evidence && (
+                  <blockquote className="reflection-note">
+                    {memory.evidence}
+                  </blockquote>
+                )}
+                {memory.provenance?.length
+                  ? memory.provenance.map((source, index) => (
+                      <p className="reflection-note" key={index}>
+                        {"memory_id" in source
+                          ? `Memory: ${memories.find((item) => item.id === source.memory_id)?.content || source.memory_id}`
+                          : `${chats.find((chat) => chat.id === source.chat_id)?.title || "Conversation"} · message ${source.message_id}`}
+                      </p>
+                    ))
+                  : memory.source_message_id && (
+                      <p className="reflection-note">
+                        {chats.find((chat) => chat.id === memory.chat_id)
+                          ?.title || "Conversation"}{" "}
+                        · message {memory.source_message_id}
+                      </p>
+                    )}
+              </details>
+            )}
           </div>
           <button
             className="icon-button"

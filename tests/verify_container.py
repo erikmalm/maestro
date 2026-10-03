@@ -23,6 +23,8 @@ import json
 class Ollama(BaseHTTPRequestHandler):
     def log_message(self, *args): pass
     def do_GET(self):
+        if self.path == "/api/ps":
+            return self.reply({"models": []})
         self.reply({"models": [{"name": name, "details": {"format": "gguf"}, "capabilities": ["completion", "tools"]}
                                for name in ("synthetic-chat", "synthetic-orchestrator")]})
     def do_POST(self):
@@ -35,9 +37,23 @@ class Ollama(BaseHTTPRequestHandler):
         if body.get("format"):
             assert body["keep_alive"] == 0 and "tools" not in body
             assert body["options"]["num_predict"] == 64
-            source = json.loads(body["messages"][1]["content"])[-1]
-            proposal = {"content": source["text"], "evidence": source["text"], "source_message_id": source["source_message_id"]}
-            return self.reply({"done": True, "message": {"content": json.dumps({"memories": [proposal]})},
+            context = json.loads(body["messages"][1]["content"])
+            fields = body["format"]["properties"]
+            if "approved" in fields:
+                result = {"approved": list(range(len(context["drafts"]))), "summary": "Reviewed the synthetic changes."}
+            else:
+                periodic = body["messages"][0]["content"].startswith("Reflect as Maestro")
+                if periodic:
+                    proposal = {"content": "I use concise, verifiable steps and respect user control.", "evidence": "", "source_message_id": ""}
+                else:
+                    source = context["sources"][-1] if isinstance(context, dict) else context[-1]
+                    proposal = {"content": source["text"], "evidence": source["text"], "source_message_id": source["source_message_id"]}
+                result = {"memories": [proposal]}
+                if "summary" in fields:
+                    proposal.update(operation="add", memory_id="", kind="identity" if periodic else "preference",
+                                    scope="workspace" if periodic else context["new_memory_scope"])
+                    result["summary"] = "Prepared a synthetic working practice." if periodic else "Normalized a synthetic preference."
+            return self.reply({"done": True, "message": {"content": json.dumps(result)},
                                "prompt_eval_count": 30, "eval_count": 10})
         title = body["messages"][0]["content"].startswith("Create a short")
         self.reply({"done": True, "message": {"content": "Synthetic model choices" if title else "Reply from " + body["model"]},
@@ -197,6 +213,48 @@ def verify(image, tunnel=False):
         state = api("/api/workspace")
         assert (state["usage"]["input_tokens"], state["usage"]["output_tokens"], state["usage"]["calls"], state["usage"]["today_usd"]) == (580, 125, 8, 0)
         assert not state["work"]["config"]["enabled"] and state["memories"] == []
+        api("/api/provider", {"config": {**state["provider"]["config"], "ollama_context_tokens": 8192}}, method="PUT", headers=headers)
+        automatic = {**policy, "enabled": True, "auto_curate": True, "debounce_seconds": 0, "idle_seconds": 0,
+                     "memory_model": MODELS[0], "reflection_model": MODELS[1], "max_output_tokens": 64}
+        api("/api/work-config", automatic, method="PUT", headers=headers)
+        api("/api/chat", {"text": "I prefer short, concise replies."}, headers=headers)
+
+        def await_memory(kind):
+            deadline = time.monotonic() + 15
+            while time.monotonic() < deadline:
+                records = api("/api/memory")
+                found = next((record for record in records if record["kind"] == kind), None)
+                if found:
+                    assert not found["pinned"]
+                    if kind == "preference":
+                        assert found["provenance"]
+                    return found
+                time.sleep(0.2)
+            raise AssertionError("Container background worker did not persist an independently reviewed memory: " + str(api("/api/reflection")["last_stop_reason"]))
+
+        def latest_calls():
+            return json.loads(podman("exec", name, "python", "-c", "import json,sqlite3; db=sqlite3.connect('/data/workspace.sqlite3'); print(json.dumps(json.loads(db.execute('SELECT value FROM provider_state').fetchone()[0])['ledger'][-2:]))").stdout)
+
+        curated = await_memory("preference")
+        assert curated["origin"] == "curated" and curated["content"] == "I prefer short, concise replies."
+        calls = latest_calls()
+        assert [(call["kind"], call["model"], call["stage"]) for call in calls] == [("memory", MODELS[0], 0), ("reflection", MODELS[1], 1)]
+        assert api("/api/reflection")["today_jobs"] == 3
+        api("/api/work-config", {**automatic, "periodic_reflection": True}, method="PUT", headers=headers)
+        identity = await_memory("identity")
+        assert identity["origin"] == "reflective" and identity["scope"] == "workspace"
+        calls = latest_calls()
+        assert [(call["kind"], call["model"], call["stage"]) for call in calls] == [("reflection", MODELS[1], 0), ("memory", MODELS[0], 1)]
+        reflection = api("/api/reflection")
+        assert reflection["today_jobs"] == 4 and reflection["today_tokens"] == 240 and reflection["candidates"] == []
+        assert reflection["next_reflection_at"] and [entry["kind"] for entry in reflection["journal"]] == ["reflection", "curation"]
+        assert [entry["models"] for entry in reflection["journal"]] == [[MODELS[1], MODELS[0]], [MODELS[0], MODELS[1]]]
+        api("/api/work-config", policy, method="PUT", headers=headers)
+        api(f"/api/memory/{identity['id']}", method="DELETE", headers=headers)
+        api(f"/api/memory/{curated['id']}", method="DELETE", headers=headers)
+        state = api("/api/workspace")
+        assert (state["usage"]["input_tokens"], state["usage"]["output_tokens"], state["usage"]["calls"], state["usage"]["today_usd"]) == (800, 185, 13, 0)
+        assert not state["work"]["config"]["enabled"] and state["memories"] == []
         second = podman("exec", name, "python", "-c", "from backend.storage import workspace_owner; workspace_owner('/data').__enter__()", check=False)
         assert second.returncode != 0 and "already running" in second.stderr
         podman("exec", name, "python", "-m", "backend.storage", "/data/workspace.sqlite3", "/data/verify-backup.sqlite3")
@@ -257,7 +315,7 @@ def verify(image, tunnel=False):
         assert "missing or invalid" in rejected["detail"] and "/run/secrets" not in rejected["detail"]
         api("/api/provider", {"config": state["provider"]["config"]}, method="PUT", headers=headers)
         api("/api/web-search", {"config": {**recovered["web_search"]["config"], "enabled": False}}, method="PUT", headers=headers)
-        print("Podman integration passed: build context, isolation, model choices, background reflection and review, persistence, recreation, backup/restore, mounted secrets and invalid-secret recovery.")
+        print("Podman integration passed: build context, isolation, model choices, reviewed curation and periodic identity, persistence, recreation, backup/restore, mounted secrets and invalid-secret recovery.")
     finally:
         podman("rm", "--force", fixture_name, check=False)
         for container, data in ((restored, restored_volume), (name, volume)):

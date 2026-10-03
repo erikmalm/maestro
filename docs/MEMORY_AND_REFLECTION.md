@@ -1,95 +1,81 @@
 # Private memory and background reflection
 
-Updated: 2026-10-03. This branch implements explicit memory, shared local generation and an opt-in durable reflection worker. Inferred memories remain proposals until the user accepts them. Automatic promotion and task execution remain planned.
-
-## Working first increment
-
-Settings provides **save, edit and forget** for explicit facts or preferences. `backend/memory.py` stores them in the existing private SQLite database, in a new `private_memories` table. No additional service, container, dependency or model call is needed to manage or retrieve memory. Prototype archive records stay inactive.
-
-Records have an ID, content, workspace/conversation scope, optional chat/user-message provenance, explicit origin and timestamps. Conversation records require an existing chat. Source-linked records require a real user message; assistant claims cannot serve as their source. Workspace records without a chat reference survive chat deletion. Deleting a chat removes scoped and source-linked memories in the same transaction.
-
-Recall uses Unicode word overlap with basic English/Swedish stopwords. It selects relevant workspace/current-conversation records within saved count/character allowances, capped at five records and 1,000 combined characters. Setting either allowance to zero disables recall without deleting memory. The store permits 200 records of 1,000 characters each. Lowest-ranked records are omitted when they cannot fit context/token limits. Keyword recall can miss paraphrases; measure misses before adding FTS or embeddings.
-
-Only normal local Ollama chat receives memory, when automatic hosted search is inactive. Memory enters the prompt as quoted, untrusted supplemental data; it grants no tools or permissions. Current user instructions take precedence. The reply records supplied memory IDs and the UI displays their count; this identifies context supplied, not proof the model used every entry.
-
-Memory-derived history also remains local: conversations containing these IDs cannot subsequently dispatch to a remote provider or active hosted search. Start a new conversation for those modes. Titles use a bounded first user message; explicit reflection context receives no automatic recall. Forgetting retains historical IDs so provider switching cannot bypass this restriction.
-
-`POST /api/memory`, `PATCH /api/memory/{id}` and `DELETE /api/memory/{id}` mutate records; `GET /api/memory` and workspace snapshots expose them for management. Session, Origin and CSRF checks apply. Validation errors do not echo input. Known active provider/search credentials are rejected if pasted into memory; this is not a general secret detector.
-
-Editing replaces a record for future recall. Separate contradictory records are not merged: correct or forget the old record. Forget removes the live row with SQLite secure deletion enabled, but cannot retract a dispatched prompt or erase earlier replies, snapshots or backups. Source text editing is unsupported; versioning must precede it. Reads exclude missing, empty or non-user sources without modifying the database.
-
-`Provider.generate_context(instructions, messages, model, max_output_tokens, kind)` accepts explicit local-only reflection, memory-extraction or coding context through existing dispatch, limits, reservation and accounting. It captures configuration, validates an installed completion model, disables tools/search/chat persistence and forces `keep_alive=0`. Reflection/memory outputs use the saved cap (default 512); explicit requests and provider limits can reduce it. Coding uses the request/provider cap, with a 1,024-token ceiling for this text-only foundation. A caller must initialize the workspace first. This does not execute coding tools or queue work.
-
-## Saved configuration
-
-**Settings → Task models & reflection** saves private `work_config` alongside the workspace in SQLite. `GET/PUT /api/work-config` exposes this validated configuration; defaults on existing workspaces require no migration/write. Chat and orchestrator choices remain in provider settings. Task choices survive changing the chat provider, but dispatch requires the current connection to be Local Ollama; no remote fallback is permitted.
-
-For each task kind, an explicit per-call model wins, then the saved model, then the recommended installed tag, then the local chat default. Blank selections mean recommended installed model: `gpt-oss:20b` for reflection, `qwen2.5:7b` for extraction, `devstral-small-2:24b` for coding. Recommendations use the discovered installed list, and every dispatch verifies model capability. Explicit missing tags fail with an actionable error; the system does not silently replace them or download models.
-
-| Setting | Default | Current effect |
-| --- | --- | --- |
-| Reflection/memory/coding model | Recommended installed tag or chat fallback | Selected for explicit-context generation of that kind. |
-| Reflection output tokens | 512 | Caps reflection and memory-extraction output alongside provider/request limits. |
-| Memories per reply / context characters | 5 / 1,000 | Bounds local recall; either zero disables it. |
-| Debounce / chat idle time | 60 / 30 seconds | Coalesces new user evidence and waits for chat to become idle. |
-| Daily reflection jobs / total tokens | 10 / 10,000 | Reserved conservatively before dispatch; zero pauses dispatch. |
-| Job timeout | 180 seconds | One deadline covers model verification and inference. Unconfirmed completion keeps the generation gate blocked until Ollama reports no loaded models. |
-| Background reflection enabled | False | Explicitly enable with a configured local Ollama connection; pause prevents new dispatch and discards late results. |
-
-One shared generation slot and post-task model unloading are fixed safety boundaries. Local context size, CPU threads and chat keep-loaded duration remain in **Model connection → Local worker settings**. Coding and standalone extraction model choices are saved for their respective explicit callers; the idle worker makes one reflection call using the reflection model. [Windows background operation](WINDOWS_BACKGROUND.md) explains locking, sleep and launcher lifetime.
+Updated: 2026-10-03. Maestro supports manual memory, optional automatic curation and scheduled reflection. It uses the existing API process, private SQLite database and host Ollama, without new services or dependencies. Task execution and delegation remain planned.
 
 ## Using background reflection
 
-1. Select a local Ollama connection in Settings.
-2. In **Task models & reflection**, choose a reflection model, enable background reflection and save.
-3. Continue a local chat. New user messages are queued atomically with successful replies; old chats are not scanned when enabling the worker. Hosted-search turns are excluded.
-4. After the configured debounce and chat inactivity, one bounded call can propose up to three exact excerpts of user evidence. With no eligible evidence, the worker waits without making model calls.
-5. Inspect the proposals in **Private memory**. Accept one for its conversation or all local chats, or reject it. Proposals are excluded from recall until accepted; accepted records support the existing edit/forget controls.
+1. Select Local Ollama in Settings. Set **Local worker settings → Context tokens** to at least **8,192** for automatic curation.
+2. In **Task models & reflection**, enable background reflection and automatic memory curation. Enable independent reflection and choose **360 minutes** for a six-hour interval. Save.
+3. Continue chatting. After the configured quiet period, Maestro can normalize durable facts/preferences and save reviewed changes automatically.
+4. Read **Task models & reflection → Private reflection journal** for summaries, changes, source references and model names. Edit or forget any memory; editing pins it against automatic changes.
 
-Settings shows queued/running work, daily usage and the latest stop reason. Closing the browser does not stop the server-side worker. Locking Windows also permits work while the computer stays awake. The application and Ollama must remain running; automatic startup after a reboot is not installed.
+Independent reflection has an initial pass once the worker is idle, then follows the saved interval. It considers eligible conversation evidence, current memories and earlier working notes. It develops concise identity/lesson notes about how Maestro should work. These are revisable practices, not consciousness, user facts or new permissions.
 
-## Implemented background path
+Automatic curation and periodic reflection default off for existing installations. With automatic curation off, new eligible chat evidence produces exact-quote proposals requiring acceptance before recall. Existing proposals remain accessible in automatic mode. Only accepted, unedited proposals with matching fingerprints can become managed memories; manual entries and corrections stay pinned.
 
-Reflection turns selected user evidence into memory proposals, with no inference when there is no new evidence. [Reflexion](https://arxiv.org/abs/2303.11366) supports feedback-driven textual memory; its results do not establish arbitrary self-criticism as reliable for Maestro. [LangChain's memory concepts](https://docs.langchain.com/oss/python/concepts/memory) distinguish conversation state, persistent memory and background updates; these ideas do not require adopting its framework.
+Settings shows queued/running work, usage, the next reflection and stop reasons. Closing the browser or locking Windows does not stop the server. Windows must stay awake and Maestro/Ollama must remain running. Reboot startup is not installed; see [Windows background operation](WINDOWS_BACKGROUND.md).
 
-```mermaid
-flowchart LR
-    Event[New eligible local user message] --> Tx[Commit message and coalesced job]
-    Tx --> DB[(Existing private SQLite)]
-    DB --> Worker[One worker in API lifespan]
-    Worker --> Gate[Shared reservation and ledger]
-    Gate --> Ollama[Selected installed local model]
-    Ollama --> Validate[Validate evidence, scope and source hashes]
-    Validate --> Candidate[Private memory proposal]
-    Candidate --> Review[User accepts or corrects]
-    Review --> Recall[Bounded local recall]
-```
+## Saved configuration
 
-One worker starts inside FastAPI's lifespan under exclusive workspace ownership, in the application container. Synchronous job processing runs off the API event loop. The worker waits cheaply with the browser closed and requests model unloading after each eligible job. Shutdown waits for in-flight processing to finish or reach its deadline.
+Private work_config settings are validated through GET/PUT /api/work-config. Chat/orchestrator choices remain in provider settings. Background work requires Local Ollama and has no remote fallback.
 
-Jobs persist atomically with successful local chat exchanges and coalesce by conversation checkpoint. The worker receives only bounded real user messages, never its own prose or assistant claims. Each job permits one tool-free call. Explicit feedback APIs and verified task outcomes can supply evidence in later increments.
+| Setting | Default | Effect |
+| --- | --- | --- |
+| Background reflection | Off | Allows new work; pausing invalidates late results. |
+| Automatic memory curation | Off | Formation, independent review and automatic promotion. |
+| Independent reflection | Off | Scheduled identity/lesson maintenance when automatic curation is on. |
+| Reflection interval | 360 minutes | Initial eligible pass, then six-hour intervals; range 30 minutes to seven days. |
+| Reflection / memory / coding model | Recommended installed tag | gpt-oss:20b / qwen2.5:7b / devstral-small-2:24b; otherwise local chat fallback. |
+| Output tokens | 512 | Per-call ceiling, further reduced by request/provider limits. |
+| Debounce / chat idle time | 60 / 30 seconds | Coalesces evidence and waits for inactivity. |
+| Daily jobs / total tokens | 10 / 10,000 | One workflow counts as one job; both calls consume tokens. Zero pauses dispatch. |
+| Job timeout | 180 seconds | One deadline covers both model checks and generations. |
+| Memories per reply / characters | 5 / 1,000 | Recall ceilings; either zero disables recall. |
 
-A batch holds at most eight source references and 6,000 source characters, reduced further to fit the configured context allowance including instructions/schema and the conservative token reserve. Long messages contribute a prefix; the default 4,096-token context can leave only a short excerpt. Reflection can miss preferences later in a long message. Increasing local context permits more evidence; full-history extraction and quality evaluation remain separate work.
+Explicit model choices must be installed and support completion. Missing choices fail visibly; Maestro never downloads or silently substitutes them. Blank choices use the recommended installed tag or chat fallback. Coding configuration supports text generation, not autonomous execution. See [Local model assessment](LOCAL_MODELS.md).
 
-`reflection_jobs` stores source IDs/hashes, state, attempt token, captured settings, ledger request ID, timestamps and stop reason. Source text remains in the original chat. Separate candidate records hold pending excerpts and retain fingerprints after acceptance/rejection; resolved proposal text is cleared. Checkpoints prevent retrospective enqueue, and invalidation epochs prevent stale results from reappearing after edits, forgetting or configuration changes.
+## Formation, review and persistence
 
-The installed reflection model is selected independently of chat while sharing one generation slot. New chat activity delays dispatch between jobs. Defaults are 60-second debounce, 30 seconds of inactivity, one dispatch per job, 512 output tokens, ten jobs and 10,000 total input/output tokens daily. Worst-case usage is reserved before dispatch. These defaults need further measurements; dollar limits cannot bound free local inference. An already running job may briefly delay chat; instant preemption is not implemented.
+Chat curation uses the memory model to normalize and sanitize facts/preferences, then the reflection model reviews numbered changes. Periodic reflection reverses these roles: the reflection model develops working notes and the memory model reviews them. It can also remove an obsolete managed fact, but cannot invent or rewrite user facts without new user evidence. Either can abstain. Review approves indices rather than adding a rewrite loop; each workflow permits at most two calls.
 
-Local capability, settings, source hashes and ownership are rechecked before dispatch and commit. Startup preserves queued jobs, safely abandons interrupted dispatched jobs and prevents automatic replay. Attempt tokens prevent stale commits. Model/provider changes never create remote fallback. An overdue request is closed; ambiguous completion retains the generation reservation until `/api/ps` reports no loaded models. Requiring an empty list avoids alias-dependent cancellation checks; another application's loaded model may prolong this conservative wait. Maestro does not forcibly unload other applications' models. Separate processes still require leases and ownership-aware recovery before dispatch.
+Drafts stay in RAM. SQLite stores source references/hashes, captured settings, attempt/stage, request IDs and usage. Promotion requires strict JSON, exact user evidence for facts/preferences, valid scope, matching source/memory revisions, credential checks and independent approval. Explicit memories are protected. Model review can still err; schema validation establishes shape, not truth.
 
-The response uses [Ollama structured output](https://docs.ollama.com/capabilities/structured-outputs), then deterministic validation checks strict JSON, source IDs, exact evidence excerpts, duplicates and credential-looking content. A supported source quote does not justify an invented paraphrase: candidate content must itself appear in the quoted evidence. Source deletion cancels dependent jobs and removes proposals and source-linked accepted memories. Editing or forgetting memory conservatively invalidates pending work/proposals. Rejected fingerprints remain rejected across reprocessing.
+The private journal stores brief summaries, applied changes, source references, models and timestamps. It retains at most 100 entries and exposes the newest 20 in Settings. Hidden reasoning transcripts are not saved. Actual entries stay in private SQLite outside the public repository.
 
-Only user acceptance promotes a candidate into explicit scoped memory, with its source provenance preserved. Automatic promotion requires a future evaluation and narrowly defined rule. [MINJA](https://arxiv.org/abs/2503.03704) demonstrates why memory writes require controls beyond trusting an extraction model. Memory inherits local-only restrictions and never overrides instructions or permissions.
+Records distinguish fact, preference, identity and lesson, with explicit, curated or reflective origin. Metadata contains evidence and provenance. Human corrections become explicit pinned authority; automation changes managed records only. Earlier model ideas cannot justify invented user facts. Working notes enter local prompts as quoted suggestions.
+
+## Runtime and resource bounds
+
+One worker runs in FastAPI's lifespan under exclusive workspace ownership. Processing runs off the API event loop; the idle loop makes no inference calls. Jobs share chat's single reservation slot and usage ledger. Chat can run between formation and review; new activity or changed sources can invalidate review. In-flight generation can briefly delay chat; instant preemption is not implemented.
+
+Both stages reserve conservative usage before dispatch. First-call usage remains accounted if review fails or is blocked. Every call requests keep_alive=0, without tools, hosted search, titles or implicit recall. Unknown completion retains the slot until Ollama reports no loaded models. Another application's resident model can prolong this wait; Maestro never forcibly unloads other applications' models.
+
+Source context is bounded and reduced to fit the configured allowance. Long messages contribute prefixes, so later facts can be missed. New exchanges record eligibility: only normal local chat without active hosted search supplies periodic user evidence. Historical remote/search turns are not guessed eligible. Supported saved memories also provide context. Periodic reflection excludes conversation-scoped memories and their chats; bounded assistant response excerpts are labelled unverified and never serve as user-fact evidence.
+
+Queued work and schedule timestamps survive restart. Interrupted dispatched or between-stage work is abandoned without replay; drafts are not resumed. Attempt tokens, source hashes, memory revisions and invalidation epochs reject stale commits. Settings changes, forgetting and source deletion invalidate late results. Shutdown waits for in-flight processing to finish or reach its deadline.
+
+## Recall, correction and forgetting
+
+The store permits 200 records of at most 1,000 characters. Recall combines scoped Unicode keyword overlap with a small allowance for working-identity notes. It stays capped at five records and 1,000 total characters and omits entries that cannot fit generation limits. Measure retrieval misses before adding embeddings or another database.
+
+Only normal local Ollama chat without hosted search receives memory. Replies record supplied memory IDs, indicating context provided rather than proof of use. Conversations with memory-derived history cannot later dispatch remotely or use hosted search; start a new conversation for those modes.
+
+Editing pins a correction and invalidates pending work. Forgetting removes the record and dependent derived material. Human corrections and forgetting clear journal entries conservatively so old copies cannot bypass forgetting. Compact source barriers prevent old chats from recreating forgotten/superseded facts under different wording; fresh messages can supply new evidence. Chat deletion removes scoped/source-linked memories and dependent jobs. Unlinked explicit workspace records survive.
+
+Forgetting affects future recall, not dispatched prompts, earlier replies, snapshots or backups. SQLite secure deletion is enabled. Known active credentials and common credential patterns are rejected, but AI sanitation and pattern checks cannot detect every secret. Keep passwords and keys out of chat and memory.
+
+Management routes remain GET/POST /api/memory and PATCH/DELETE /api/memory/{id}. GET /api/reflection provides read-only status, current memories and journal for guarded UI polling. Legacy proposal accept/reject routes remain. Session, Origin and CSRF protections apply; errors do not echo private input.
 
 ## Recorded next tasks
 
-| ID | Increment | Acceptance |
-| --- | --- | --- |
-| MEM-01 | Explicit memory/local recall — implemented | Save/edit/forget persists; scopes, credential rejection and chat deletion pass API/browser checks. |
-| GEN-01 | Explicit-context generation — implemented | Local calls share reservation/accounting, leave chats unchanged and use no tools/search/recall. |
-| REF-01 | Durable chat jobs and source hashes — implemented | Atomic enqueue, deduplication, correction/forget/delete invalidation and stale-attempt rejection survive restart. |
-| REF-02 | Idle worker and independent model choice — implemented | Browser-independent work, inactivity priority, pause/disable, one slot, config changes, call/token/time bounds and unload checks. |
-| REF-03 | Evidence-backed candidates — implemented | Strict schema, exact user excerpts, credential rejection, provenance and explicit user acceptance. |
-| REF-04 | Evaluate/selectively promote | Compare no-memory/explicit/candidate-assisted behavior; measure usefulness, false/stale facts, abstention, latency and memory use. |
+[LangMem's concepts](https://github.com/langchain-ai/langmem/blob/main/docs/docs/concepts/conceptual_guide.md) support separating facts, experiences and practices, and consolidating memory between interactions. Maestro uses those concepts without its framework. [Ollama structured outputs](https://docs.ollama.com/capabilities/structured-outputs) provide bounded shapes. [MINJA](https://arxiv.org/abs/2503.03704) demonstrates memory poisoning risks; model review supplements deterministic source, scope, pin and deletion checks.
 
-Use synthetic fixtures in CI, including deletion during inference, restart after dispatch and provider switching. [LongMemEval](https://arxiv.org/abs/2410.10813) motivates testing updates, temporal evidence and abstention alongside extraction. A small passing probe cannot validate autonomous curation. See [LOCAL_MODELS.md](LOCAL_MODELS.md) for current measurements.
+| ID | State | Acceptance / remaining work |
+| --- | --- | --- |
+| MEM-01 | Implemented | Explicit memory, scoped recall, edit/pin/forget and private storage. |
+| GEN-01 | Implemented | Local generation shares accounting without tools or chat persistence. |
+| REF-01–03 | Implemented | Durable jobs, source revisions, bounded worker and optional reviewed proposals. |
+| REF-04 | Automatic mode implemented; evaluation ongoing | Two-stage promotion and journal; measure false/stale facts, relevance, abstention and correction quality over repeated trials. |
+| REF-05 | Scheduled reflection implemented | Initial idle pass, persistent interval, shared limits and editable working notes. |
+
+Synthetic checks cover deletion, forgetting, pins, interrupted stages and accounting. Small local probes establish execution, not broad memory quality. Compare no-memory, explicit-memory and automatic modes on repeated realistic tasks before relaxing limits or expanding autonomy.

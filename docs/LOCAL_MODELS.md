@@ -1,6 +1,6 @@
 # Local model suitability
 
-Assessment date: 2026-10-02. Installed models cover lightweight chat/extraction, reasoning and coding. No new model is needed for the first increment. Keep Qwen as chat default, evaluate gpt-oss for reflection and use Devstral for coding on demand. **Task models & reflection** saves independent choices; blank choices use these tags when discovered installed, otherwise the local chat default. The opt-in idle worker uses the reflection model with structured output and low/off thinking when supported. Explicit-context calls select by task kind; autonomous coding and general task dispatch remain planned.
+Assessment date: 2026-10-02. Installed models cover lightweight chat/extraction, reasoning and coding. No new model is needed for the first increment. Keep Qwen as chat default, evaluate gpt-oss for reflection and use Devstral for coding on demand. **Task models & reflection** saves independent choices; blank choices use these tags when discovered installed, otherwise the local chat default. Automatic chat curation uses the memory model (Qwen) then the reflection model (gpt-oss) for independent review. Periodic working-note reflection reverses those roles. Both use structured output and low/off thinking when supported; automatic mode needs at least 8K context. Explicit-context calls select by task kind; autonomous coding and general task dispatch remain planned.
 
 ## Installed models and primary evidence
 
@@ -28,7 +28,7 @@ Qwen abstained in the injected-quote fixture: it avoided the malicious claim but
 
 Allocations are sampled Ollama `/api/ps` fields, not total process RAM or guaranteed peaks; missing samples do not mean zero use. Devstral's model allocation exceeded its GPU portion by about 1.43 GiB, consistent with CPU placement. gpt-oss fit on GPU in these short calls. Other applications and larger contexts change placement/speed. Median load times were 2.18/4.74/5.93 seconds; these unloaded-model calls used OS caches, not fresh-boot or warm-residency measurements. All models unloaded at completion.
 
-This is short extraction, not long-history recall, autonomous planning, code editing or verified lesson quality. Four fixtures/one seed cannot justify automatic curation. Schema controls shape, not truth. The reflection worker now requests schema output and low/off thinking when supported, following [Ollama's structured-output](https://docs.ollama.com/capabilities/structured-outputs) and [thinking controls](https://docs.ollama.com/capabilities/thinking). Its stricter exact-excerpt validation still needs broader quality evaluation.
+This is short extraction, not long-history recall, autonomous planning, code editing or verified lesson quality. Four fixtures/one seed cannot establish automatic curation quality. Schema controls shape, not truth. The reflection worker now requests schema output and low/off thinking when supported, following [Ollama's structured-output](https://docs.ollama.com/capabilities/structured-outputs) and [thinking controls](https://docs.ollama.com/capabilities/thinking). Automatic mode permits normalized facts with exact source evidence and independent review; both modes still need broader quality evaluation.
 
 Reproduce deliberately with other Ollama sessions idle:
 
@@ -38,6 +38,11 @@ Reproduce deliberately with other Ollama sessions idle:
 
 The raw report stays outside the checkout. The opt-in probe reads only Ollama metadata and public fixtures. It does not run in CI or at startup. An HTTP timeout may leave inference running until the server finishes; `keep_alive=0` then unloads, and the report records remaining loaded models.
 
+## Automatic workflow smoke (2026-10-03)
+
+A separate temporary database and one synthetic preference exercised the real two-stage curation path at 8,192 context tokens, a 512-token per-call output cap and the default 10,000-token daily allowance. Qwen formed a concise preference with exact user evidence; gpt-oss independently approved it. Both calls settled, a curated memory and journal entry persisted, and the workflow took 8.83 seconds with 580 actual input/output tokens. A current-version periodic probe preserved an existing synthetic preference and added an independently reviewed lesson with the model order reversed (9.79 seconds, 850 actual tokens). Both workflows left no loaded models in Ollama afterward.
+
+These checks used no personal chats and establish end-to-end execution only. Repeated Swedish/English correction, scope, abstention and sanitation-quality trials remain MODEL-03/REF-04 work; no additional model or dependency was installed.
 ## Diversification and next measurements
 
 Use one model at a time and bounded context. Unloaded installed models consume no inference memory; an idle background worker should not keep an LLM resident. Devstral's observed offload/slower throughput make it a poor frequent-reflection default on this GPU. gpt-oss is the stronger first reflection candidate here; Qwen is faster for ordinary interaction. Compare both before choosing automation defaults.

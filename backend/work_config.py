@@ -9,6 +9,9 @@ class WorkConfig(BaseModel):
     memory_model: str = Field(default="", max_length=200, pattern=r"^[A-Za-z0-9_./:-]*$")
     coding_model: str = Field(default="", max_length=200, pattern=r"^[A-Za-z0-9_./:-]*$")
     enabled: bool = False
+    auto_curate: bool = False
+    periodic_reflection: bool = False
+    reflection_interval_minutes: int = Field(default=360, ge=30, le=10080)
     debounce_seconds: int = Field(default=60, ge=0, le=3600)
     idle_seconds: int = Field(default=30, ge=0, le=3600)
     max_output_tokens: int = Field(default=512, ge=1, le=1024)

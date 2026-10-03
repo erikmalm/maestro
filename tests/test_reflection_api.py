@@ -127,5 +127,7 @@ class ReflectionAPITests(unittest.TestCase):
         with closing(sqlite3.connect(backend.DATABASE)) as monitor:
             version = monitor.execute("PRAGMA data_version").fetchone()[0]
             for _ in range(3):
-                self.assertEqual(self.client.get("/api/reflection").status_code, 200)
+                response = self.client.get("/api/reflection")
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(response.json()["memories"], self.memory.list())
             self.assertEqual(monitor.execute("PRAGMA data_version").fetchone()[0], version)

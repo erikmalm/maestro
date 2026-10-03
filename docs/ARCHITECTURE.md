@@ -10,8 +10,8 @@ flowchart LR
         UI[React interface]
         API[FastAPI local API]
         Chat[Provider chat and accounting]
-        Memory[Explicit memory and lexical recall]
-        Reflection[Idle reflection and memory proposals]
+        Memory[Typed memory and bounded recall]
+        Reflection[Curation, scheduled reflection and journal]
         DB[(Private SQLite workspace)]
         Keys[Windows credentials or server memory]
         Ollama[Local Ollama model]
@@ -34,9 +34,9 @@ flowchart LR
 
 The built frontend is served by FastAPI on one loopback origin. Workspace contains chat, Tasks contains manual to-dos, and Settings configures the active model, credentials, search and limits. The header and usage view report actual model usage and estimated spend.
 
-`backend/app.py` owns session/CSRF protection, validation, CRUD and the application lifespan. `backend/provider.py` owns the single connection, shared generation slot and usage ledger. `backend/reflection.py` owns durable idle jobs, source validation and memory proposals. `backend/work_config.py` validates private task models and worker policy; `backend/memory.py` owns accepted records and read-only recall. `backend/web_search.py` owns search readiness and limits. Reads avoid writes after initialization. SQLite writes use immediate transactions; generation runs outside locks. One worker runs inside the sole API process under exclusive workspace ownership.
+`backend/app.py` owns session/CSRF protection, validation, CRUD and the application lifespan. `backend/provider.py` owns the single connection, shared generation slot and usage ledger. `backend/reflection.py` owns durable idle jobs, source validation, two-stage curation, scheduled working notes and a private journal. `backend/work_config.py` validates private task models and worker policy; `backend/memory.py` owns accepted records and read-only recall. `backend/web_search.py` owns search readiness and limits. Reads avoid writes after initialization. SQLite writes use immediate transactions; generation runs outside locks. One worker runs inside the sole API process under exclusive workspace ownership.
 
-Ollama uses its native loopback API, accepts installed local models and has no cloud fallback. Other adapters use Responses or Chat Completions. The UI always uses the chat role, with a model-name picker and saved Qwen preference when available. The API retains an orchestrator model preference without task execution. Chat sends the selected conversation and optional local memory; the frontend progressively reveals the completed backend reply and renders safe Markdown. Reflection receives bounded user evidence, with no automatic recall, tools, hosted search or title generation.
+Ollama uses its native loopback API, accepts installed local models and has no cloud fallback. Other adapters use Responses or Chat Completions. The UI always uses the chat role, with a model-name picker and saved Qwen preference when available. The API retains an orchestrator model preference without task execution. Chat sends the selected conversation and optional local memory; the frontend progressively reveals the completed backend reply and renders safe Markdown. Reflection receives explicitly selected bounded evidence/memory, without implicit recall, tools, hosted search or titles. Chat curation forms then reviews facts/preferences; scheduled reflection forms then reviews identity/lesson notes. Both use one shared slot and at most two calls.
 
 Chats have stable IDs, separate message lists and editable titles. Workspace responses include chat summaries, `active_chat_id` and the selected chat's messages; generation captures an explicit chat ID. New chat preserves existing conversations. Deletion removes a chat's content while retaining the shared usage ledger, and is blocked while that chat has a reserved request. Previous live history migrates once into one conversation. Projects remain a later feature.
 
@@ -62,11 +62,11 @@ This is a bounded tool call inside chat. It does not delegate a task or create a
 
 ## Private state and credentials
 
-Tasks, live messages, explicit memories, limits, settings and ledgers live in SQLite outside the checkout. The default directory is `%LOCALAPPDATA%\Maestro\preview`; `MAESTRO_DATA_DIR` must also resolve outside the repository. Provider/search credentials live in Windows Credential Manager, server memory or mounted secret files. The OpenAI endpoint can use a server-environment key fallback. Read APIs expose credential presence, never values.
+Tasks, live messages, typed memories, reflection journals, limits, settings and ledgers live in SQLite outside the checkout. The default directory is `%LOCALAPPDATA%\Maestro\preview`; `MAESTRO_DATA_DIR` must also resolve outside the repository. Provider/search credentials live in Windows Credential Manager, server memory or mounted secret files. The OpenAI endpoint can use a server-environment key fallback. Read APIs expose credential presence, never values.
 
 The API validates Host and Origin, requires a local session and protects mutations with CSRF checks. Remote provider requests send the selected conversation history to that provider; Ollama sends it to the local server. OpenAI requests set `store: false`. The repository and synthetic test fixtures contain no private workspace records or personal credentials.
 
-Earlier prototype-only records remain archived in the private database, and old reflection tables remain inactive. Simulated messages are excluded from active chat and provider context. New explicit memory uses a separate table, with save/edit/forget and bounded local recall. Memory-derived conversations cannot later dispatch to remote providers or active hosted search. The [memory/reflection design](MEMORY_AND_REFLECTION.md) distinguishes implemented behavior from future durable jobs.
+Earlier prototype-only records remain archived in the private database, and old reflection tables remain inactive. Simulated messages are excluded from active chat and provider context. Private memory uses a separate table with typed origin/provenance metadata, save/edit/pin/forget and bounded local recall. Optional automatic curation protects human edits and records changes in a private journal. Memory-derived conversations cannot later dispatch to remote providers or active hosted search. The [memory/reflection design](MEMORY_AND_REFLECTION.md) documents formation/review, persistent schedules, correction and deletion boundaries.
 
 ## API surface
 
@@ -77,9 +77,9 @@ Earlier prototype-only records remain archived in the private database, and old 
 | `POST /api/chats`, `PATCH /api/chats/{id}`, `DELETE /api/chats/{id}` | Create, rename or delete a conversation, retaining accounting. |
 | `POST /api/tasks`, `PATCH /api/tasks/{id}`, `DELETE /api/tasks/{id}` | Manual task persistence. |
 | `POST /api/chat` | Generate a reply for the submitted `chat_id` and persist it in that conversation. |
-| `GET /api/memory`, `POST /api/memory`, `PATCH /api/memory/{id}`, `DELETE /api/memory/{id}` | Inspect, save, edit or forget explicit private memory; snapshots also include records. |
+| `GET /api/memory`, `POST /api/memory`, `PATCH /api/memory/{id}`, `DELETE /api/memory/{id}` | Inspect, save, edit/pin or forget private memory; snapshots also include records. |
 | `GET /api/work-config`, `PUT /api/work-config` | Saved task models, recall allowances and reflection enable/pause policy. |
-| `GET /api/reflection` | Read-only worker status, daily usage and pending memory proposals. |
+| `GET /api/reflection` | Read-only worker status, daily usage, current memories, journal and legacy proposals. |
 | `POST /api/reflection/candidates/{id}/accept`, `DELETE /api/reflection/candidates/{id}` | Accept a source-backed proposal into scoped private memory or reject it. |
 | `GET /api/provider`, `PUT /api/provider`, `POST /api/provider/test`, `DELETE /api/provider/key` | Active connection settings, model-list access and credential removal. |
 | `POST /api/provider/charges/{id}/reconcile` | Settle a provider-verified uncertain amount. |
@@ -95,4 +95,4 @@ The [Podman deployment checklist](../DEVELOPMENT_PLAN.md#podman-deployment-backl
 3. **Multiple saved profiles.** Store named local/remote model connections with endpoint-scoped credential references and explicit context-sharing choices. Select a profile for a task and record it per call. Verify installed-model capabilities, switching and one-model residency, accounting and local-only restrictions before automatic selection. Measure memory and task quality to choose role defaults.
 4. **Bounded delegation and review.** Give a coordinator a typed way to assign one child task with selected context, profile, criteria and a share of the parent's allowance. Persist the handoff and result. Add reviewer-driven revision only with shared call/token/time limits and completion, cancellation and no-progress stops. Prove different profiles can serve distinct assignments before expanding the agent tree.
 
-Explicit memory and [durable background reflection](MEMORY_AND_REFLECTION.md) are usable before task execution. Inferred entries require user acceptance; automatic promotion still needs evaluation. Scoped integrations and isolated coding need the execution path. The [development plan](../DEVELOPMENT_PLAN.md) records acceptance checks; [local model research](LOCAL_MODELS.md) records preliminary measurements.
+Explicit memory and [durable background reflection](MEMORY_AND_REFLECTION.md) are usable before task execution. Automatic promotion and scheduled working notes are optional and independently reviewed; broader memory-quality evaluation remains. Scoped integrations and isolated coding need the execution path. The [development plan](../DEVELOPMENT_PLAN.md) records acceptance checks; [local model research](LOCAL_MODELS.md) records preliminary measurements.
