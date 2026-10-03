@@ -352,7 +352,9 @@ def delete_chat(chat_id: str):
 
 def safe_private_content(content):
     # Memory and model choices must not turn configured credentials into context.
-    for endpoint in (provider().read_state()["config"]["base_url"], SEARCH_ENDPOINT):
+    config = provider().read_state()["config"]
+    endpoints = (() if config["protocol"] == "ollama" else (config["base_url"],)) + (SEARCH_ENDPOINT,)
+    for endpoint in endpoints:
         try:
             key = credentials.read(endpoint)[0]
         except ValueError:
@@ -564,6 +566,9 @@ def remove_task(task_id: str):
 
 @app.post("/api/chat")
 def chat(entry: TextInput):
+    with conflict_errors():
+        if entry.model:
+            safe_private_content(entry.model)
     with workspace_transaction() as state:
         target = selected_chat(state, entry.chat_id)
         if target is None:

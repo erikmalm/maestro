@@ -179,6 +179,51 @@ class ReflectionTests(unittest.TestCase):
         self.assertEqual(self.calls, [])
         self.assertEqual(self.store.status()["queued"], 1)
 
+    def test_debounced_chat_does_not_block_another_chat_that_is_ready(self):
+        self.workspace["work_config"]["debounce_seconds"] = 60
+        self.queue()
+        self.now += 10
+        other = {"id": "other", "messages": [{"id": "other-source", "role": "user", "text": "I prefer concise Rust code."}]}
+        self.workspace["chats"].append(other)
+        with self.store.transaction() as db:
+            self.save(db)
+            self.store.enqueue("other", self.workspace, db)
+        self.now += 60
+        self.queue("I prefer Python docstrings.")
+        prepared = self.store.prepare()
+        self.assertEqual(prepared["job"]["chat_id"], "other")
+        self.assertEqual([(state, job["chat_id"]) for state, job in self.jobs()], [("queued", "chat"), ("claimed", "other")])
+        self.assertEqual(self.calls, [])
+
+    def test_historical_missing_or_invalid_debounce_timestamp_is_due(self):
+        for ready_at in (None, "obsolete", [], {}):
+            with self.subTest(ready_at=ready_at):
+                self.queue()
+                with self.store.transaction() as db:
+                    job = json.loads(db.execute("SELECT data FROM reflection_jobs WHERE state='queued'").fetchone()[0])
+                    if ready_at is None:
+                        job.pop("ready_at")
+                    else:
+                        job["ready_at"] = ready_at
+                    self.store.write_job(db, job, "queued")
+                prepared = self.store.prepare()
+                self.assertIsNotNone(prepared)
+                with self.store.transaction() as db:
+                    self.store.write_job(db, prepared["job"], "cancelled")
+
+    def test_due_periodic_job_runs_while_chat_waits_for_debounce(self):
+        self.workspace["work_config"].update(auto_curate=True, periodic_reflection=True, debounce_seconds=60)
+        with self.provider.transaction() as state:
+            state["config"]["ollama_context_tokens"] = 8192
+        self.queue()
+        prepared = self.store.prepare()
+        self.assertEqual(prepared["job"]["mode"], "periodic")
+        self.assertEqual(self.jobs()[0][0], "queued")
+        self.assertEqual(self.calls, [])
+        self.store.finish_failure(prepared["job"])
+        self.now += 60
+        self.assertEqual(self.store.prepare()["job"]["chat_id"], "chat")
+
     def test_daily_budget_reserves_unknown_failure_and_waits_until_local_midnight(self):
         self.workspace["work_config"]["max_jobs_per_day"] = 1
         self.queue()
@@ -202,6 +247,24 @@ class ReflectionTests(unittest.TestCase):
         self.assertEqual(self.calls, [])
         self.assertEqual(self.store.status()["today_jobs"], 0)
         self.assertEqual(self.store.status()["queued"], 1)
+
+    def test_job_that_exceeds_remaining_budget_does_not_block_smaller_ready_job(self):
+        self.workspace["work_config"]["max_tokens_per_day"] = 10000
+        with self.provider.transaction() as state:
+            state["config"]["ollama_context_tokens"] = 32768
+        self.queue("I prefer concise Python examples. " + "Synthetic detail. " * 900)
+        other = {"id": "other", "messages": [{"id": "other-source", "role": "user", "text": "I prefer concise Rust code."}]}
+        self.workspace["chats"].append(other)
+        with self.store.transaction() as db:
+            self.save(db)
+            self.store.enqueue("other", self.workspace, db)
+        self.assertIsNone(self.store.prepare())
+        self.assertIn("Daily reflection budget", self.jobs()[0][1]["stop_reason"])
+        self.worker.step()
+        self.assertEqual([candidate["chat_id"] for candidate in self.store.status()["candidates"]], ["other"])
+        self.assertEqual(self.jobs()[0][0], "queued")
+        self.assertEqual(self.store.status()["today_jobs"], 1)
+        self.assertEqual(self.store.status()["today_tokens"], 150)
 
     def test_source_deletion_during_inference_cannot_recreate_candidates(self):
         self.queue()

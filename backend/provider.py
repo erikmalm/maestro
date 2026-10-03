@@ -14,7 +14,7 @@ from urllib.parse import unquote, urlsplit
 import httpx
 
 from backend import credentials
-from backend.web_search import WebSearch, TOOL, SEARCH_INSTRUCTIONS, fit_sources
+from backend.web_search import WebSearch, TOOL, SEARCH_INSTRUCTIONS, fit_sources, ENDPOINT as SEARCH_ENDPOINT
 from backend.work_config import MAX_BACKGROUND_OUTPUT_TOKENS, config_value, select_model
 
 DEFAULT = {"base_url": "https://api.openai.com/v1", "protocol": "responses", "model": "", "orchestrator_model": "",
@@ -219,9 +219,14 @@ class Provider:
                 if not local and config["base_url"] == state["config"]["base_url"]:
                     raise
                 current_key = None
-            if any(saved_key and saved_key in url for saved_key in (effective_key, current_key) for url in (config["base_url"], unquote(config["base_url"]))):
+            try:
+                search_key = credentials.read(SEARCH_ENDPOINT)[0]
+            except ValueError:
+                search_key = None
+            known_keys = (effective_key, current_key, search_key)
+            if any(saved_key and saved_key in url for saved_key in known_keys for url in (config["base_url"], unquote(config["base_url"]))):
                 raise ValueError("Enter an API base URL without the API key.")
-            if any(saved_key and saved_key in config[field] for saved_key in (effective_key, current_key) for field in ("model", "orchestrator_model")):
+            if any(saved_key and saved_key in config[field] for saved_key in known_keys for field in ("model", "orchestrator_model")):
                 raise ValueError("Enter a model ID without the API key.")
             if not local and config["orchestrator_model"] not in ("", config["model"]):
                 raise ValueError("Remote planning must use the chat model with its verified prices. Choose Local Ollama to assign different models.")

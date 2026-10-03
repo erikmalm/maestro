@@ -10,6 +10,7 @@ from fastapi.testclient import TestClient
 from backend import app as backend
 from backend.memory import MemoryStore
 from backend.reflection import ReflectionStore
+from backend.web_search import ENDPOINT as SEARCH_ENDPOINT
 from backend.work_config import WorkConfig
 
 
@@ -133,6 +134,50 @@ class WorkConfigAPITests(unittest.TestCase):
                 self.assertEqual(response.status_code, 409, response.text)
                 self.assertNotIn(key, response.text)
         self.assertNotIn(key.encode(), backend.DATABASE.read_bytes())
+
+    def test_provider_fields_reject_search_credentials_before_changing_state(self):
+        config = self.client.get("/api/workspace").json()["provider"]["config"]
+        self.assertEqual(self.client.put("/api/provider", headers=self.headers,
+            json={"config": config, "persist": False}).status_code, 200)
+        key = "synthetic-search-key"
+        before = backend.DATABASE.read_bytes()
+        def read_key(endpoint):
+            return (key, "session") if endpoint == SEARCH_ENDPOINT else (None, "missing")
+        encoded = "".join(f"%{ord(char):02X}" for char in key)
+        local = {**config, "protocol": "ollama", "base_url": "http://127.0.0.1:11434", "model": "synthetic:7b"}
+        changes = [{**local, field: "model-" + key} for field in ("model", "orchestrator_model")]
+        changes.extend({**config, "base_url": "https://synthetic.example/v1/" + path} for path in (key, encoded))
+        with patch.object(backend.credentials, "read", side_effect=read_key), \
+                patch.object(backend.credentials, "save") as save, patch("backend.provider.network") as network:
+            for changed in changes:
+                with self.subTest(config=changed):
+                    response = self.client.put("/api/provider", headers=self.headers,
+                                               json={"config": changed, "api_key": "" if changed["protocol"] == "ollama" else "synthetic-new-key", "persist": False})
+                    self.assertEqual(response.status_code, 409, response.text)
+                    self.assertNotIn(key, response.text)
+                    self.assertNotIn(encoded, response.text)
+                    self.assertEqual(backend.DATABASE.read_bytes(), before)
+            save.assert_not_called()
+            network.assert_not_called()
+
+    def test_message_models_reject_provider_and_search_keys_without_creating_a_chat(self):
+        config = self.client.get("/api/workspace").json()["provider"]["config"]
+        keys = {config["base_url"]: "synthetic-provider-key", SEARCH_ENDPOINT: "synthetic-search-key"}
+        local = {**config, "protocol": "ollama", "base_url": "http://127.0.0.1:11434", "model": "synthetic:7b"}
+        with patch.object(backend.credentials, "read", side_effect=lambda endpoint: (keys.get(endpoint), "session")), \
+                patch.object(backend.Provider, "chat") as generate, patch("backend.provider.network") as network:
+            for connection, active_keys in ((config, keys.values()), (local, [keys[SEARCH_ENDPOINT]])):
+                self.assertEqual(self.client.put("/api/provider", headers=self.headers,
+                    json={"config": connection, "persist": False}).status_code, 200)
+                before = backend.DATABASE.read_bytes()
+                for key in active_keys:
+                    response = self.client.post("/api/chat", headers=self.headers,
+                                                json={"text": "Synthetic ordinary question.", "model": "model-" + key})
+                    self.assertEqual(response.status_code, 409, response.text)
+                    self.assertNotIn(key, response.text)
+                    self.assertEqual(backend.DATABASE.read_bytes(), before)
+            generate.assert_not_called()
+            network.assert_not_called()
 
     def test_schedule_changes_take_effect_without_resetting_unchanged_saves(self):
         self.client.get("/api/workspace")

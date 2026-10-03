@@ -1,6 +1,6 @@
 """Background deadlines close connections and retain the gate until verified idle."""
 import asyncio
-from contextlib import closing
+from contextlib import closing, contextmanager
 from datetime import timezone
 import json
 from pathlib import Path
@@ -14,7 +14,7 @@ import httpx
 
 from backend.provider import BackgroundUncertain, DEFAULT, Provider, background_network
 from backend.memory import MemoryStore
-from backend.reflection import ReflectionStore, OUTPUT_SCHEMA
+from backend.reflection import ReflectionStore, ReflectionWorker, OUTPUT_SCHEMA
 from backend.work_config import WorkConfig
 
 
@@ -246,6 +246,9 @@ class ClaimedProviderTests(unittest.TestCase):
                 self.assertEqual(ledger[-1]["status"], "reserved")
                 self.assertEqual(ledger[-1]["job_id"], self.prepared["job"]["id"])
                 self.assertEqual(db.execute("SELECT jobs FROM reflection_budget").fetchone()[0], 1)
+            status = self.store.status()
+            self.assertTrue(status["running"])
+            self.assertFalse(status["waiting_for_ollama"])
             return self.network(config, path, payload, deadline)
         with patch("backend.provider.background_network", side_effect=inspect_dispatch), patch("backend.provider.network") as foreground:
             result = self.generate()
@@ -262,6 +265,44 @@ class ClaimedProviderTests(unittest.TestCase):
         self.assertEqual(self.provider.read_state()["ledger"][-1]["status"], "settled")
         self.store.complete(self.prepared["job"], result, lambda content: content)
         self.assertEqual(self.store.status()["today_tokens"], 40)
+
+    def test_failed_settlement_orphan_is_reported_until_ollama_is_confirmed_idle(self):
+        self.store.recover()
+        original = self.provider.transaction
+        failures = 0
+
+        @contextmanager
+        def transient(*args, **kwargs):
+            nonlocal failures
+            if failures:
+                failures -= 1
+                raise sqlite3.OperationalError("Synthetic temporary settlement failure.")
+            with original(*args, **kwargs) as state:
+                yield state
+
+        def network(config, path, payload, deadline):
+            nonlocal failures
+            result = self.network(config, path, payload, deadline)
+            if path == "/api/chat":
+                failures = 2  # Settlement and its exception cleanup both fail.
+            return result
+
+        worker = ReflectionWorker(self.store, self.provider, lambda text: text)
+        with patch.object(self.provider, "transaction", side_effect=transient), patch("backend.provider.background_network", side_effect=network):
+            worker.step()
+        entry = self.provider.read_state()["ledger"][-1]
+        self.assertEqual(entry["status"], "reserved")
+        self.assertNotIn("background_unknown", entry)
+        self.assertEqual(self.store.status()["queued"], 0)
+        self.assertTrue(self.store.status()["running"])
+        self.assertTrue(self.store.status()["waiting_for_ollama"])
+        with patch("backend.provider.background_network", return_value={"models": [{"name": "synthetic:7b"}]}):
+            worker.step()
+        self.assertTrue(self.store.status()["waiting_for_ollama"])
+        with patch("backend.provider.background_network", return_value={"models": []}):
+            worker.step()
+        self.assertFalse(self.store.status()["running"])
+        self.assertFalse(self.store.status()["waiting_for_ollama"])
 
     def test_configuration_changes_away_and_back_abort_before_inference(self):
         def change_config(config, path, payload, deadline):

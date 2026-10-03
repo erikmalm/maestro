@@ -4,7 +4,7 @@ from datetime import datetime
 import unittest
 
 from backend.memory import MemoryStore, assistant_revision, revision
-from backend.reflection import schema_for
+from backend.reflection import digest, schema_for
 from backend.tasks import dismiss_task, prune_ai_tasks
 from tests import test_auto_reflection as fixtures
 
@@ -289,6 +289,52 @@ class TaskReflectionTests(unittest.TestCase):
             workspace["chats"][0]["messages"][1]["feedback"]["comment"] = "The older observation was corrected."
             self.assertTrue(prune_ai_tasks(workspace, db))
             self.assertEqual(workspace["tasks"], [])
+
+    def check_curated_consolidation_sources(self, remove_first, preserve_removed_content=False):
+        source = {"id": "historical-user", "role": "user", "text": "I prefer concise code examples."}
+        self.workspace["chats"][0]["messages"] = [source]
+        self.save()
+        provenance = [{"chat_id": "chat", "message_id": source["id"], "hash": digest(source["text"])}]
+        stamp = self.store.stamp()
+        fact = {"id": "curated-fact", "content": "User prefers concise code examples.", "kind": "preference", "scope": "workspace",
+                "origin": "curated", "chat_id": "chat", "source_message_id": source["id"], "source_hash": digest(source["text"]),
+                "evidence": source["text"], "provenance": provenance, "created_at": stamp, "updated_at": stamp}
+        with self.memory.transaction() as db:
+            MemoryStore.insert(db, fact)
+        self.drafts = [
+            {"operation": "remove", "memory_id": fact["id"], "kind": fact["kind"], "scope": "workspace", "content": fact["content"] if preserve_removed_content else "", "source_message_id": "", "evidence": ""},
+            {"operation": "add", "memory_id": "", "kind": "lesson", "scope": "workspace", "content": "Evaluate whether concise code examples improve clarity.", "source_message_id": "", "evidence": ""}]
+        if not remove_first:
+            self.drafts.reverse()
+        self.task_drafts = [{"title": "Evaluate concise code examples", "details": "Compare short and detailed examples for clarity.", "priority": "normal", "suggested_assignee": "maestro"}]
+        self.worker.step()
+        records, tasks = self.memory.list(), self.tasks()
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0]["kind"], "lesson")
+        self.assertEqual(records[0]["provenance"], provenance)
+        self.assertEqual(len(tasks), 1)
+        self.assertEqual(tasks[0]["provenance"], provenance)
+        with self.store.transaction() as db:
+            workspace = self.store.workspace(db)
+            workspace["chats"] = []
+            self.memory.delete_chat("chat", db)
+            self.store.delete_chat("chat", db)
+            self.assertTrue(prune_ai_tasks(workspace, db))
+            db.execute("UPDATE workspace SET value=? WHERE id=1", (json.dumps(workspace),))
+        self.assertEqual(self.memory.list(), [])
+        self.assertEqual(self.tasks(), [])
+
+    def test_removing_curated_source_before_consolidation_keeps_memory_and_task_lineage(self):
+        self.check_curated_consolidation_sources(remove_first=True)
+
+    def test_removing_curated_source_after_consolidation_keeps_memory_and_task_lineage(self):
+        self.check_curated_consolidation_sources(remove_first=False)
+
+    def test_removing_unchanged_curated_source_before_consolidation_keeps_lineage(self):
+        self.check_curated_consolidation_sources(remove_first=True, preserve_removed_content=True)
+
+    def test_removing_unchanged_curated_source_after_consolidation_keeps_lineage(self):
+        self.check_curated_consolidation_sources(remove_first=False, preserve_removed_content=True)
 
     def test_review_schema_task_bounds_and_preflight_capture_metadata(self):
         self.task_drafts = [self.task_drafts[0]]

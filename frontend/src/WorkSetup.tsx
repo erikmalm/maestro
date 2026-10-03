@@ -81,7 +81,7 @@ export default function WorkSetup({
             [
               "enabled",
               "Enable background reflection",
-              !status.worker_available || (!local && !config.enabled),
+              !local && !config.enabled,
             ],
             ["auto_curate", "AI curates memory automatically", false],
             [
@@ -149,22 +149,13 @@ export default function WorkSetup({
             Unsaved changes. Save task settings to apply them.
           </p>
         )}
-        {status.worker_available && (
-          <p className="reflection-note">
-            {config.auto_curate
-              ? "Memories are maintained automatically after model review. You can edit or forget them; your edits are protected from automation. Identity and working-style notes remain distinct from user facts."
-              : "Conversation activity produces suggestions for your review; memories are saved only when you accept them."}{" "}
-            Calls run locally while chat is idle and models unload afterward.
-            Pausing stops new calls; a running call may finish.
-          </p>
-        )}
-        {!status.worker_available && (
-          <p className="reflection-note">
-            The reflection worker is being developed. These settings are saved
-            for it; selecting task models does not start background inference or
-            coding tasks.
-          </p>
-        )}
+        <p className="reflection-note">
+          {config.auto_curate
+            ? "Memories are maintained automatically after model review. You can edit or forget them; your edits are protected from automation. Identity and working-style notes remain distinct from user facts."
+            : "Conversation activity produces suggestions for your review; memories are saved only when you accept them."}{" "}
+          Calls run locally while chat is idle and models unload afterward.
+          Pausing stops new calls; a running call may finish.
+        </p>
         <details className="reflection-cleanup">
           <summary>Work limits &amp; memory recall</summary>
           <div className="reflection-fields">

@@ -116,7 +116,7 @@ class OllamaTests(unittest.TestCase):
     def test_setup_rejects_credentials_and_forces_zero_prices(self):
         synthetic_key = "synthetic-accidental-local-key"
         status = self.configure()
-        self.read_key.assert_called_once_with(DEFAULT["base_url"])
+        self.assertEqual([call.args for call in self.read_key.call_args_list], [(DEFAULT["base_url"],), (ENDPOINT,)])
         self.read_key.reset_mock()
         rejected = self.client.put(
             "/api/provider",

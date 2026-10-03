@@ -535,6 +535,84 @@ for (const failed of [false, true]) {
   });
 }
 
+for (const [action, search, path] of [
+  ["Remove API key", false, "/api/provider/key"],
+  ["Remove search key", true, "/api/web-search/key"],
+  ["Test search connection", true, "/api/web-search/test"],
+] as const) {
+  test(`ambiguous ${action.toLowerCase()} refreshes saved status and preserves drafts`, async ({
+    page,
+  }) => {
+    const state = structuredClone(initial);
+    if (!search) {
+      Object.assign(state.provider.config, {
+        base_url: "https://provider.example/v1",
+        protocol: "responses",
+        model: "synthetic-model",
+      });
+      Object.assign(state.provider, {
+        credentials_required: true,
+        credentials_present: true,
+      });
+    }
+    const pending = await mockSettings(page, state, path);
+    let reads = 0;
+    await page.route("**/api/workspace*", (route) => {
+      reads += 1;
+      return route.fulfill({ json: state });
+    });
+    await page.goto("/");
+    await page.getByRole("button", { name: "Settings", exact: true }).click();
+    await page.getByRole("button", { name: action, exact: true }).click();
+    await expect.poll(() => !!pending()).toBe(true);
+    const field = page.getByLabel(
+      search ? "Daily search cap" : "Maximum output tokens per reply",
+    );
+    const key = page.getByLabel(search ? "Ollama search API key" : "API key", {
+      exact: true,
+    });
+    await field.fill(search ? "31" : "1501");
+    await key.fill("synthetic-new-draft-key");
+    const status = search ? state.web_search : state.provider;
+    status.credentials_present = false;
+    status.tested_at = null;
+    if (search) state.web_search.config.enabled = false;
+    else state.provider.models = [];
+    await pending()!.fulfill({
+      status: 409,
+      json: { detail: "Synthetic response lost after key deletion." },
+    });
+    await expect.poll(() => reads).toBe(2);
+    await expect(page.getByRole("alert")).toHaveText(
+      "Synthetic response lost after key deletion.",
+    );
+    await expect(field).toHaveValue(search ? "31" : "1501");
+    await expect(key).toHaveValue("synthetic-new-draft-key");
+    if (search) {
+      await expect(page.locator(".ollama-search-setup .badge")).toHaveText(
+        "Disabled",
+      );
+      await expect(
+        page.getByLabel("Let Maestro decide when to search"),
+      ).not.toBeChecked();
+    } else {
+      await expect(page.locator(".provider-setup .badge")).toHaveText(
+        "No API key",
+      );
+      await page
+        .getByRole("button", { name: "Workspace", exact: true })
+        .click();
+      await page
+        .getByLabel("Message Maestro")
+        .fill("Keep this synthetic draft");
+      await expect(
+        page.getByRole("button", { name: "Send message", exact: true }),
+      ).toBeDisabled();
+    }
+    expect(reads).toBe(2);
+  });
+}
+
 for (const [name, order, failed] of [
   ["older response first", [0, 1], -1],
   ["newer response first", [1, 0], -1],

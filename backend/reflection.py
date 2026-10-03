@@ -421,8 +421,8 @@ class ReflectionStore:
             if policy["auto_curate"]:
                 self.adopt_accepted(db)
             self.schedule(db, workspace, policy, epoch)
-            row = db.execute("SELECT data FROM reflection_jobs WHERE state='queued' AND (chat_id!='__periodic__' OR ?) ORDER BY (chat_id='__periodic__'),rowid LIMIT 1",
-                             (policy["auto_curate"] and policy["periodic_reflection"],)).fetchone()
+            row = db.execute("SELECT data FROM reflection_jobs WHERE state='queued' AND (chat_id!='__periodic__' OR ?) AND CASE WHEN json_type(data,'$.ready_at') IN ('integer','real') THEN json_extract(data,'$.ready_at') ELSE 0 END<=? ORDER BY (json_extract(data,'$.stop_reason') IS NOT NULL),(chat_id='__periodic__'),rowid LIMIT 1",
+                             (policy["auto_curate"] and policy["periodic_reflection"], self.clock() - policy["debounce_seconds"])).fetchone()
             if not row:
                 return None
             job = json.loads(row[0])
@@ -434,8 +434,6 @@ class ReflectionStore:
             if job["mode"] == "periodic":
                 job["workspace_checkpoint"] = self.workspace_checkpoint(workspace)
                 job.pop("assistant_versions", None)  # A queued/recovered claim takes a fresh snapshot.
-            if self.clock() - job["ready_at"] < policy["debounce_seconds"]:
-                return None
             if job["epoch"] != epoch or not self.sources_valid(job, workspace):
                 job["stop_reason"] = "Source changed; prior work was cancelled."
                 self.write_job(db, job, "cancelled")
@@ -770,16 +768,16 @@ class ReflectionStore:
             current = self.preflight(job, self.workspace(db), self.read_provider(db), db)
             body = json.loads(result["reply"])
             keys = {"approved", "summary", "approved_tasks"} if job.get("tasks_enabled") else {"approved", "summary"}
-            if (len(drafts) != current.get("draft_count") or not isinstance(body, dict) or set(body) != keys or not isinstance(body["summary"], str) or len(body["summary"]) > 2000
-                    or not isinstance(body["approved"], list) or len(body["approved"]) > len(drafts)
-                    or any(type(index) is not int or not 0 <= index < len(drafts) for index in body["approved"]) or len(set(body["approved"])) != len(body["approved"])):
+            if not isinstance(body, dict) or set(body) != keys or not isinstance(body["summary"], str) or len(body["summary"]) > 2000:
                 raise ValueError("Reflection returned an invalid independent review.")
+            counts = {"approved": (len(drafts), current.get("draft_count"))}
             if job.get("tasks_enabled"):
                 task_drafts = self.validate_tasks(task_drafts, validator)
-                if (len(task_drafts) != current.get("task_draft_count") or not isinstance(body["approved_tasks"], list)
-                        or len(body["approved_tasks"]) > len(task_drafts)
-                        or any(type(index) is not int or not 0 <= index < len(task_drafts) for index in body["approved_tasks"])
-                        or len(set(body["approved_tasks"])) != len(body["approved_tasks"])):
+                counts["approved_tasks"] = (len(task_drafts), current.get("task_draft_count"))
+            for field, (count, expected) in counts.items():
+                indices = body[field]
+                if (count != expected or not isinstance(indices, list) or len(indices) > count
+                        or any(type(index) is not int or not 0 <= index < count for index in indices) or len(set(indices)) != len(indices)):
                     raise ValueError("Reflection returned an invalid independent review.")
             safe_proposal(body["summary"], validator)
             changes = []
@@ -791,7 +789,7 @@ class ReflectionStore:
             for index in body["approved"]:
                 draft = drafts[index]
                 target = identity if draft["operation"] == "add" and draft["kind"] == "identity" else snapshots.get(draft["memory_id"])
-                if target and not target["pinned"] and not unchanged_memory(draft, target):
+                if target and not target["pinned"] and (draft["operation"] == "remove" or not unchanged_memory(draft, target)):
                     mutating_ids.add(target["id"])
             for index in body["approved"]:
                 draft = drafts[index]
@@ -819,7 +817,7 @@ class ReflectionStore:
                     provenance = self.provenance(job)
                     for memory in job["memory_versions"]:
                         dependency = snapshots[memory["id"]]
-                        provenance.extend(dependency["provenance"] if dependency["origin"] == "reflective" else [{"memory_id": memory["id"], "hash": memory["hash"]}])
+                        provenance.extend(dependency["provenance"] if dependency["origin"] == "reflective" or memory["id"] in mutating_ids else [{"memory_id": memory["id"], "hash": memory["hash"]}])
                     provenance = list({json.dumps(source, sort_keys=True): source for source in provenance}.values())
                     provenance = [source for source in provenance if source.get("memory_id") not in mutating_ids]
                 if MemoryStore.blocked(db, draft["content"] if job["mode"] == "periodic" else None, provenance):
@@ -922,14 +920,16 @@ class ReflectionStore:
                 return default
             jobs = db.execute("SELECT state,data FROM reflection_jobs ORDER BY rowid DESC").fetchall()
             budget = db.execute("SELECT jobs,tokens FROM reflection_budget WHERE day=?", (self.day(),)).fetchone() or (0, 0)
-            unknown = any(entry.get("background_unknown") and entry["status"] == "reserved"
+            active_jobs = {json.loads(raw)["id"] for state, raw in jobs if state in ("claimed", "reviewing", "dispatched")}
+            unknown = any(entry.get("job_id") and entry["status"] == "reserved"
+                          and (entry.get("background_unknown") or entry["job_id"] not in active_jobs)
                           for entry in self.read_provider(db).get("ledger", []))
             workspace = self.workspace(db)
             candidates = [json.loads(row[0]) for row in db.execute("SELECT data FROM reflection_candidates WHERE state='pending' ORDER BY rowid DESC")]
             candidates = [candidate for candidate in candidates if (source := self.source_map(workspace, candidate["chat_id"]).get(candidate["source_message_id"])) is not None and digest(source) == candidate["source_hash"]]
             journal = [json.loads(row[0]) for row in db.execute("SELECT data FROM reflection_journal ORDER BY rowid DESC LIMIT 100")] if db.execute("SELECT 1 FROM sqlite_master WHERE name='reflection_journal'").fetchone() else []
             schedule = db.execute("SELECT next_due FROM reflection_schedule WHERE id=1").fetchone() if db.execute("SELECT 1 FROM sqlite_master WHERE name='reflection_schedule'").fetchone() else None
-            return {"queued": sum(state == "queued" for state, _ in jobs), "running": unknown or any(state in ("claimed", "reviewing", "dispatched") for state, _ in jobs),
+            return {"queued": sum(state == "queued" for state, _ in jobs), "running": unknown or bool(active_jobs),
                     "last_stop_reason": "Ollama may still be running; waiting for confirmed model unloading." if unknown else json.loads(jobs[0][1]).get("stop_reason") if jobs else None,
                     "waiting_for_ollama": unknown, "candidates": candidates, "today_jobs": budget[0], "today_tokens": budget[1], "journal": journal,
                     "next_reflection_at": datetime.fromtimestamp(schedule[0], self.timezone).isoformat() if schedule and schedule[0] and (policy := config_value(workspace))["enabled"] and policy["auto_curate"] and policy["periodic_reflection"] else None}

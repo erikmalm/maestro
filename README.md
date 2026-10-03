@@ -96,7 +96,7 @@ The Ollama search key uses its own credential scope for `https://ollama.com/api/
 
 Tasks, conversations, model settings and accounting live in `%LOCALAPPDATA%\Maestro\preview`, outside the checkout. An alternative `MAESTRO_DATA_DIR` must also resolve outside it. The launcher reuses a running server only for the same private directory; stop that instance before switching directories. A public repository contains only reusable source, documentation and synthetic fixtures.
 
-Earlier prototype runs, memory records and simulated accounting remain archived in the private database; their APIs and demo screens have been removed. Existing reflection tables are retained without a runtime. Simulated chat messages are excluded from active history and model context. Real conversations, provider settings and usage accounting are preserved.
+Earlier prototype runs, memory records and simulated accounting remain archived in the private database; their APIs and demo screens have been removed. Simulated chat messages are excluded from active history and model context. Real conversations, provider settings and usage accounting are preserved.
 
 When you send API chat, its history and your key go to the configured provider. In Ollama mode, history goes to your local server without any saved provider key. Provider retention rules still apply. OpenAI requests use `store: false`; see [OpenAI data controls](https://developers.openai.com/api/docs/guides/your-data). The backend binds to loopback and requires local session/CSRF protection.
 

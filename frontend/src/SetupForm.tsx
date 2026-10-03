@@ -69,10 +69,12 @@ export function useSetupForm<
       if (recover) {
         try {
           update(await recover(), false);
+          return;
         } catch {
           // Keep the original error if refreshing the local status also fails.
         }
       }
+      onChange(status);
     } finally {
       submitted.current = null;
       setBusy("");
