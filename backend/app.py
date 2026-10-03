@@ -297,7 +297,7 @@ async def protect_local_workspace(request: Request, call_next):
                 size = int(request.headers.get("content-length", "0"))
             except ValueError:
                 return JSONResponse({"detail": "Invalid request."}, status_code=400)
-            if size > 262144:
+            if size > 262144 or len(await request.body()) > 262144:
                 return JSONResponse({"detail": "This entry is too large."}, status_code=413)
     response = await call_next(request)
     response.headers["X-Content-Type-Options"] = "nosniff"
@@ -324,7 +324,7 @@ def create_chat():
     with workspace_transaction() as state:
         chat = create_chat_record()
         state["chats"].append(chat)
-        return snapshot(state, chat["id"])
+    return snapshot(state, chat["id"])
 
 
 @app.patch("/api/chats/{chat_id}")
@@ -332,7 +332,7 @@ def rename_chat(chat_id: str, entry: ChatTitleInput):
     with workspace_transaction() as state:
         chat = selected_chat(state, chat_id)
         chat.update(title=entry.title, title_source="manual", updated_at=now())
-        return snapshot(state, chat_id)
+    return snapshot(state, chat_id)
 
 
 @app.delete("/api/chats/{chat_id}")
@@ -539,7 +539,7 @@ def reconcile_provider_charge(entry_id: str, entry: ChargeInput):
 def create_task(entry: TaskInput):
     with workspace_transaction() as state:
         state["tasks"].insert(0, task_record(entry, "user", now()))
-        return snapshot(state)
+    return snapshot(state)
 
 
 @app.patch("/api/tasks/{task_id}")
@@ -549,7 +549,7 @@ def update_task(task_id: str, entry: TaskUpdate):
         if task is None:
             raise HTTPException(404, "That task could not be found.")
         task.update(entry.model_dump(exclude_unset=True))
-        return snapshot(state)
+    return snapshot(state)
 
 
 @app.delete("/api/tasks/{task_id}")
@@ -559,7 +559,7 @@ def remove_task(task_id: str):
         if task:
             dismiss_task(state, task)
         state["tasks"] = [task for task in state["tasks"] if task["id"] != task_id]
-        return snapshot(state)
+    return snapshot(state)
 
 
 @app.post("/api/chat")
@@ -580,7 +580,7 @@ def chat(entry: TextInput):
 def put_limits(entry: LimitsInput):
     with workspace_transaction() as state:
         state["limits"] = entry.model_dump()
-        return snapshot(state)
+    return snapshot(state)
 
 
 if (ROOT / "frontend" / "dist").is_dir():

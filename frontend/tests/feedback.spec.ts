@@ -113,9 +113,16 @@ async function feedbackFixture(page: Page) {
       holdNext = true;
     },
     held: () => held,
-    release: async () => {
+    release: async (failed = false) => {
       expect(held).toBeDefined();
-      await held!.fulfill({ json: heldResult });
+      await held!.fulfill(
+        failed
+          ? {
+              status: 503,
+              json: { detail: "Synthetic feedback response failed." },
+            }
+          : { json: heldResult },
+      );
       held = undefined;
     },
   };
@@ -182,7 +189,7 @@ test("answer feedback can be rated, edited and cleared without inference or repl
     .getByRole("button", { name: "Save feedback", exact: true })
     .click();
   await expect(draft).toHaveValue("Keep this unsent composer draft.");
-  expect(fixture.workspaceCalls()).toBe(calls);
+  expect(fixture.workspaceCalls()).toBe(calls + 1);
   expect(fixture.generationCalls()).toBe(0);
   await page.reload();
   await expect(
@@ -201,85 +208,101 @@ test("answer feedback can be rated, edited and cleared without inference or repl
   expect(fixture.generationCalls()).toBe(0);
 });
 
-test("feedback clear refreshes derived memory and journal while paused without replacing settings drafts", async ({
-  page,
-}) => {
-  const fixture = await feedbackFixture(page);
-  fixture.state.memories = [
-    {
-      id: "derived-note",
-      content: "A synthetic practice derived from feedback.",
-      scope: "workspace",
-      chat_id: null,
-      source_message_id: null,
-      origin: "reflective",
-      kind: "lesson",
-      created_at: "2026-10-03",
-      updated_at: "2026-10-03",
-    },
-  ];
-  fixture.state.work!.journal = [
-    {
-      id: "derived-journal",
-      created_at: "2026-10-03",
-      kind: "reflection",
-      summary: "A synthetic journal based on the old feedback.",
-      changes: [],
-      sources: [],
-      models: [],
-    },
-  ];
-  await page.getByRole("button", { name: "Helpful", exact: true }).click();
-  await expect(
-    page.getByRole("button", { name: "Clear feedback" }),
-  ).toBeVisible();
-  fixture.state.memories = [];
-  fixture.state.work!.journal = [];
-  fixture.holdNext();
-  await page.getByRole("button", { name: "Clear feedback" }).click();
-  await expect.poll(fixture.held).toBeTruthy();
-  const calls = fixture.workspaceCalls();
-  await page.getByRole("button", { name: "Memory", exact: true }).click();
-  await page
-    .locator(".memory-setup")
-    .getByRole("button", { name: "List", exact: true })
-    .click();
-  await expect(
-    page.getByText("A synthetic practice derived from feedback.", {
-      exact: true,
-    }),
-  ).toBeVisible();
-  await page.getByRole("button", { name: "Settings", exact: true }).click();
-  await page.getByText("Work limits & memory recall", { exact: true }).click();
-  await page.getByLabel("Daily reflection jobs", { exact: true }).fill("93");
-  await fixture.release();
-  await expect(
-    page.getByLabel("Daily reflection jobs", { exact: true }),
-  ).toHaveValue("93");
-  await expect(page.getByText(/Unsaved changes/)).toBeVisible();
-  await page.getByRole("button", { name: "Memory", exact: true }).click();
-  await expect(
-    page.getByText("A synthetic practice derived from feedback.", {
-      exact: true,
-    }),
-  ).toHaveCount(0);
-  await expect(
-    page.getByText("No reflections recorded yet.", { exact: true }),
-  ).toBeVisible();
-  await page.getByRole("button", { name: "Settings", exact: true }).click();
-  await expect(
-    page.getByLabel("Daily reflection jobs", { exact: true }),
-  ).toHaveValue("93");
-  await expect(page.getByText(/Unsaved changes/)).toBeVisible();
-  expect(fixture.workspaceCalls()).toBe(calls);
-  expect(fixture.generationCalls()).toBe(0);
-});
+for (const failed of [false, true]) {
+  test(`feedback clear refreshes derived memory and journal while paused after ${failed ? "a failed" : "a successful"} response without replacing settings drafts`, async ({
+    page,
+  }) => {
+    const fixture = await feedbackFixture(page);
+    fixture.state.memories = [
+      {
+        id: "derived-note",
+        content: "A synthetic practice derived from feedback.",
+        scope: "workspace",
+        chat_id: null,
+        source_message_id: null,
+        origin: "reflective",
+        kind: "lesson",
+        created_at: "2026-10-03",
+        updated_at: "2026-10-03",
+      },
+    ];
+    fixture.state.work!.journal = [
+      {
+        id: "derived-journal",
+        created_at: "2026-10-03",
+        kind: "reflection",
+        summary: "A synthetic journal based on the old feedback.",
+        changes: [],
+        sources: [],
+        models: [],
+      },
+    ];
+    await page.getByRole("button", { name: "Helpful", exact: true }).click();
+    await expect(
+      page.getByRole("button", { name: "Clear feedback" }),
+    ).toBeVisible();
+    fixture.state.memories = [];
+    fixture.state.work!.journal = [];
+    fixture.holdNext();
+    await page.getByRole("button", { name: "Clear feedback" }).click();
+    await expect.poll(fixture.held).toBeTruthy();
+    const calls = fixture.workspaceCalls();
+    await page.getByRole("button", { name: "Memory", exact: true }).click();
+    await page
+      .locator(".memory-setup")
+      .getByRole("button", { name: "List", exact: true })
+      .click();
+    await expect(
+      page.getByText("A synthetic practice derived from feedback.", {
+        exact: true,
+      }),
+    ).toBeVisible();
+    await page.getByRole("button", { name: "Settings", exact: true }).click();
+    await page
+      .getByText("Work limits & memory recall", { exact: true })
+      .click();
+    await page.getByLabel("Daily reflection jobs", { exact: true }).fill("93");
+    await fixture.release(failed);
+    await expect(
+      page.getByLabel("Daily reflection jobs", { exact: true }),
+    ).toHaveValue("93");
+    await expect(page.getByText(/Unsaved changes/)).toBeVisible();
+    await page.getByRole("button", { name: "Memory", exact: true }).click();
+    await expect(
+      page.getByText("A synthetic practice derived from feedback.", {
+        exact: true,
+      }),
+    ).toHaveCount(0);
+    await expect(
+      page.getByText("No reflections recorded yet.", { exact: true }),
+    ).toBeVisible();
+    await page.getByRole("button", { name: "Settings", exact: true }).click();
+    await expect(
+      page.getByLabel("Daily reflection jobs", { exact: true }),
+    ).toHaveValue("93");
+    await expect(page.getByText(/Unsaved changes/)).toBeVisible();
+    expect(fixture.workspaceCalls()).toBe(calls + (failed ? 1 : 0));
+    expect(fixture.generationCalls()).toBe(0);
+  });
+}
 
 for (const action of ["switch", "delete", "generate"] as const) {
   test(`late feedback does not overwrite the workspace after ${action}`, async ({
     page,
   }) => {
     const fixture = await feedbackFixture(page);
+    fixture.state.work!.journal = [
+      {
+        id: "superseded-journal",
+        created_at: "2026-10-03",
+        kind: "reflection",
+        summary: "A synthetic journal invalidated by the feedback edit.",
+        changes: [],
+        sources: [],
+        models: [],
+      },
+    ];
+    await page.reload();
     fixture.holdNext();
     await page
       .getByRole("button", { name: "Needs improvement", exact: true })
@@ -308,6 +331,7 @@ for (const action of ["switch", "delete", "generate"] as const) {
         page.getByText("A fresh synthetic answer.", { exact: true }),
       ).toBeVisible();
     }
+    fixture.state.work!.journal = [];
     await fixture.release();
     await expect(
       page
@@ -322,6 +346,10 @@ for (const action of ["switch", "delete", "generate"] as const) {
       await expect(
         page.getByRole("heading", { name: "second conversation", exact: true }),
       ).toBeVisible();
+    await page.getByRole("button", { name: "Memory", exact: true }).click();
+    await expect(
+      page.getByText("No reflections recorded yet.", { exact: true }),
+    ).toBeVisible();
   });
 }
 
@@ -351,7 +379,7 @@ test("expanded review and text limits are available in the forms", async ({
     ["Background context tokens", "8192", "131072"],
     ["Exchanges per periodic review", "1", "32"],
     ["Conversation review characters", "1000", "200000"],
-    ["Reflection output tokens", "1", "16384"],
+    ["Reflection output tokens", "1", "32768"],
     ["Memories per reply", "0", "100"],
     ["Memory context characters", "0", "200000"],
   ] as const) {

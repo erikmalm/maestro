@@ -107,7 +107,7 @@ class WorkConfigAPITests(unittest.TestCase):
         config = self.client.get("/api/work-config").json()["config"]
         provider = self.client.get("/api/provider").json()["config"]
         local = {**provider, "protocol": "ollama", "base_url": "http://127.0.0.1:11434",
-                 "model": "synthetic:7b", "ollama_context_tokens": 4096}
+                 "model": "synthetic:7b", "ollama_context_tokens": 4096, "max_output_tokens": 256}
         automatic = {**config, "enabled": True, "auto_curate": True, "periodic_reflection": True}
         self.assertEqual(automatic["reflection_interval_minutes"], 360)
         with patch("backend.provider.network", side_effect=AssertionError("Saving settings must not infer")):
@@ -139,7 +139,7 @@ class WorkConfigAPITests(unittest.TestCase):
         provider = self.client.get("/api/provider").json()["config"]
         self.client.put("/api/provider", headers=self.headers, json={"config": {
             **provider, "protocol": "ollama", "base_url": "http://127.0.0.1:11434",
-            "model": "synthetic:7b", "ollama_context_tokens": 8192}, "persist": False})
+            "model": "synthetic:7b", "ollama_context_tokens": 8192, "max_output_tokens": 4096}, "persist": False})
         config = {**WorkConfig().model_dump(), "enabled": True, "auto_curate": True, "periodic_reflection": True}
         self.assertEqual(self.client.put("/api/work-config", headers=self.headers, json=config).status_code, 200)
         store = ReflectionStore(backend.DATABASE, backend.TIMEZONE)

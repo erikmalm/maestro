@@ -604,7 +604,10 @@ export default function App() {
         rating,
         comment,
       );
-      if (revision !== workspaceRevision.current) return false;
+      if (revision !== workspaceRevision.current) {
+        refreshWorkspace();
+        return false;
+      }
       workspaceRevision.current += 1;
       setWorkspace((current) =>
         current?.active_chat_id === chatId
@@ -622,6 +625,9 @@ export default function App() {
           : current,
       );
       return true;
+    } catch (reason) {
+      refreshWorkspace();
+      throw reason;
     } finally {
       setFeedbackSaving(false);
     }

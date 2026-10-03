@@ -8,7 +8,7 @@ import unittest
 from unittest.mock import patch
 from zoneinfo import ZoneInfo
 
-from backend.memory import MemoryStore, MAX_CONTENT, MAX_MEMORIES
+from backend.memory import MemoryStore, MAX_CONTENT, MAX_MEMORIES, revision
 
 
 class MemoryTests(unittest.TestCase):
@@ -155,6 +155,42 @@ class MemoryTests(unittest.TestCase):
         self.store.forget(first["id"])
         self.store.remember("Replacement synthetic preference")
         self.assertEqual(len(self.store.list()), MAX_MEMORIES)
+
+    def test_long_source_chains_are_bounded_and_cascade_without_recursive_failures(self):
+        root = self.store.remember("Synthetic project source decision.")
+        records = {root["id"]: root}
+        parent = root
+        with self.store.transaction() as db:
+            for index in range(1100):
+                record = {**root, "id": f"chain-{index:04}", "origin": "reflective", "kind": "lesson",
+                          "provenance": [{"memory_id": parent["id"], "hash": revision(parent)}]}
+                self.store.insert(db, record)
+                records[record["id"]] = parent = record
+        self.assertTrue(self.store.valid_source(parent, {}, records))
+        with patch("backend.memory.revision", wraps=revision) as versions:
+            self.assertEqual(len(self.store.list()), len(records))
+        self.assertLessEqual(versions.call_count, len(records) * 2)
+        self.store.forget(root["id"])
+        self.assertEqual(self.store.list(), [])
+
+    def test_validation_cache_preserves_cycles_hashes_and_shared_valid_branches(self):
+        template = {"content": "Synthetic working note.", "kind": "lesson", "origin": "reflective",
+                    "updated_at": "synthetic", "chat_id": None, "provenance": []}
+        good = {**template, "id": "good"}
+        first, second = ({**template, "id": name} for name in ("first", "second"))
+        first["provenance"] = [{"memory_id": second["id"], "hash": revision(second)}]
+        second["provenance"] = [{"memory_id": first["id"], "hash": revision(first)}]
+        mixed = {**template, "id": "mixed", "provenance": [
+            {"memory_id": good["id"], "hash": revision(good)},
+            {"memory_id": first["id"], "hash": revision(first)}]}
+        records = {record["id"]: record for record in (good, first, second, mixed)}
+        cache = {}
+        self.assertFalse(self.store.valid_source(mixed, {}, records, cache))
+        self.assertTrue(self.store.valid_source(good, {}, records, cache))
+        for record in (first, second):
+            self.assertFalse(self.store.valid_source(record, {}, records, cache))
+        broken = {**mixed, "id": "broken", "provenance": [{"memory_id": good["id"], "hash": "outdated"}]}
+        self.assertFalse(self.store.valid_source(broken, {}, records, cache))
 
 
 if __name__ == "__main__":

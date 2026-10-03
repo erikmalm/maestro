@@ -113,15 +113,13 @@ class MemoryStore:
             db.execute("INSERT OR IGNORE INTO memory_tombstones VALUES (?)", ("source:" + source_fingerprint(source),))
 
     def remove_dependents(self, db, memory_id):
+        records = {record["id"]: record for row in db.execute("SELECT * FROM private_memories WHERE origin!='explicit'") for record in [self.record(row)]}
         pending = {memory_id}
         while pending:
-            dependent = set()
-            for row in db.execute("SELECT * FROM private_memories WHERE origin!='explicit'").fetchall():
-                record = self.record(row)
-                if any(source.get("memory_id") in pending for source in record["provenance"]):
-                    self.tombstone(db, record)
-                    db.execute("DELETE FROM private_memories WHERE id=?", (record["id"],))
-                    dependent.add(record["id"])
+            dependent = {memory_id for memory_id, record in records.items() if any(source.get("memory_id") in pending for source in record["provenance"])}
+            for memory_id in dependent:
+                self.tombstone(db, records.pop(memory_id))
+            db.executemany("DELETE FROM private_memories WHERE id=?", [(memory_id,) for memory_id in dependent])
             pending = dependent
 
     def initialize(self):
@@ -144,50 +142,60 @@ class MemoryStore:
         row = db.execute("SELECT value FROM workspace WHERE id=1").fetchone()
         return {chat["id"]: chat for chat in json.loads(row[0]).get("chats", [])} if row else {}
 
-    @classmethod
-    def valid_source(cls, record, chats, memories=None, seen=frozenset()):
-        if record["id"] in seen:
-            return False
-        seen = seen | {record["id"]}
-        for source in record.get("provenance", []):
-            if "memory_id" in source:
+    @staticmethod
+    def valid_source(record, chats, memories=None, cache=None):
+        cache = {} if cache is None else cache
+        if record["id"] in cache:
+            return cache[record["id"]]
+        pending, active = [(record, iter(record.get("provenance", [])))], {record["id"]}
+        while pending:
+            record, sources = pending[-1]
+            source = next(sources, None)
+            if source is None:
+                if record["chat_id"] is not None:
+                    chat = chats.get(record["chat_id"])
+                    if chat is None or (record["source_message_id"] is not None and not any(
+                            message.get("id") == record["source_message_id"] and message.get("role") == "user" and isinstance(message.get("text"), str) and message["text"].strip()
+                            for message in chat.get("messages", []))):
+                        break
+                active.remove(record["id"])
+                cache[record["id"]] = True
+                pending.pop()
+            elif "memory_id" in source:
                 target = (memories or {}).get(source["memory_id"])
-                if target is None or revision(target) != source["hash"] or not cls.valid_source(target, chats, memories, seen):
-                    return False
+                if target is None or revision(target) != source["hash"] or target["id"] in active or cache.get(target["id"]) is False:
+                    break
+                if target["id"] not in cache:
+                    active.add(target["id"])
+                    pending.append((target, iter(target.get("provenance", []))))
             else:
                 role = source.get("role", "user")
-                if role == "assistant" and record["kind"] not in ("identity", "lesson"):
-                    return False
                 message = next((item for item in chats.get(source["chat_id"], {}).get("messages", []) if item.get("id") == source["message_id"] and item.get("role") == role), {})
-                if not isinstance(message.get("text"), str):
-                    return False
+                if not isinstance(message.get("text"), str) or (role == "assistant" and record["kind"] not in ("identity", "lesson")):
+                    break
                 actual = assistant_revision(message["text"], message.get("feedback")) if role == "assistant" else hashlib.sha256(message["text"].encode("utf-8")).hexdigest()
                 if actual != source["hash"]:
-                    return False
-        if record["chat_id"] is None:
+                    break
+        else:
             return True
-        chat = chats.get(record["chat_id"])
-        if chat is None:
-            return False
-        return record["source_message_id"] is None or any(
-            message.get("id") == record["source_message_id"] and message.get("role") == "user" and isinstance(message.get("text"), str) and message["text"].strip()
-            for message in chat.get("messages", []))
+        cache.update(dict.fromkeys(active, False))
+        return False
 
     def list(self, chat_id=None):
         with self.reader() as db:
             if db is None:
                 return []
             chats = self.chats(db)
-            records = [self.record(row) for row in db.execute("SELECT * FROM private_memories ORDER BY updated_at DESC, id")]
-            inventory = {record["id"]: record for record in records}
-            return [record for record in records if self.valid_source(record, chats, inventory)
+            inventory = {record["id"]: record for row in db.execute("SELECT * FROM private_memories ORDER BY updated_at DESC, id") for record in [self.record(row)]}
+            cache = {}
+            return [record for record in inventory.values() if self.valid_source(record, chats, inventory, cache)
                     and (chat_id is None or record["scope"] == "workspace" or record["chat_id"] == chat_id)]
 
     def remove_stale(self, db, chats):
         chats = {chat["id"]: chat for chat in chats} if isinstance(chats, list) else chats
-        records = [self.record(row) for row in db.execute("SELECT * FROM private_memories")]
-        inventory = {record["id"]: record for record in records}
-        removed = [record["id"] for record in records if not record["pinned"] and not self.valid_source(record, chats, inventory)]
+        inventory = {record["id"]: record for row in db.execute("SELECT * FROM private_memories") for record in [self.record(row)]}
+        cache = {}
+        removed = [record["id"] for record in inventory.values() if not record["pinned"] and not self.valid_source(record, chats, inventory, cache)]
         db.executemany("DELETE FROM private_memories WHERE id=?", [(memory_id,) for memory_id in removed])
         return removed
 
@@ -218,9 +226,9 @@ class MemoryStore:
         content = content_value(content)
         with self.transaction() as db:
             row = db.execute("SELECT * FROM private_memories WHERE id=?", (memory_id,)).fetchone()
-            if row is None or not self.valid_source(self.record(row), self.chats(db), {item["id"]: self.record(item) for item in db.execute("SELECT * FROM private_memories")}):
+            old = self.record(row) if row else None
+            if old is None or not self.valid_source(old, self.chats(db), {item["id"]: self.record(item) for item in db.execute("SELECT * FROM private_memories")}):
                 raise ValueError("That memory could not be found.")
-            old = self.record(row)
             record = {**old, "content": content, "origin": "explicit", "pinned": True, "updated_at": datetime.now(self.timezone).isoformat()}
             record.update(source_hash=None, evidence=None, provenance=[], source_message_id=None,
                           chat_id=old["chat_id"] if old["scope"] == "conversation" else None)
@@ -262,14 +270,11 @@ class MemoryStore:
                 self.delete_chat(chat_id, connection)
         elif db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='private_memories'").fetchone():
             db.execute("PRAGMA secure_delete=ON")
-            previous_factory = db.row_factory
-            db.row_factory = sqlite3.Row
             for row in db.execute("SELECT * FROM private_memories").fetchall():
                 record = self.record(row)
                 if record["chat_id"] == chat_id or any(source.get("chat_id") == chat_id for source in record["provenance"]):
                     self.remove_dependents(db, record["id"])
                     db.execute("DELETE FROM private_memories WHERE id=?", (record["id"],))
-            db.row_factory = previous_factory
             if db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='memory_barriers'").fetchone():
                 db.execute("DELETE FROM memory_barriers WHERE chat_id=?", (chat_id,))
 

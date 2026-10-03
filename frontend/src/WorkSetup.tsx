@@ -76,60 +76,45 @@ export default function WorkSetup({
           {!local &&
             " Select Ollama in Model connection to use local task models."}
         </p>
-        <label className="reflection-check">
-          <input
-            type="checkbox"
-            checked={config.enabled}
-            disabled={
-              !!busy || !status.worker_available || (!local && !config.enabled)
-            }
-            onChange={(event) => setConfig({ enabled: event.target.checked })}
-          />
-          Enable background reflection
-        </label>
-        <label className="reflection-check">
-          <input
-            type="checkbox"
-            checked={config.auto_curate}
-            disabled={!!busy}
-            onChange={(event) =>
-              setConfig({
-                auto_curate: event.target.checked,
-                ...(!event.target.checked
-                  ? { periodic_reflection: false, auto_create_tasks: false }
-                  : {}),
-              })
-            }
-          />
-          AI curates memory automatically
-        </label>
-        <label className="reflection-check">
-          <input
-            type="checkbox"
-            checked={config.periodic_reflection}
-            disabled={!!busy || !config.auto_curate}
-            onChange={(event) =>
-              setConfig({
-                periodic_reflection: event.target.checked,
-                ...(!event.target.checked ? { auto_create_tasks: false } : {}),
-              })
-            }
-          />
-          Reflect periodically on identity and working style
-        </label>
-        <label className="reflection-check">
-          <input
-            type="checkbox"
-            checked={config.auto_create_tasks ?? false}
-            disabled={
-              !!busy || !config.auto_curate || !config.periodic_reflection
-            }
-            onChange={(event) =>
-              setConfig({ auto_create_tasks: event.target.checked })
-            }
-          />
-          AI can create tasks during reflection
-        </label>
+        {(
+          [
+            [
+              "enabled",
+              "Enable background reflection",
+              !status.worker_available || (!local && !config.enabled),
+            ],
+            ["auto_curate", "AI curates memory automatically", false],
+            [
+              "periodic_reflection",
+              "Reflect periodically on identity and working style",
+              !config.auto_curate,
+            ],
+            [
+              "auto_create_tasks",
+              "AI can create tasks during reflection",
+              !config.auto_curate || !config.periodic_reflection,
+            ],
+          ] as const
+        ).map(([key, label, unavailable]) => (
+          <label className="reflection-check" key={key}>
+            <input
+              type="checkbox"
+              checked={config[key] ?? false}
+              disabled={!!busy || unavailable}
+              onChange={(event) =>
+                setConfig({
+                  [key]: event.target.checked,
+                  ...(!event.target.checked && key === "auto_curate"
+                    ? { periodic_reflection: false, auto_create_tasks: false }
+                    : !event.target.checked && key === "periodic_reflection"
+                      ? { auto_create_tasks: false }
+                      : {}),
+                })
+              }
+            />
+            {label}
+          </label>
+        ))}
         <p className="reflection-note">
           Reviewed follow-ups and self-improvement experiments are added to
           Tasks with an initiator and suggested assignee.

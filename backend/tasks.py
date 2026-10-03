@@ -85,11 +85,11 @@ def prune_ai_tasks(workspace, db):
         inventory = {record["id"]: record for row in db.execute("SELECT * FROM private_memories")
                      for record in [MemoryStore.record(row)]}
     chats = {chat["id"]: chat for chat in workspace.get("chats", [])}
-    removed = set()
+    removed, source_cache = set(), {}
     for task in sourced:
         record = {"id": "task:" + task["id"], "kind": "lesson", "chat_id": None,
                   "provenance": task["provenance"]}
-        if not MemoryStore.valid_source(record, chats, inventory):
+        if not MemoryStore.valid_source(record, chats, inventory, cache=source_cache):
             removed.add(task["id"])
             dismiss_task(workspace, task)
     if removed:

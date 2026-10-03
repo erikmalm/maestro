@@ -75,6 +75,17 @@ class WorkspaceTests(unittest.TestCase):
                                   headers=[(b"x-maestro-csrf", b"caf\xe9")])
         self.assertEqual(result.status_code, 403)
 
+    def test_request_size_uses_actual_bytes_without_trusting_content_length(self):
+        before = self.workspace()
+        payload = b'{"title":"Synthetic oversized task"}' + b" " * 262144
+        for declared_size in (None, "1", str(len(payload))):
+            headers = {**self.headers, "Content-Type": "application/json"}
+            if declared_size is not None:
+                headers["Content-Length"] = declared_size
+            response = self.client.post("/api/tasks", headers=headers, content=iter((payload,)))
+            self.assertEqual(response.status_code, 413, response.text)
+            self.assertEqual(self.workspace(), before)
+
     def test_fresh_workspace_is_empty_and_exposes_only_current_capabilities(self):
         result = self.workspace()
         self.assertEqual(result["tasks"], [])

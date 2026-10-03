@@ -624,6 +624,15 @@ test("local Ollama chat needs no key or USD budget and records native tokens", a
   await page
     .getByRole("button", { name: "Save connection", exact: true })
     .click();
+  await expect(page.getByRole("alert")).toContainText(
+    /output.*context|context.*output/i,
+  );
+  const unchanged = await (await page.request.get("/api/workspace")).json();
+  expect(unchanged.provider.config.ollama_context_tokens).toBe(32768);
+  await page.getByLabel("Maximum output tokens per reply").fill("4096");
+  await page
+    .getByRole("button", { name: "Save connection", exact: true })
+    .click();
   await expect(
     page.getByText(
       "Chat model settings saved. Return to Workspace to send a message.",

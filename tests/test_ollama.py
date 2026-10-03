@@ -263,6 +263,31 @@ class OllamaTests(unittest.TestCase):
                                        json={"text": "Synthetic oversized context " * 100})
         self.assertEqual(allowed.status_code, 200, allowed.text)
 
+    def test_output_and_context_capacity_rejects_invalid_saves_and_legacy_settings_can_be_fixed(self):
+        saved = self.configure()["config"]
+        service = Provider(backend.DATABASE, backend.TIMEZONE)
+        incompatible = {**saved, "ollama_context_tokens": 8192, "max_output_tokens": 8192}
+        with patch("backend.provider.network") as network:
+            for output in (8192, 6144):
+                response = self.client.put("/api/provider", headers=self.headers, json={
+                    "config": {**incompatible, "max_output_tokens": output}})
+                self.assertEqual(response.status_code, 409, response.text)
+                self.assertIn("output limit and chat prompt", response.json()["detail"])
+                self.assertEqual(service.read_state()["config"], saved)
+            network.assert_not_called()
+        with service.transaction() as state:
+            state["config"] = incompatible  # A previously saved configuration remains editable.
+        self.assertEqual(self.client.get("/api/provider").json()["config"], incompatible)
+        with self.mock_http():
+            rejected = self.client.post("/api/chat", headers=self.headers, json={"text": "Synthetic greeting"})
+        self.assertEqual(rejected.status_code, 409, rejected.text)
+        self.assertEqual(self.requests, [])
+        repaired = self.configure({**incompatible, "max_output_tokens": 256})
+        self.assertEqual(repaired["config"]["ollama_context_tokens"], 8192)
+        with self.mock_http():
+            reply = self.client.post("/api/chat", headers=self.headers, json={"text": "Synthetic greeting"})
+        self.assertEqual(reply.status_code, 200, reply.text)
+
     def test_worker_resource_values_reject_invalid_input_without_overwriting_settings(self):
         saved = self.configure()["config"]
         for key, values in (

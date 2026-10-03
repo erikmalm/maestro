@@ -167,18 +167,17 @@ export const assignTask = (
     suggested_assignee,
   });
 export const toggleTask = (id: string, done: boolean) =>
-  request<Workspace>(`/tasks/${id}`, "PATCH", { done });
+  request<Workspace>(`/tasks/${encodeURIComponent(id)}`, "PATCH", { done });
 export const deleteTask = (id: string) =>
-  request<Workspace>(`/tasks/${id}`, "DELETE");
+  request<Workspace>(`/tasks/${encodeURIComponent(id)}`, "DELETE");
 export const sendMessage = (
   text: string,
   chat_id?: string | null,
   model = "",
-  role: "chat" | "orchestrator" = "chat",
 ) =>
   request<Workspace>("/chat", "POST", {
     text,
-    role,
+    role: "chat",
     ...(model ? { model } : {}),
     ...(chat_id ? { chat_id } : {}),
   });

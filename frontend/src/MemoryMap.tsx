@@ -47,15 +47,22 @@ export default function MemoryMap({
     Partial<Record<keyof typeof memoryKinds, number>>
   >({});
   const marker = useId().replaceAll(":", "");
-  const groups = kinds.map((kind) => ({
-    kind,
-    entries: memories
+  const groups = kinds.map((kind) => {
+    const entries = memories
       .filter((memory) => (memory.kind ?? "fact") === kind)
       .sort(
         (a, b) =>
           a.created_at.localeCompare(b.created_at) || a.id.localeCompare(b.id),
+      );
+    return {
+      kind,
+      entries,
+      page: Math.min(
+        pages[kind] ?? 0,
+        Math.max(0, Math.ceil(entries.length / pageSize) - 1),
       ),
-  }));
+    };
+  });
   const selectedGroup = groups.find(({ entries }) =>
     entries.some((memory) => memory.id === selectedId),
   );
@@ -100,19 +107,15 @@ export default function MemoryMap({
       ) *
         70,
   );
-  const pageEntries = groups.flatMap(({ kind, entries }, groupIndex) => {
-    const page = Math.min(
-      pages[kind] ?? 0,
-      Math.max(0, Math.ceil(entries.length / pageSize) - 1),
-    );
-    return entries
+  const pageEntries = groups.flatMap(({ entries, page }, groupIndex) =>
+    entries
       .slice(page * pageSize, (page + 1) * pageSize)
       .map((memory, index) => ({
         memory,
         groupIndex,
         index,
-      }));
-  });
+      })),
+  );
   const selectedSources = conversationSources(
     memories.find((memory) => memory.id === selectedId),
   );
@@ -313,56 +316,50 @@ export default function MemoryMap({
               Conversation · {source.title}
             </button>
           ))}
-          {groups.map(({ kind, entries }, index) => {
-            const page = Math.min(
-              pages[kind] ?? 0,
-              Math.max(0, Math.ceil(entries.length / pageSize) - 1),
-            );
-            return (
-              <div
-                className="memory-map-group"
-                key={kind}
-                style={{
-                  left: 16 + (index % 2) * (columnWidth + 20),
-                  top: rowTop(index),
-                  width: columnWidth,
-                  height: rowHeights[Math.floor(index / 2)],
-                }}
-              >
-                <h3>
-                  {memoryKinds[kind]} <small>{entries.length}</small>
-                </h3>
-                {!entries.length && <p>No matching memories</p>}
-                {entries.length > pageSize && (
-                  <div className="memory-map-pages">
-                    <button
-                      type="button"
-                      className="icon-button"
-                      aria-label={`Previous ${memoryKinds[kind].toLowerCase()}`}
-                      disabled={page === 0}
-                      onClick={() => setPages({ ...pages, [kind]: page - 1 })}
-                    >
-                      <ChevronLeft size={15} />
-                    </button>
-                    <span>
-                      {page * pageSize + 1}–
-                      {Math.min(entries.length, (page + 1) * pageSize)} of{" "}
-                      {entries.length}
-                    </span>
-                    <button
-                      type="button"
-                      className="icon-button"
-                      aria-label={`Next ${memoryKinds[kind].toLowerCase()}`}
-                      disabled={(page + 1) * pageSize >= entries.length}
-                      onClick={() => setPages({ ...pages, [kind]: page + 1 })}
-                    >
-                      <ChevronRight size={15} />
-                    </button>
-                  </div>
-                )}
-              </div>
-            );
-          })}
+          {groups.map(({ kind, entries, page }, index) => (
+            <div
+              className="memory-map-group"
+              key={kind}
+              style={{
+                left: 16 + (index % 2) * (columnWidth + 20),
+                top: rowTop(index),
+                width: columnWidth,
+                height: rowHeights[Math.floor(index / 2)],
+              }}
+            >
+              <h3>
+                {memoryKinds[kind]} <small>{entries.length}</small>
+              </h3>
+              {!entries.length && <p>No matching memories</p>}
+              {entries.length > pageSize && (
+                <div className="memory-map-pages">
+                  <button
+                    type="button"
+                    className="icon-button"
+                    aria-label={`Previous ${memoryKinds[kind].toLowerCase()}`}
+                    disabled={page === 0}
+                    onClick={() => setPages({ ...pages, [kind]: page - 1 })}
+                  >
+                    <ChevronLeft size={15} />
+                  </button>
+                  <span>
+                    {page * pageSize + 1}–
+                    {Math.min(entries.length, (page + 1) * pageSize)} of{" "}
+                    {entries.length}
+                  </span>
+                  <button
+                    type="button"
+                    className="icon-button"
+                    aria-label={`Next ${memoryKinds[kind].toLowerCase()}`}
+                    disabled={(page + 1) * pageSize >= entries.length}
+                    onClick={() => setPages({ ...pages, [kind]: page + 1 })}
+                  >
+                    <ChevronRight size={15} />
+                  </button>
+                </div>
+              )}
+            </div>
+          ))}
           {visible.map(({ memory, x, y }) => (
             <button
               type="button"

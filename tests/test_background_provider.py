@@ -134,7 +134,7 @@ class ClaimedProviderTests(unittest.TestCase):
             db.execute("INSERT INTO workspace VALUES (1,?)", (json.dumps(self.workspace),))
         MemoryStore(self.database, timezone.utc).initialize()
         self.provider = Provider(self.database, timezone.utc)
-        self.provider.configure({**LOCAL, "ollama_context_tokens": 8192}, "", False)
+        self.provider.configure({**LOCAL, "ollama_context_tokens": 8192, "max_output_tokens": 4096}, "", False)
         with self.provider.transaction() as state:
             state["models"] = ["gpt-oss:20b"]
         self.store = ReflectionStore(self.database, timezone.utc)

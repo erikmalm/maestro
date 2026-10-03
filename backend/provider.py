@@ -207,6 +207,9 @@ class Provider:
         if local:
             if key:
                 raise ValueError("Local Ollama does not use an API key. Leave the key empty.")
+            minimum_input = len((INSTRUCTIONS + json.dumps([{"role": "user", "content": "a"}])).encode("utf-8")) + 2048
+            if config["ollama_context_tokens"] < minimum_input + config["max_output_tokens"]:
+                raise ValueError("Local context is too small for the output limit and chat prompt. Increase context size or lower maximum output tokens.")
             config.update(input_usd_per_million=0, output_usd_per_million=0, pricing_verified=True)
         with self.transaction(with_db=True) as (state, db):
             effective_key = None if local else key or credentials.read(config["base_url"])[0]
@@ -311,9 +314,6 @@ class Provider:
                 pass
         return result["reply"]
 
-    def generate(self, text, chat_id, title_for=None, model="", role="chat"):
-        return self._generate(text, chat_id, title_for, model, role)
-
     def generate_context(self, instructions, messages, model="", max_output_tokens=None, kind="reflection", job=None, schema=None, deadline=None):
         """Bounded, tool-free local inference using the same reservation and usage ledger."""
         if (kind not in ("reflection", "memory", "coding") or not isinstance(instructions, str) or not instructions.strip()
@@ -336,11 +336,11 @@ class Provider:
             raise ValueError("Structured background work requires a claimed job.")
         if deadline is not None and (type(deadline) not in (int, float) or not math.isfinite(deadline)):
             raise ValueError("Use a finite deadline for background work.")
-        return self._generate("", None, model=model, role=kind,
-                              context={"instructions": instructions, "messages": history, "max_output_tokens": max_output_tokens,
-                                       "job": job, "schema": schema, "deadline": deadline})
+        return self.generate("", None, model=model, role=kind,
+                             context={"instructions": instructions, "messages": history, "max_output_tokens": max_output_tokens,
+                                      "job": job, "schema": schema, "deadline": deadline})
 
-    def _generate(self, text, chat_id, title_for=None, model="", role="chat", context=None):
+    def generate(self, text, chat_id, title_for=None, model="", role="chat", context=None):
         """Chat, title and explicit context share dispatch, limits and accounting."""
         title = title_for is not None
         job = context.get("job") if context else None
