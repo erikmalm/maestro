@@ -1,8 +1,8 @@
 # Maestro development plan
 
-Plan date: 2026-10-02. The current product supports real chat, persistent history, manual to-dos, provider setup and usage accounting. This branch adds explicit private memory and shared local generation. Local Ollama generation has been verified; remote API/accounting and bounded hosted search have synthetic integration coverage. Hosted search requires a successful test with the user's key.
+Plan date: 2026-10-03. The current product supports real chat, persistent history, manual to-dos, provider setup and usage accounting. This branch adds private memory, shared local generation and opt-in background reflection. Local Ollama generation has been verified; remote API/accounting and bounded hosted search have synthetic integration coverage. Hosted search requires a successful test with the user's key.
 
-There is one active connection with saved model preferences and per-message local choices. The chat UI always uses the chat role; the API retains a planning/orchestrator preference. Explicit saved memory is recalled in relevant local chats. Maestro cannot execute a to-do, delegate work, route specialist tasks or reflect in the background yet. The [architecture](docs/ARCHITECTURE.md) and [memory/reflection design](docs/MEMORY_AND_REFLECTION.md) distinguish working behavior from upcoming increments.
+There is one active connection with saved model preferences and per-message local choices. The chat UI always uses the chat role; the API retains a planning/orchestrator preference. Accepted private memory is recalled in relevant local chats. Background reflection proposes exact excerpts of new user evidence for review. Maestro cannot execute a to-do, delegate work or automatically route specialist tasks yet. The [architecture](docs/ARCHITECTURE.md) and [memory/reflection design](docs/MEMORY_AND_REFLECTION.md) distinguish working behavior from upcoming increments.
 
 ## Product goal
 
@@ -18,8 +18,9 @@ The first supported setup is one user on one Windows computer. Deliver each capa
 - **Tasks:** manual create, complete/reopen and delete operations without model calls.
 - **Settings and usage:** one connection with chat/orchestrator model preferences, per-message local choices, OS/session/mounted credentials, search setup, output/context controls, spend/token limits, actual model usage and uncertain-charge reconciliation.
 - **Private storage:** SQLite outside Git; real conversations and accounting survive restart. Previous live history migrates into one conversation. Earlier prototype-only records remain archived privately, with simulated messages excluded from active chat.
-- **Private memory:** explicit save/edit/forget in Settings, workspace/conversation scopes and bounded lexical recall. Memory and derived replies stay local; relevant IDs are recorded. No automatic extraction or idle inference.
-- **Task configuration:** independent saved reflection/extraction/coding models, live output/recall caps and future worker timing/budgets. Enabling reflection awaits the durable worker; see [saved configuration](docs/MEMORY_AND_REFLECTION.md#saved-configuration).
+- **Private memory:** save/edit/forget in Settings, workspace/conversation scopes and bounded lexical recall. Memory and derived replies stay local; relevant IDs are recorded. Inferred proposals require user acceptance.
+- **Background reflection:** durable debounced jobs from new local user evidence, one idle worker, conservative daily budgets, source/configuration rechecks, restart recovery and explicit memory review. No inference without eligible work.
+- **Task configuration:** independent saved reflection/extraction/coding models, output/recall caps and worker timing/budgets. Reflection can be enabled or paused; see [saved configuration](docs/MEMORY_AND_REFLECTION.md#saved-configuration).
 
 Chat history stays separate while usage and limits are shared. A first successful reply may trigger one bounded title call using the original model, a short first-message excerpt, no tools and the remaining request allowance. A first-message title is the fallback; manual names always win.
 
@@ -54,7 +55,7 @@ Acceptance:
 
 ## 2. Complete one durable task
 
-Background reflection can proceed first through REF-01–04 in the [memory design](docs/MEMORY_AND_REFLECTION.md#recorded-next-tasks), using chat corrections and a worker inside the sole API process. It does not depend on task execution. The separate task-worker design below still requires ownership-aware recovery before cross-process dispatch.
+Background reflection implements REF-01–03 in the [memory design](docs/MEMORY_AND_REFLECTION.md#recorded-next-tasks), using chat evidence and a worker inside the sole API process. REF-04 evaluates usefulness before automatic promotion. The separate task-worker design below still requires ownership-aware recovery before cross-process dispatch.
 
 Add one separate task worker using local Ollama and the shared generation service. A manually queued text-only task has selected context, completion criteria, a persisted attempt and a saved result. It can run with the browser closed. Start with one generation slot and show persisted status in Tasks.
 
@@ -95,7 +96,7 @@ Acceptance: a synthetic task delegates an assignment to another profile, receive
 
 **Projects:** group existing chats and tasks when shared project context becomes useful. Add project behavior with its UI rather than introducing unused records or navigation now.
 
-**Background reflection:** explicit memory and scoped local recall are implemented. Next, REF-01 adds durable evidence/jobs, source versions and deletion/forget invalidation; REF-02 adds a single idle worker with an independent installed-model choice and call/token/time bounds; REF-03 proposes evidence-backed candidates; REF-04 evaluates usefulness and selective promotion. Detailed acceptance checks are in [MEMORY_AND_REFLECTION.md](docs/MEMORY_AND_REFLECTION.md#recorded-next-tasks). Chat corrections provide an initial source before task execution exists. Keep inferred candidates inspectable and all calls in the shared gate.
+**Memory evaluation (REF-04):** compare no-memory, explicit-memory and accepted-proposal behavior; measure usefulness, false/stale facts, abstention, latency and resource use. Automatic promotion follows measured results and a narrow rule. The durable worker and user-reviewed exact-excerpt proposals implement REF-01–03; details are in [MEMORY_AND_REFLECTION.md](docs/MEMORY_AND_REFLECTION.md#recorded-next-tasks).
 
 **Scoped integrations:** start with read-only retrieval from a user-selected MarketPulse API, export or document directory. Inspect its actual contract during that increment. Enforce source/path scope and show citations, dates and unavailable evidence. External writes require a configured action scope and stable action identity so restart cannot duplicate them.
 
@@ -113,4 +114,4 @@ Use synthetic models and public-safe fixtures for automated checks; CI requires 
 
 Live checks remain deliberate and bounded: a running local model for generation, or an explicitly configured remote profile and allowance. A model-list response does not prove generation; simulated results do not prove delegation; a reviewer accepting a proposal does not prove an improvement.
 
-The next memory acceptance target is a bounded durable reflection job from a user correction, with source invalidation and restart recovery. One real durable task remains the execution target before expanding profiles/delegation. Both reuse chat's generation/accounting path. Podman checks preserve the single-owner runtime.
+The next memory target is a measured comparison of explicit and user-accepted inferred records. One real durable task remains the execution target before expanding profiles/delegation. Both reuse chat's generation/accounting path. Podman checks preserve the single-owner runtime.

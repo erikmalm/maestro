@@ -1,0 +1,221 @@
+"""Background deadlines close connections and retain the gate until verified idle."""
+import asyncio
+from contextlib import closing
+from datetime import timezone
+import json
+from pathlib import Path
+import sqlite3
+import tempfile
+import time
+import unittest
+from unittest.mock import patch
+
+import httpx
+
+from backend.provider import BackgroundUncertain, DEFAULT, Provider, background_network
+from backend.memory import MemoryStore
+from backend.reflection import ReflectionStore, OUTPUT_SCHEMA
+from backend.work_config import WorkConfig
+
+
+LOCAL = {**DEFAULT, "protocol": "ollama", "base_url": "http://127.0.0.1:11434", "model": "synthetic:7b"}
+
+
+class BackgroundNetworkTests(unittest.TestCase):
+    def mock_http(self, handler):
+        client = httpx.AsyncClient
+        return patch("backend.provider.httpx.AsyncClient", side_effect=lambda **options:
+                     client(transport=httpx.MockTransport(handler), **options))
+
+    def test_whole_request_deadline_cancels_ongoing_request(self):
+        cancelled = []
+        async def handler(request):
+            self.assertNotIn("authorization", request.headers)
+            try:
+                await asyncio.sleep(10)
+                return httpx.Response(200, json={"done": True})
+            finally:
+                cancelled.append(True)
+        started = time.monotonic()
+        with self.mock_http(handler), self.assertRaises(BackgroundUncertain):
+            background_network(LOCAL, "/api/chat", {}, started + 0.05)
+        self.assertLess(time.monotonic() - started, 1)
+        self.assertEqual(cancelled, [True])
+
+    def test_deadline_is_shared_across_metadata_and_generation(self):
+        calls = []
+        async def handler(request):
+            calls.append(request.url.path)
+            await asyncio.sleep(0.08)
+            return httpx.Response(200, json={"done": True})
+        deadline = time.monotonic() + 0.12
+        with self.mock_http(handler):
+            self.assertEqual(background_network(LOCAL, "/api/show", {}, deadline), {"done": True})
+            with self.assertRaises(BackgroundUncertain):
+                background_network(LOCAL, "/api/chat", {}, deadline)
+        self.assertEqual(calls, ["/api/show", "/api/chat"])
+
+
+class BackgroundRecoveryTests(unittest.TestCase):
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory(prefix="maestro-background-provider-")
+        self.addCleanup(self.directory.cleanup)
+        self.provider = Provider(Path(self.directory.name) / "workspace.sqlite3", timezone.utc)
+        with self.provider.transaction() as state:
+            state["ledger"].append({"id": "synthetic-request", "at": self.provider.stamp(),
+                                    "model": "synthetic:7b", "protocol": "ollama", "cost": 0, "status": "reserved",
+                                    "job_id": "synthetic-job", "attempt": "synthetic-attempt", "connection_config": LOCAL.copy()})
+
+    def entry(self):
+        return self.provider.read_state()["ledger"][0]
+
+    def test_startup_never_releases_an_unconfirmed_background_request(self):
+        self.provider.recover()
+        self.assertEqual(self.entry()["status"], "reserved")
+        self.assertTrue(self.entry()["background_unknown"])
+        with patch("backend.provider.background_network", side_effect=BackgroundUncertain("Synthetic disconnect")):
+            self.provider.recover_background()
+        self.assertEqual(self.entry()["status"], "reserved")
+
+    def test_recovery_requires_an_empty_valid_model_list(self):
+        self.provider.recover()
+        for response in ({}, {"models": None}, {"models": [None]}, {"models": [{"name": "synthetic:7b"}]},
+                         {"models": [{"name": "another:7b", "model": "synthetic:7b"}]},
+                         {"models": [{"name": "unrelated:7b"}]}):
+            with self.subTest(response=response), patch("backend.provider.background_network", return_value=response):
+                self.provider.recover_background()
+                self.assertEqual(self.entry()["status"], "reserved")
+        with patch("backend.provider.background_network", return_value={"models": []}) as request:
+            self.provider.recover_background()
+        self.assertEqual(request.call_args.args[:3], (LOCAL, "/api/ps", None))
+        self.assertEqual(self.entry()["status"], "failed")
+        self.assertFalse(self.entry()["background_unknown"])
+        with patch("backend.provider.background_network") as request:
+            self.provider.recover_background()
+        request.assert_not_called()
+
+    def test_default_model_alias_does_not_falsely_release_the_gate(self):
+        with self.provider.transaction() as state:
+            state["ledger"][0]["model"] = "synthetic"
+        self.provider.recover()
+        with patch("backend.provider.background_network", return_value={"models": [{"name": "synthetic:latest"}]}):
+            self.provider.recover_background()
+        self.assertEqual(self.entry()["status"], "reserved")
+
+    def test_registry_alias_does_not_falsely_release_the_gate(self):
+        with self.provider.transaction() as state:
+            state["ledger"][0]["model"] = "registry.ollama.ai/library/synthetic:7b"
+        self.provider.recover()
+        with patch("backend.provider.background_network", return_value={"models": [{"name": "synthetic:7b"}]}):
+            self.provider.recover_background()
+        self.assertEqual(self.entry()["status"], "reserved")
+
+    def test_failed_settlement_without_an_unknown_flag_still_requires_verified_idle(self):
+        self.assertNotIn("background_unknown", self.entry())
+        with patch("backend.provider.background_network", return_value={"models": [{"name": "synthetic:7b"}]}):
+            self.provider.recover_background()
+        self.assertEqual(self.entry()["status"], "reserved")
+        with patch("backend.provider.background_network", return_value={"models": []}):
+            self.provider.recover_background()
+        self.assertEqual(self.entry()["status"], "failed")
+
+
+class ClaimedProviderTests(unittest.TestCase):
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory(prefix="maestro-claimed-provider-")
+        self.addCleanup(self.directory.cleanup)
+        self.database = Path(self.directory.name) / "workspace.sqlite3"
+        self.workspace = {"limits": {"max_tokens": 100000}, "work_config": WorkConfig(
+            enabled=True, debounce_seconds=0, idle_seconds=0).model_dump(), "chats": [{
+                "id": "synthetic-chat", "title_source": "manual", "messages": [{
+                    "id": "synthetic-user", "role": "user", "text": "I prefer concise Swedish replies."}]}]}
+        with closing(sqlite3.connect(self.database)) as db, db:
+            db.execute("CREATE TABLE workspace (id INTEGER PRIMARY KEY, value TEXT NOT NULL)")
+            db.execute("INSERT INTO workspace VALUES (1,?)", (json.dumps(self.workspace),))
+        MemoryStore(self.database, timezone.utc).initialize()
+        self.provider = Provider(self.database, timezone.utc)
+        self.provider.configure({**LOCAL, "ollama_context_tokens": 8192}, "", False)
+        with self.provider.transaction() as state:
+            state["models"] = ["gpt-oss:20b"]
+        self.store = ReflectionStore(self.database, timezone.utc)
+        with self.store.transaction() as db:
+            self.store.enqueue("synthetic-chat", self.workspace, db)
+        self.prepared = self.store.prepare()
+        self.calls = []
+
+    def network(self, config, path, payload, deadline):
+        self.calls.append((config, path, payload, deadline))
+        if path == "/api/show":
+            return {"details": {"format": "gguf"}, "capabilities": ["completion"], "thinking": {"values": ["low", "high"]}}
+        return {"done": True, "message": {"content": '{"memories": []}'}, "prompt_eval_count": 30, "eval_count": 10}
+
+    def generate(self):
+        return self.provider.generate_context(self.prepared["instructions"], self.prepared["messages"], job=self.prepared["job"])
+
+    def test_claim_and_ledger_are_committed_before_one_tool_free_structured_dispatch(self):
+        def inspect_dispatch(config, path, payload, deadline):
+            with closing(sqlite3.connect(self.database)) as db:
+                self.assertEqual(db.execute("SELECT state FROM reflection_jobs").fetchone()[0], "dispatched")
+                ledger = json.loads(db.execute("SELECT value FROM provider_state").fetchone()[0])["ledger"]
+                self.assertEqual(ledger[-1]["status"], "reserved")
+                self.assertEqual(ledger[-1]["job_id"], self.prepared["job"]["id"])
+                self.assertEqual(db.execute("SELECT jobs FROM reflection_budget").fetchone()[0], 1)
+            return self.network(config, path, payload, deadline)
+        with patch("backend.provider.background_network", side_effect=inspect_dispatch), patch("backend.provider.network") as foreground:
+            result = self.generate()
+        foreground.assert_not_called()
+        self.assertEqual([call[1] for call in self.calls], ["/api/show", "/api/chat"])
+        payload = self.calls[-1][2]
+        self.assertEqual(payload["model"], "gpt-oss:20b")
+        self.assertEqual(payload["format"], OUTPUT_SCHEMA)
+        self.assertEqual(payload["keep_alive"], 0)
+        self.assertEqual(payload["think"], "low")
+        self.assertNotIn("tools", payload)
+        self.assertEqual(self.calls[0][3], self.calls[1][3])
+        self.assertEqual(self.provider.read_state()["ledger"][-1]["status"], "settled")
+        self.store.complete(self.prepared["job"], result, lambda content: content)
+        self.assertEqual(self.store.status()["today_tokens"], 40)
+
+    def test_configuration_changes_away_and_back_abort_before_inference(self):
+        def change_config(config, path, payload, deadline):
+            if path == "/api/show":
+                original = self.provider.read_state()["config"]
+                self.provider.configure({**original, "max_output_tokens": 64}, "", False)
+                self.provider.configure(original, "", False)
+            return self.network(config, path, payload, deadline)
+        with patch("backend.provider.background_network", side_effect=change_config), self.assertRaisesRegex(ValueError, "settings changed"):
+            self.generate()
+        self.assertEqual([call[1] for call in self.calls], ["/api/show"])
+        self.assertEqual(self.provider.read_state()["ledger"][-1]["status"], "failed")
+
+    def test_deleted_source_aborts_before_inference(self):
+        def delete_source(config, path, payload, deadline):
+            if path == "/api/show":
+                self.workspace["chats"][0]["messages"] = []
+                with closing(sqlite3.connect(self.database)) as db, db:
+                    db.execute("UPDATE workspace SET value=?", (json.dumps(self.workspace),))
+            return self.network(config, path, payload, deadline)
+        with patch("backend.provider.background_network", side_effect=delete_source), self.assertRaisesRegex(ValueError, "source or settings"):
+            self.generate()
+        self.assertEqual([call[1] for call in self.calls], ["/api/show"])
+
+    def test_ambiguous_dispatch_blocks_foreground_generation_until_verified_unloaded(self):
+        def disconnect(config, path, payload, deadline):
+            if path == "/api/chat":
+                raise BackgroundUncertain("Synthetic disconnect", False)
+            return self.network(config, path, payload, deadline)
+        with patch("backend.provider.background_network", side_effect=disconnect), self.assertRaises(BackgroundUncertain):
+            self.generate()
+        entry = self.provider.read_state()["ledger"][-1]
+        self.assertEqual(entry["status"], "reserved")
+        self.assertTrue(entry["background_unknown"])
+        with patch("backend.provider.network") as request, self.assertRaisesRegex(ValueError, "request is running"):
+            self.provider.generate_context("Synthetic request", [{"role": "user", "content": "Synthetic context"}])
+        request.assert_not_called()
+        with patch("backend.provider.background_network", return_value={"models": []}):
+            self.provider.recover_background()
+        self.assertEqual(self.provider.read_state()["ledger"][-1]["status"], "failed")
+
+
+if __name__ == "__main__":
+    unittest.main()

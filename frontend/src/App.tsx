@@ -490,6 +490,7 @@ export default function App() {
     (thread) => thread.id === workspace.active_chat_id,
   );
   const local = workspace.provider.config.protocol === "ollama";
+  const statusRevision = workspaceRevision.current;
   const requestedModel = local ? model : "";
   const defaultModel = workspace.provider.config.model;
   const selectedModel = requestedModel || defaultModel;
@@ -951,11 +952,17 @@ export default function App() {
                   <WorkSetup
                     initialStatus={workspace.work}
                     provider={workspace.provider}
-                    onChange={refreshWorkspace}
+                    onChange={(work) => {
+                      if (workspaceRevision.current === statusRevision)
+                        setWorkspace(
+                          (current) => current && { ...current, work },
+                        );
+                    }}
                   />
                 )}
                 <MemorySetup
                   memories={workspace.memories ?? []}
+                  candidates={workspace.work?.candidates ?? []}
                   chats={workspace.chats}
                   chatId={workspace.active_chat_id}
                   onChange={refreshWorkspace}

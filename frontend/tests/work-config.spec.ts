@@ -89,10 +89,13 @@ test("task models and work limits persist without starting inference", async ({
   ).toBeTruthy();
   await page.reload();
   await page.getByRole("button", { name: "Settings", exact: true }).click();
-  await expect(section.getByText("Not running", { exact: true })).toBeVisible();
+  await expect(section.getByText("Paused", { exact: true })).toBeVisible();
   await expect(
     section.getByLabel("Enable background reflection"),
-  ).toBeDisabled();
+  ).toBeEnabled();
+  await section.getByLabel("Enable background reflection").check();
+  await expect(section.getByText("Paused", { exact: true })).toBeVisible();
+  await expect(section.getByText(/Unsaved changes/)).toBeVisible();
   for (const [label, model] of selections)
     await section
       .getByRole("combobox", { name: label, exact: true })
@@ -106,6 +109,7 @@ test("task models and work limits persist without starting inference", async ({
     .getByRole("button", { name: "Save task settings", exact: true })
     .click();
   await expect(section.getByRole("status")).toHaveText("Task settings saved.");
+  await expect(section.getByText("Enabled", { exact: true })).toBeVisible();
   await page.reload();
   await page.getByRole("button", { name: "Settings", exact: true }).click();
   for (const [label, model] of selections)
@@ -118,10 +122,19 @@ test("task models and work limits persist without starting inference", async ({
   for (const [label, value] of limits)
     await expect(section.getByLabel(label, { exact: true })).toHaveValue(value);
   const after = await (await page.request.get("/api/workspace")).json();
-  expect(after.work.config.enabled).toBe(false);
-  expect(after.work.worker_available).toBe(false);
+  expect(after.work.config.enabled).toBe(true);
+  expect(after.work.worker_available).toBe(true);
   expect(after.usage).toEqual(initial.usage);
   expect(after.chats).toEqual(initial.chats);
+
+  await section.getByLabel("Enable background reflection").uncheck();
+  await expect(section.getByText("Enabled", { exact: true })).toBeVisible();
+  await section
+    .getByRole("button", { name: "Save task settings", exact: true })
+    .click();
+  await expect(section.getByText("Paused", { exact: true })).toBeVisible();
+  after.work = await (await page.request.get("/api/reflection")).json();
+  expect(after.work.config.enabled).toBe(false);
 
   await page.route("**/api/workspace*", (route) =>
     route.fulfill({

@@ -2,7 +2,7 @@
 
 A local web interface for persistent chats with your chosen model, usage tracking and to-dos. Workspace, Tasks and Settings expose the working core: live conversation, manual task management and provider configuration.
 
-Maestro saves one provider connection with a chat model and a separate orchestrator preference. Chat supports per-message model choices, Markdown and explicit private memory. Background reflection, task execution and delegation remain future work. Optional Ollama web search is the only model-selected tool. The [development plan](DEVELOPMENT_PLAN.md) and [memory/reflection architecture](docs/MEMORY_AND_REFLECTION.md) describe the next increments.
+Maestro saves one provider connection with a chat model and a separate orchestrator preference. Chat supports per-message model choices, Markdown and private memory. Opt-in background reflection proposes evidence-backed memories for user approval. Task execution and delegation remain future work. Optional Ollama web search is the only model-selected tool. The [development plan](DEVELOPMENT_PLAN.md) and [memory/reflection architecture](docs/MEMORY_AND_REFLECTION.md) describe working behavior and the next increments.
 
 ## Run locally
 
@@ -49,7 +49,7 @@ After the first successful reply, Maestro tries once to name the chat using the 
 
 To-dos can be added, completed/reopened and deleted without model calls; saving a task does not execute it.
 
-The next increment is a shared generation service, followed by one durable task worker using the same Ollama server and usage ledger. Its first acceptance check is one queued text-only task completing with the browser closed, with pause and restart recovery. Multiple saved model profiles and bounded delegation follow that working path. See the [build sequence](docs/ARCHITECTURE.md#next-build-sequence).
+Shared local generation and opt-in background reflection now reuse the chat usage ledger. The next execution increment is one durable text-only task, completing with the browser closed and supporting pause/restart recovery. Multiple saved model profiles and bounded delegation follow that working path. See the [build sequence](docs/ARCHITECTURE.md#next-build-sequence).
 
 ## Optional automatic web search
 
@@ -70,9 +70,9 @@ Rejected key/account access disables automatic search until the key is successfu
 
 In **Settings → Private memory**, save a fact/preference for all local chats or just the current conversation. You can edit or forget it later. Relevant records are recalled by keyword overlap, with a small context allowance, for local Ollama chat when hosted search is inactive. Saving memory makes no model call.
 
-Memories and replies derived from them stay local: start a new conversation before switching that history to a remote provider or active hosted search. Chat deletion removes its scoped/source-linked memory; unlinked workspace records remain. Forgetting affects future recall and retains earlier messages/backups. No background reflection or automatic extraction runs yet.
+Memories and replies derived from them stay local: start a new conversation before switching that history to a remote provider or active hosted search. Chat deletion removes scoped/source-linked memory and reflection proposals; unlinked workspace records remain. Forgetting affects future recall and retains earlier messages/backups.
 
-**Settings → Task models & reflection** saves separate reflection, extraction and coding models, output/recall bounds, and future worker budgets/timing. Blank model choices use the recommended installed model or chat fallback. Saving does not start a worker. See the [configuration and recorded tasks](docs/MEMORY_AND_REFLECTION.md#saved-configuration), [model assessment](docs/LOCAL_MODELS.md) and [Windows lock/sleep guidance](docs/WINDOWS_BACKGROUND.md).
+**Settings → Task models & reflection** saves separate reflection, extraction and coding models and resource limits. Enable background reflection to process new local chat evidence after a quiet period. It proposes source quotes in **Private memory**; accept a proposal for its conversation or all local chats, or reject it. Proposals are not recalled before acceptance. Blank model choices use the recommended installed model or chat fallback. The worker uses the reflection model; coding and standalone extraction are separate future paths. See the [usage guide and design](docs/MEMORY_AND_REFLECTION.md#using-background-reflection), [model assessment](docs/LOCAL_MODELS.md) and [Windows lock/sleep guidance](docs/WINDOWS_BACKGROUND.md).
 
 ## Usage and limits
 

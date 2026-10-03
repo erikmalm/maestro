@@ -250,6 +250,35 @@ export type WorkConfig = {
 export type WorkStatus = {
   config: WorkConfig;
   worker_available: boolean;
+  waiting_for_ollama?: boolean;
+  queued: number;
+  running: boolean;
+  last_stop_reason: string | null;
+  candidates: MemoryCandidate[];
+  today_jobs: number;
+  today_tokens: number;
 };
+export type MemoryCandidate = {
+  id: string;
+  content: string;
+  chat_id: string;
+  source_message_id: string;
+  created_at: string;
+  evidence: string;
+};
+export const loadReflection = () => request<WorkStatus>("/reflection");
 export const saveWorkConfig = (config: WorkConfig) =>
   request<WorkStatus>("/work-config", "PUT", config);
+export const acceptMemoryCandidate = (id: string, scope: Memory["scope"]) =>
+  request<Memory>(
+    `/reflection/candidates/${encodeURIComponent(id)}/accept`,
+    "POST",
+    {
+      scope,
+    },
+  );
+export const rejectMemoryCandidate = (id: string) =>
+  request<{ deleted: boolean }>(
+    `/reflection/candidates/${encodeURIComponent(id)}`,
+    "DELETE",
+  );

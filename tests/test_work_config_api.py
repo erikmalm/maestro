@@ -23,7 +23,10 @@ class WorkConfigAPITests(unittest.TestCase):
 
     def test_defaults_and_saves_persist_independently_of_provider_without_inference(self):
         initial = self.client.get("/api/work-config").json()
-        self.assertEqual(initial, {"config": WorkConfig().model_dump(), "worker_available": False})
+        self.assertEqual(initial["config"], WorkConfig().model_dump())
+        self.assertTrue(initial["worker_available"])
+        self.assertEqual(initial["candidates"], [])
+        self.assertEqual(initial["queued"], 0)
         config = {**initial["config"], "reflection_model": "synthetic-reasoning:20b",
                   "memory_model": "synthetic-small:7b", "coding_model": "synthetic-coding:24b",
                   "idle_seconds": 90, "max_jobs_per_day": 4, "memory_recall_count": 2}
@@ -58,7 +61,7 @@ class WorkConfigAPITests(unittest.TestCase):
             self.assertEqual(monitor.execute("PRAGMA data_version").fetchone()[0], version)
             self.assertEqual(monitor.execute("SELECT value FROM workspace").fetchone()[0], before)
 
-    def test_access_validation_and_unavailable_worker_cannot_mutate_configuration(self):
+    def test_access_validation_and_remote_connection_cannot_enable_worker(self):
         original = self.client.get("/api/work-config").json()
         config = original["config"]
         anonymous = TestClient(backend.app)
@@ -77,6 +80,21 @@ class WorkConfigAPITests(unittest.TestCase):
         response = self.client.put("/api/work-config", headers=self.headers, json={**config, "enabled": True})
         self.assertEqual(response.status_code, 409, response.text)
         self.assertEqual(self.client.get("/api/work-config").json(), original)
+
+    def test_enable_and_pause_require_local_connection_without_dispatching(self):
+        config = self.client.get("/api/work-config").json()["config"]
+        provider = self.client.get("/api/provider").json()["config"]
+        with patch("backend.provider.network", side_effect=AssertionError("Config must not infer")):
+            response = self.client.put("/api/provider", headers=self.headers, json={
+                "config": {**provider, "protocol": "ollama", "base_url": "http://127.0.0.1:11434", "model": "synthetic:7b"},
+                "persist": False})
+            self.assertEqual(response.status_code, 200, response.text)
+            response = self.client.put("/api/work-config", headers=self.headers, json={**config, "enabled": True})
+            self.assertEqual(response.status_code, 200, response.text)
+            self.assertTrue(response.json()["config"]["enabled"])
+            response = self.client.put("/api/work-config", headers=self.headers, json=config)
+            self.assertEqual(response.status_code, 200, response.text)
+            self.assertFalse(response.json()["config"]["enabled"])
 
     def test_configured_keys_cannot_be_saved_as_model_names(self):
         config = self.client.get("/api/work-config").json()["config"]

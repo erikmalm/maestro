@@ -1,6 +1,6 @@
 # Local model suitability
 
-Assessment date: 2026-10-02. Installed models cover lightweight chat/extraction, reasoning and coding. No new model is needed for the first increment. Keep Qwen as chat default, evaluate gpt-oss for reflection and use Devstral for coding on demand. **Task models & reflection** now saves independent choices; blank choices use these tags when discovered installed, otherwise the local chat default. Explicit-context calls select by task kind, but autonomous task dispatch is not implemented.
+Assessment date: 2026-10-02. Installed models cover lightweight chat/extraction, reasoning and coding. No new model is needed for the first increment. Keep Qwen as chat default, evaluate gpt-oss for reflection and use Devstral for coding on demand. **Task models & reflection** saves independent choices; blank choices use these tags when discovered installed, otherwise the local chat default. The opt-in idle worker uses the reflection model with structured output and low/off thinking when supported. Explicit-context calls select by task kind; autonomous coding and general task dispatch remain planned.
 
 ## Installed models and primary evidence
 
@@ -28,7 +28,7 @@ Qwen abstained in the injected-quote fixture: it avoided the malicious claim but
 
 Allocations are sampled Ollama `/api/ps` fields, not total process RAM or guaranteed peaks; missing samples do not mean zero use. Devstral's model allocation exceeded its GPU portion by about 1.43 GiB, consistent with CPU placement. gpt-oss fit on GPU in these short calls. Other applications and larger contexts change placement/speed. Median load times were 2.18/4.74/5.93 seconds; these unloaded-model calls used OS caches, not fresh-boot or warm-residency measurements. All models unloaded at completion.
 
-This is short extraction, not long-history recall, autonomous planning, code editing or verified lesson quality. Four fixtures/one seed cannot justify automatic curation. Schema controls shape, not truth. [Ollama documents schema output](https://docs.ollama.com/capabilities/structured-outputs) and [model-specific thinking controls](https://docs.ollama.com/capabilities/thinking); production generation does not yet request an extraction schema or configure reasoning effort.
+This is short extraction, not long-history recall, autonomous planning, code editing or verified lesson quality. Four fixtures/one seed cannot justify automatic curation. Schema controls shape, not truth. The reflection worker now requests schema output and low/off thinking when supported, following [Ollama's structured-output](https://docs.ollama.com/capabilities/structured-outputs) and [thinking controls](https://docs.ollama.com/capabilities/thinking). Its stricter exact-excerpt validation still needs broader quality evaluation.
 
 Reproduce deliberately with other Ollama sessions idle:
 

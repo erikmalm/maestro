@@ -96,6 +96,7 @@ class MemoryStore:
                 raise ValueError("Choose an existing chat and a user message as the memory source.")
             if db.execute("SELECT COUNT(*) FROM private_memories").fetchone()[0] >= MAX_MEMORIES:
                 raise ValueError("Memory is full. Forget an existing memory before adding another.")
+            self.invalidate_reflection(db)
             db.execute("INSERT INTO private_memories VALUES (:id,:content,:scope,:chat_id,:source_message_id,:origin,:created_at,:updated_at)", record)
         return record
 
@@ -106,6 +107,7 @@ class MemoryStore:
             if row is None or not self.valid_source(row, self.chats(db)):
                 raise ValueError("That memory could not be found.")
             record = {**dict(row), "content": content, "updated_at": datetime.now(self.timezone).isoformat()}
+            self.invalidate_reflection(db)
             db.execute("UPDATE private_memories SET content=:content, updated_at=:updated_at WHERE id=:id", record)
         return record
 
@@ -113,6 +115,12 @@ class MemoryStore:
         with self.transaction() as db:
             if not db.execute("DELETE FROM private_memories WHERE id=?", (memory_id,)).rowcount:
                 raise ValueError("That memory could not be found.")
+            self.invalidate_reflection(db)
+
+    def invalidate_reflection(self, db):
+        if db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='reflection_meta'").fetchone():
+            from backend.reflection import ReflectionStore
+            ReflectionStore(self.database, self.timezone).invalidate(db)
 
     def delete_chat(self, chat_id, db=None):
         if db is None:

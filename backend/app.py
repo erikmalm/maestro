@@ -1,6 +1,7 @@
 """Local workspace with configurable live chat and persistent to-dos."""
 
 from contextlib import closing, contextmanager, asynccontextmanager
+import asyncio
 from datetime import datetime
 import hashlib
 import hmac
@@ -25,6 +26,7 @@ from backend.web_search import WebSearch, ENDPOINT as SEARCH_ENDPOINT
 from backend.storage import workspace_owner
 from backend.memory import MemoryStore
 from backend.work_config import WorkConfig, config_value
+from backend.reflection import ReflectionStore, ReflectionWorker
 
 ROOT = Path(__file__).resolve().parent.parent
 DATA_DIR = Path(os.environ.get("MAESTRO_DATA_DIR") or Path(os.environ.get("LOCALAPPDATA", Path.home() / ".local" / "share")) / "Maestro" / "preview").expanduser().resolve()
@@ -178,6 +180,10 @@ class MemoryInput(MemoryContent):
     source_message_id: str | None = Field(default=None, min_length=1, max_length=100)
 
 
+class CandidateInput(StrictModel):
+    scope: Literal["workspace", "conversation"] = "conversation"
+
+
 class TextInput(StrictModel):
     text: str = Field(min_length=1, max_length=4000)
     chat_id: str | None = Field(default=None, min_length=1, max_length=100)
@@ -247,10 +253,20 @@ def conflict_errors():
 @asynccontextmanager
 async def lifespan(application):
     with workspace_owner(DATABASE.parent):
+        read_workspace()
         provider().recover()
         WebSearch(DATABASE, TIMEZONE).recover()
         MemoryStore(DATABASE, TIMEZONE).initialize()
-        yield
+        reflection = ReflectionStore(DATABASE, TIMEZONE)
+        reflection.initialize()
+        reflection.recover()
+        stop = asyncio.Event()
+        worker = asyncio.create_task(ReflectionWorker(reflection, provider(), safe_private_content).run(stop))
+        try:
+            yield
+        finally:
+            stop.set()
+            await worker
 
 
 app = FastAPI(title="Maestro", docs_url=None, redoc_url=None, openapi_url=None, lifespan=lifespan)
@@ -332,6 +348,7 @@ def delete_chat(chat_id: str):
             raise HTTPException(409, "Wait for this chat's current request to finish before deleting it.")
         state["chats"] = [chat for chat in state["chats"] if chat["id"] != chat_id]
         MemoryStore(DATABASE, TIMEZONE).delete_chat(chat_id, db=db)
+        ReflectionStore(DATABASE, TIMEZONE).delete_chat(chat_id, db)
     return snapshot(state)
 
 
@@ -372,7 +389,8 @@ def forget_memory(memory_id: str):
 
 
 def work_status(state):
-    return {"config": config_value(state), "worker_available": False}
+    return {"config": config_value(state), "worker_available": True,
+            **ReflectionStore(DATABASE, TIMEZONE).status()}
 
 
 @app.get("/api/work-config")
@@ -383,13 +401,35 @@ def get_work_config():
 @app.put("/api/work-config")
 def put_work_config(entry: WorkConfig):
     with conflict_errors():
-        if entry.enabled:
-            raise ValueError("Background reflection is not available yet. Keep it disabled while saving its configuration.")
+        connection = provider().read_state()["config"]
+        if entry.enabled and (connection["protocol"] != "ollama" or not connection["model"]):
+            raise ValueError("Select a local Ollama chat model before enabling reflection.")
         for model in (entry.reflection_model, entry.memory_model, entry.coding_model):
             safe_private_content(model)
-        with workspace_transaction() as state:
+        with workspace_transaction(with_db=True) as (state, db):
+            if config_value(state) != entry.model_dump():
+                ReflectionStore(DATABASE, TIMEZONE).invalidate(db, clear_candidates=False)
             state["work_config"] = entry.model_dump()
     return work_status(state)
+
+
+@app.get("/api/reflection")
+def get_reflection():
+    return work_status(read_workspace())
+
+
+@app.post("/api/reflection/candidates/{candidate_id}/accept")
+def accept_candidate(candidate_id: str, entry: CandidateInput):
+    with conflict_errors():
+        return ReflectionStore(DATABASE, TIMEZONE).accept(
+            candidate_id, MemoryStore(DATABASE, TIMEZONE), safe_private_content, entry.scope)
+
+
+@app.delete("/api/reflection/candidates/{candidate_id}")
+def reject_candidate(candidate_id: str):
+    with conflict_errors():
+        ReflectionStore(DATABASE, TIMEZONE).reject(candidate_id)
+    return {"deleted": True}
 
 
 @app.get("/api/provider")

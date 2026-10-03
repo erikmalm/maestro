@@ -1,15 +1,17 @@
 import { useState } from "react";
 import { Pencil, Trash2 } from "lucide-react";
 import * as api from "./api";
-import type { Chat, Memory } from "./api";
+import type { Chat, Memory, MemoryCandidate } from "./api";
 
 export default function MemorySetup({
   memories,
+  candidates,
   chats,
   chatId,
   onChange,
 }: {
   memories: Memory[];
+  candidates: MemoryCandidate[];
   chats: Chat[];
   chatId: string | null;
   onChange: () => void;
@@ -21,7 +23,11 @@ export default function MemorySetup({
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
 
-  async function save(action: () => Promise<unknown>, message: string) {
+  async function save(
+    action: () => Promise<unknown>,
+    message: string,
+    clearDraft = false,
+  ) {
     if (busy) return;
     setBusy(true);
     setError("");
@@ -29,8 +35,10 @@ export default function MemorySetup({
     try {
       await action();
       onChange();
-      setContent("");
-      setEditing("");
+      if (clearDraft) {
+        setContent("");
+        setEditing("");
+      }
       setNotice(message);
     } catch (reason) {
       setError(
@@ -70,6 +78,7 @@ export default function MemorySetup({
                 ? api.correctMemory(editing, content)
                 : api.remember(content, scope, chatId),
             editing ? "Memory updated." : "Memory saved.",
+            true,
           );
         }}
       >
@@ -120,6 +129,71 @@ export default function MemorySetup({
           )}
         </div>
       </form>
+      {!!candidates.length && (
+        <div>
+          <h3>Proposed memories</h3>
+          <p className="reflection-note">
+            These suggestions are not used until you accept them.
+          </p>
+          {candidates.map((candidate) => (
+            <div className="memory-entry" key={candidate.id}>
+              <div>
+                <p>{candidate.content}</p>
+                <small>
+                  From{" "}
+                  {chats.find((chat) => chat.id === candidate.chat_id)?.title ||
+                    "Conversation"}
+                </small>
+                <blockquote className="reflection-note">
+                  {candidate.evidence}
+                </blockquote>
+                <form
+                  onSubmit={(event) => {
+                    event.preventDefault();
+                    const selected = new FormData(event.currentTarget).get(
+                      "scope",
+                    ) as Memory["scope"];
+                    void save(
+                      () => api.acceptMemoryCandidate(candidate.id, selected),
+                      "Proposed memory saved.",
+                    );
+                  }}
+                >
+                  <label>
+                    Use proposed memory in
+                    <select
+                      name="scope"
+                      defaultValue="conversation"
+                      disabled={busy}
+                    >
+                      <option value="conversation">This conversation</option>
+                      <option value="workspace">All local chats</option>
+                    </select>
+                  </label>
+                  <div className="reflection-actions">
+                    <button className="button primary" disabled={busy}>
+                      Accept memory
+                    </button>
+                    <button
+                      type="button"
+                      className="button secondary"
+                      disabled={busy}
+                      onClick={() =>
+                        void save(
+                          () => api.rejectMemoryCandidate(candidate.id),
+                          "Proposed memory rejected.",
+                        )
+                      }
+                    >
+                      Reject
+                    </button>
+                  </div>
+                </form>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
       {memories.map((memory) => (
         <div className="memory-entry" key={memory.id}>
           <div>

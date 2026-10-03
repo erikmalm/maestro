@@ -1,10 +1,12 @@
 """One provider connection, real chat, and a private persistent usage ledger."""
 from contextlib import closing, contextmanager
 from datetime import datetime
+import asyncio
 import json
 import os
 import re
 import sqlite3
+import time
 import uuid
 from urllib.parse import unquote, urlsplit
 
@@ -26,6 +28,10 @@ class ProviderFailure(ValueError):
     def __init__(self, message, may_be_billed=True):
         super().__init__(message)
         self.may_be_billed = may_be_billed
+
+
+class BackgroundUncertain(ProviderFailure):
+    """A local request may still be running after its connection was closed."""
 
 
 def validate_url(url, http_hosts=("127.0.0.1", "localhost", "::1")):
@@ -125,6 +131,30 @@ def local_usage(data):
     return tuple(data[field] for field in fields)
 
 
+def background_network(config, path, payload, deadline):
+    """Close overdue requests, without treating disconnect as confirmed cancellation."""
+    validate_ollama_url(config["base_url"])
+    async def request():
+        async with httpx.AsyncClient(timeout=httpx.Timeout(None, connect=5), follow_redirects=False, trust_env=False) as client:
+            return await client.request("GET" if payload is None else "POST", config["base_url"] + path, json=payload)
+    async def bounded():
+        return await asyncio.wait_for(request(), max(0, deadline - time.monotonic()))
+    try:
+        response = asyncio.run(bounded())
+    except (TimeoutError, httpx.HTTPError):
+        raise BackgroundUncertain("Ollama did not confirm completion. Waiting for its model to unload before another request.", False) from None
+    if response.status_code >= 300:
+        error = BackgroundUncertain if response.status_code >= 500 else ProviderFailure
+        raise error("Ollama rejected the background request. Check the installed model and local connection.", False)
+    try:
+        data = response.json()
+        if not isinstance(data, dict):
+            raise ValueError()
+        return data
+    except (ValueError, TypeError):
+        raise BackgroundUncertain("Ollama did not return a confirmed background result.", False) from None
+
+
 class Provider:
     def __init__(self, database, timezone):
         self.database, self.timezone = database, timezone
@@ -177,7 +207,7 @@ class Provider:
             if key:
                 raise ValueError("Local Ollama does not use an API key. Leave the key empty.")
             config.update(input_usd_per_million=0, output_usd_per_million=0, pricing_verified=True)
-        with self.transaction() as state:
+        with self.transaction(with_db=True) as (state, db):
             effective_key = None if local else key or credentials.read(config["base_url"])[0]
             try:
                 current_key = None if state["config"]["protocol"] == "ollama" else credentials.read(state["config"]["base_url"])[0]
@@ -195,6 +225,9 @@ class Provider:
             connection_changed = bool(key) or config["base_url"] != state["config"]["base_url"] or ((config["protocol"] == "ollama") != (state["config"]["protocol"] == "ollama"))
             if key:
                 credentials.save(config["base_url"], key, persist)
+            if state["config"] != config and db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='reflection_meta'").fetchone():
+                from backend.reflection import ReflectionStore
+                ReflectionStore(self.database, self.timezone).invalidate(db, clear_candidates=False)
             state["config"] = config
             if connection_changed:
                 state.update({"models": [], "tested_at": None})
@@ -239,7 +272,26 @@ class Provider:
         with self.transaction() as state:
             for entry in state["ledger"]:
                 if entry["status"] == "reserved":
-                    entry["status"] = "failed" if entry.get("protocol") == "ollama" else "uncertain"
+                    if entry.get("job_id"):
+                        entry["background_unknown"] = True
+                    else:
+                        entry["status"] = "failed" if entry.get("protocol") == "ollama" else "uncertain"
+
+    def recover_background(self):
+        """Between worker steps, release orphan slots only after confirmed unloading."""
+        entries = [item for item in self.read_state()["ledger"]
+                   if item["status"] == "reserved" and item.get("job_id")]
+        for entry in entries:
+            try:
+                data = background_network(entry["connection_config"], "/api/ps", None, time.monotonic() + 5)
+            except ValueError:
+                continue
+            if data.get("models") != []:
+                continue
+            with self.transaction() as state:
+                current = next(item for item in state["ledger"] if item["id"] == entry["id"])
+                if current["status"] == "reserved" and current.get("job_id"):
+                    current.update(status="failed", cost=0, background_unknown=False)
 
     def reconcile(self, entry_id, cost):
         with self.transaction() as state:
@@ -261,7 +313,7 @@ class Provider:
     def generate(self, text, chat_id, title_for=None, model="", role="chat"):
         return self._generate(text, chat_id, title_for, model, role)
 
-    def generate_context(self, instructions, messages, model="", max_output_tokens=None, kind="reflection"):
+    def generate_context(self, instructions, messages, model="", max_output_tokens=None, kind="reflection", job=None):
         """Bounded, tool-free local inference using the same reservation and usage ledger."""
         if (kind not in ("reflection", "memory", "coding") or not isinstance(instructions, str) or not instructions.strip()
                 or len(instructions.encode("utf-8")) > 4000
@@ -276,12 +328,19 @@ class Provider:
         history = [message.copy() for message in messages]
         if len(json.dumps(history).encode("utf-8")) > 32000:
             raise ValueError("Local work context is too large. Process a smaller batch.")
+        if job is not None and (kind != "reflection" or model or not isinstance(job, dict)):
+            raise ValueError("Background reflection must use the saved local model and a claimed job.")
         return self._generate("", None, model=model, role=kind,
-                              context={"instructions": instructions, "messages": history, "max_output_tokens": max_output_tokens})
+                              context={"instructions": instructions, "messages": history, "max_output_tokens": max_output_tokens, "job": job})
 
     def _generate(self, text, chat_id, title_for=None, model="", role="chat", context=None):
         """Chat, title and explicit context share dispatch, limits and accounting."""
         title = title_for is not None
+        job = context.get("job") if context else None
+        if job is not None:
+            from backend.reflection import ReflectionStore, OUTPUT_SCHEMA
+            reflection = ReflectionStore(self.database, self.timezone)
+            deadline = time.monotonic() + job["work_config"]["timeout_seconds"]
         # Reserve before dispatch under the same SQLite lock used for tasks and limits.
         with self.transaction(with_db=True) as (state, db):
             connection_config = title_for["connection_config"] if title else state["config"].copy()
@@ -322,6 +381,9 @@ class Provider:
                 raise ValueError("Verify the model's input/output prices in Settings first.")
             if any(x["status"] in ("reserved", "uncertain") for x in state["ledger"]):
                 raise ValueError("A request is running or has unknown charges. Wait or reconcile its usage before sending again.")
+            if not title and not context:
+                from backend.reflection import ReflectionStore
+                ReflectionStore(self.database, self.timezone).touch(workspace, db)
             chat = next((item for item in workspace["chats"] if item["id"] == chat_id), None) if not context else None
             if chat is None and not context:
                 raise ValueError("That chat could not be found.")
@@ -352,7 +414,8 @@ class Provider:
                             history.insert(0, recalled)
                             break
                         memories.pop()  # Optional recall must not displace the current conversation.
-            input_bound = len((instructions + json.dumps(history) + (json.dumps(TOOL) if auto_search else "")).encode("utf-8")) + 2048
+            input_bound = len((instructions + json.dumps(history) + (json.dumps(TOOL) if auto_search else "")
+                               + (json.dumps(OUTPUT_SCHEMA) if job is not None else "")).encode("utf-8")) + 2048
             if context:
                 work_cap = 1024 if role == "coding" else work_config["max_output_tokens"]
                 output_bound = min(context["max_output_tokens"] or work_cap, work_cap, config["max_output_tokens"])
@@ -370,9 +433,13 @@ class Provider:
             if not local and (limits["run_usd"] <= 0 or limits["daily_usd"] <= 0 or limits["monthly_usd"] <= 0 or used_cost + reserve > limits["run_usd"] or usage["today_usd"] + reserve > limits["daily_usd"] or usage["month_usd"] + reserve > limits["monthly_usd"]):
                 raise ValueError("This request would exceed your spending limit. Adjust limits in Settings.")
             request_id = uuid.uuid4().hex
+            if job is not None:
+                reflection.claim_dispatch(job, workspace, state, request_id, input_bound, output_bound, db)
             state["ledger"].append({"id": request_id, "at": self.stamp(), "model": config["model"], "protocol": config["protocol"],
                                     "thread_id": chat_id, "kind": "title" if title else role,
-                                    "parent_id": title_for["request_id"] if title else None, "cost": reserve, "status": "reserved"})
+                                    "parent_id": title_for["request_id"] if title else None, "cost": reserve, "status": "reserved",
+                                    **({"job_id": job["id"], "attempt": job["attempt"], "connection_config": connection_config}
+                                       if job is not None else {})})
         payload = {"model": config["model"], "store": False}
         search_result = None
         if config["base_url"] == "https://api.openai.com/v1":
@@ -385,6 +452,9 @@ class Provider:
                        "stream": False, "options": options, "keep_alive": f"{keep_alive}m" if keep_alive else 0}
             if auto_search:
                 payload["tools"] = [TOOL]
+            if job is not None:
+                payload["format"] = OUTPUT_SCHEMA
+                payload["options"]["temperature"] = 0
             path = "/api/chat"
         elif config["protocol"] == "responses":
             payload.update({"instructions": instructions, "input": history, "max_output_tokens": output_bound})
@@ -393,19 +463,38 @@ class Provider:
             cap_name = "max_completion_tokens" if config["base_url"] == "https://api.openai.com/v1" else "max_tokens"
             payload.update({"messages": [{"role": "system", "content": instructions}, *history], cap_name: output_bound})
             path = "/chat/completions"
+        dispatched = False
         try:
             if local and not title:
-                metadata = network(config, None, "POST", "/api/show", {"model": config["model"]})
+                metadata = (background_network(config, "/api/show", {"model": config["model"]}, deadline) if job is not None
+                            else network(config, None, "POST", "/api/show", {"model": config["model"]}))
                 if (not is_local_model({**metadata, "name": config["model"]})
                         or not isinstance(metadata.get("capabilities"), list)
                         or "completion" not in metadata["capabilities"]):
                     raise ProviderFailure("Choose an installed local chat model. Ollama cloud models are disabled in local mode.", False)
                 if auto_search and "tools" not in metadata["capabilities"]:
                     raise ProviderFailure("This local model does not support automatic search tools. Choose a tool-capable model or disable search.", False)
-            data = network(config, key, "POST", path, payload)
+                if job is not None:
+                    thinking = metadata.get("thinking", {})
+                    values = thinking.get("values", []) if isinstance(thinking, dict) else []
+                    if "low" in values or metadata.get("details", {}).get("family") == "gptoss":
+                        payload["think"] = "low"
+                    elif False in values:
+                        payload["think"] = False
+            if job is not None:
+                with self.transaction(with_db=True) as (state, db):
+                    current_workspace = json.loads(db.execute("SELECT value FROM workspace WHERE id=1").fetchone()[0])
+                    reflection.preflight(job, current_workspace, state, db)
+                if time.monotonic() >= deadline:
+                    raise ProviderFailure("Background reflection exceeded its deadline before inference.", False)
+            dispatched = True
+            data = (background_network(config, path, payload, deadline) if job is not None
+                    else network(config, key, "POST", path, payload))
             if auto_search:
                 data, search_result = self.search_turn(config, payload, data, request_id, workspace["limits"])
             if local:
+                if job is not None and data.get("done") is not True:
+                    raise BackgroundUncertain("Ollama did not confirm background completion. Waiting for its model to unload.", False)
                 input_tokens, output_tokens = local_usage(data)
             else:
                 raw_usage = data.get("usage", {})
@@ -457,6 +546,9 @@ class Provider:
                             chat["messages"][-1]["memory_ids"] = [item["id"] for item in memories]
                         if search_result:
                             chat["messages"][-1]["web_search"] = search_result
+                        from backend.reflection import ReflectionStore
+                        ReflectionStore(self.database, self.timezone).enqueue(
+                            chat_id, workspace, db, eligible=local and role == "chat" and not auto_search)
                         if first_exchange and not chat.get("title_attempted"):
                             chat["title_attempted"] = True
                             if chat["title_source"] != "manual":
@@ -465,6 +557,8 @@ class Provider:
                     db.execute("UPDATE workspace SET value=? WHERE id=1", (json.dumps(workspace),))
             if not reply:
                 raise ValueError("Provider returned no text. Usage was recorded; try a larger output limit or another chat model.")
+            if job is not None and time.monotonic() >= deadline:
+                raise ProviderFailure("Background reflection exceeded its deadline. No memories were saved.", False)
             return {"reply": reply, "text": text, "config": config, "connection_config": connection_config, "key": key, "request_id": request_id,
                     "cost": cost, "input_tokens": input_tokens, "output_tokens": output_tokens, "title_ready": title_ready,
                     "memory_ids": [item["id"] for item in memories], **({"work_config": work_config} if context else {})}
@@ -472,7 +566,9 @@ class Provider:
             with self.transaction() as state:
                 entry = next(x for x in state["ledger"] if x["id"] == request_id)
                 if entry["status"] == "reserved":
-                    if local or (isinstance(error, ProviderFailure) and not error.may_be_billed):
+                    if job is not None and isinstance(error, BackgroundUncertain) and dispatched:
+                        entry.update(background_unknown=True, cost=0)
+                    elif local or (isinstance(error, ProviderFailure) and not error.may_be_billed):
                         entry.update({"status": "failed", "cost": 0})
                     else:
                         entry["status"] = "uncertain"

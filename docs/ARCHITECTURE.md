@@ -1,6 +1,6 @@
 # Maestro architecture
 
-Maestro's current runtime is a local chat application with persistent manual tasks and explicit private memory. It has one active provider connection and bounded local recall, with no coordinator, task worker, delegation or background reflection yet.
+Maestro's current runtime is a local chat application with persistent manual tasks, private memory and opt-in background reflection. It has one active provider connection and bounded local recall. Task execution, coordination and delegation remain planned.
 
 ## Implemented boundaries
 
@@ -11,6 +11,7 @@ flowchart LR
         API[FastAPI local API]
         Chat[Provider chat and accounting]
         Memory[Explicit memory and lexical recall]
+        Reflection[Idle reflection and memory proposals]
         DB[(Private SQLite workspace)]
         Keys[Windows credentials or server memory]
         Ollama[Local Ollama model]
@@ -20,6 +21,9 @@ flowchart LR
         Chat --> DB
         Chat --> Memory
         API --> Memory
+        API --> Reflection
+        Reflection --> DB
+        Reflection --> Chat
         Memory --> DB
         Chat --> Keys
         Chat --> Ollama
@@ -30,9 +34,9 @@ flowchart LR
 
 The built frontend is served by FastAPI on one loopback origin. Workspace contains chat, Tasks contains manual to-dos, and Settings configures the active model, credentials, search and limits. The header and usage view report actual model usage and estimated spend.
 
-`backend/app.py` owns session/CSRF protection, request validation, chat/task/memory CRUD and workspace snapshots. `backend/provider.py` owns the single provider connection, shared generation and reservation ledger. `backend/work_config.py` validates private task-model/worker policy settings; `backend/memory.py` owns explicit records and read-only recall. `backend/web_search.py` owns search readiness and limits. Reads avoid writes after initialization. SQLite writes use immediate transactions; generation runs outside locks. This is a single-server runtime, not a multi-process queue.
+`backend/app.py` owns session/CSRF protection, validation, CRUD and the application lifespan. `backend/provider.py` owns the single connection, shared generation slot and usage ledger. `backend/reflection.py` owns durable idle jobs, source validation and memory proposals. `backend/work_config.py` validates private task models and worker policy; `backend/memory.py` owns accepted records and read-only recall. `backend/web_search.py` owns search readiness and limits. Reads avoid writes after initialization. SQLite writes use immediate transactions; generation runs outside locks. One worker runs inside the sole API process under exclusive workspace ownership.
 
-Ollama uses its native loopback API, accepts installed local models and has no cloud fallback. Other adapters use Responses or Chat Completions. The UI always uses the chat role, with a model-name picker and saved Qwen preference when available. The API retains an orchestrator model preference, but no execution or reflection worker. Chat sends the selected conversation and optional local memory; the frontend progressively reveals the completed backend reply and renders safe Markdown.
+Ollama uses its native loopback API, accepts installed local models and has no cloud fallback. Other adapters use Responses or Chat Completions. The UI always uses the chat role, with a model-name picker and saved Qwen preference when available. The API retains an orchestrator model preference without task execution. Chat sends the selected conversation and optional local memory; the frontend progressively reveals the completed backend reply and renders safe Markdown. Reflection receives bounded user evidence, with no automatic recall, tools, hosted search or title generation.
 
 Chats have stable IDs, separate message lists and editable titles. Workspace responses include chat summaries, `active_chat_id` and the selected chat's messages; generation captures an explicit chat ID. New chat preserves existing conversations. Deletion removes a chat's content while retaining the shared usage ledger, and is blocked while that chat has a reserved request. Previous live history migrates once into one conversation. Projects remain a later feature.
 
@@ -74,7 +78,9 @@ Earlier prototype-only records remain archived in the private database, and old 
 | `POST /api/tasks`, `PATCH /api/tasks/{id}`, `DELETE /api/tasks/{id}` | Manual task persistence. |
 | `POST /api/chat` | Generate a reply for the submitted `chat_id` and persist it in that conversation. |
 | `GET /api/memory`, `POST /api/memory`, `PATCH /api/memory/{id}`, `DELETE /api/memory/{id}` | Inspect, save, edit or forget explicit private memory; snapshots also include records. |
-| `GET /api/work-config`, `PUT /api/work-config` | Saved task models, recall allowances and future reflection policy; saving does not start a worker. |
+| `GET /api/work-config`, `PUT /api/work-config` | Saved task models, recall allowances and reflection enable/pause policy. |
+| `GET /api/reflection` | Read-only worker status, daily usage and pending memory proposals. |
+| `POST /api/reflection/candidates/{id}/accept`, `DELETE /api/reflection/candidates/{id}` | Accept a source-backed proposal into scoped private memory or reject it. |
 | `GET /api/provider`, `PUT /api/provider`, `POST /api/provider/test`, `DELETE /api/provider/key` | Active connection settings, model-list access and credential removal. |
 | `POST /api/provider/charges/{id}/reconcile` | Settle a provider-verified uncertain amount. |
 | `GET /api/web-search`, `PUT /api/web-search`, `POST /api/web-search/test`, `DELETE /api/web-search/key` | Search readiness, settings and separate credential lifecycle. |
@@ -89,4 +95,4 @@ The [Podman deployment checklist](../DEVELOPMENT_PLAN.md#podman-deployment-backl
 3. **Multiple saved profiles.** Store named local/remote model connections with endpoint-scoped credential references and explicit context-sharing choices. Select a profile for a task and record it per call. Verify installed-model capabilities, switching and one-model residency, accounting and local-only restrictions before automatic selection. Measure memory and task quality to choose role defaults.
 4. **Bounded delegation and review.** Give a coordinator a typed way to assign one child task with selected context, profile, criteria and a share of the parent's allowance. Persist the handoff and result. Add reviewer-driven revision only with shared call/token/time limits and completion, cancellation and no-progress stops. Prove different profiles can serve distinct assignments before expanding the agent tree.
 
-Explicit memory is usable now; [durable background reflection](MEMORY_AND_REFLECTION.md#recorded-next-tasks) can build on it before task execution, using chat corrections as evidence. Scoped integrations and isolated coding still need the execution path. The [development plan](../DEVELOPMENT_PLAN.md) records acceptance checks; [local model research](LOCAL_MODELS.md) records preliminary measurements.
+Explicit memory and [durable background reflection](MEMORY_AND_REFLECTION.md) are usable before task execution. Inferred entries require user acceptance; automatic promotion still needs evaluation. Scoped integrations and isolated coding need the execution path. The [development plan](../DEVELOPMENT_PLAN.md) records acceptance checks; [local model research](LOCAL_MODELS.md) records preliminary measurements.

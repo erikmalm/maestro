@@ -32,6 +32,13 @@ class Ollama(BaseHTTPRequestHandler):
         if self.path == "/api/show":
             return self.reply({"details": {"format": "gguf"}, "capabilities": ["completion", "tools"]})
         assert self.path == "/api/chat"
+        if body.get("format"):
+            assert body["keep_alive"] == 0 and "tools" not in body
+            assert body["options"]["num_predict"] == 64
+            source = json.loads(body["messages"][1]["content"])[-1]
+            proposal = {"content": source["text"], "evidence": source["text"], "source_message_id": source["source_message_id"]}
+            return self.reply({"done": True, "message": {"content": json.dumps({"memories": [proposal]})},
+                               "prompt_eval_count": 30, "eval_count": 10})
         title = body["messages"][0]["content"].startswith("Create a short")
         self.reply({"done": True, "message": {"content": "Synthetic model choices" if title else "Reply from " + body["model"]},
                     "prompt_eval_count": 20 if title else 100, "eval_count": 5 if title else 20})
@@ -156,6 +163,40 @@ def verify(image, tunnel=False):
         replies = [message for message in state["messages"] if message["role"] == "assistant"]
         assert [(message["kind"], message["model"]) for message in replies] == [("chat", MODELS[0]), ("orchestrator", MODELS[1]), ("orchestrator", MODELS[0])]
         assert (state["usage"]["input_tokens"], state["usage"]["output_tokens"], state["usage"]["calls"], state["usage"]["today_usd"]) == (320, 65, 4, 0)
+        policy = api("/api/work-config")["config"]
+        api("/api/work-config", {**policy, "enabled": True, "debounce_seconds": 0, "idle_seconds": 0,
+                                "reflection_model": MODELS[0], "max_output_tokens": 64}, method="PUT", headers=headers)
+
+        def await_proposal(text):
+            conversation = api("/api/chat", {"text": text}, headers=headers)
+            source = conversation["messages"][-2]
+            deadline = time.monotonic() + 15
+            while time.monotonic() < deadline:
+                reflection = api("/api/reflection")
+                if reflection["candidates"]:
+                    candidate = reflection["candidates"][0]
+                    assert candidate["content"] == text and candidate["evidence"] == text
+                    assert candidate["source_message_id"] == source["id"] and candidate["chat_id"] == conversation["active_chat_id"]
+                    return candidate, reflection
+                time.sleep(0.2)
+            raise AssertionError("Container background worker did not produce a source-backed proposal")
+
+        candidate, reflection = await_proposal("I prefer concise replies.")
+        assert reflection["worker_available"] and not reflection["running"] and reflection["queued"] == 0
+        assert (reflection["today_jobs"], reflection["today_tokens"]) == (1, 40)
+        assert api("/api/memory") == []
+        accepted = api(f"/api/reflection/candidates/{candidate['id']}/accept", {"scope": "conversation"}, headers=headers)
+        assert accepted["scope"] == "conversation" and accepted["source_message_id"] == candidate["source_message_id"]
+        assert api("/api/memory") == [accepted] and api("/api/reflection")["candidates"] == []
+        candidate, reflection = await_proposal("I prefer Swedish replies.")
+        assert (reflection["today_jobs"], reflection["today_tokens"]) == (2, 80)
+        api(f"/api/reflection/candidates/{candidate['id']}", method="DELETE", headers=headers)
+        assert api("/api/reflection")["candidates"] == [] and api("/api/memory") == [accepted]
+        api("/api/work-config", policy, method="PUT", headers=headers)
+        api(f"/api/memory/{accepted['id']}", method="DELETE", headers=headers)
+        state = api("/api/workspace")
+        assert (state["usage"]["input_tokens"], state["usage"]["output_tokens"], state["usage"]["calls"], state["usage"]["today_usd"]) == (580, 125, 8, 0)
+        assert not state["work"]["config"]["enabled"] and state["memories"] == []
         second = podman("exec", name, "python", "-c", "from backend.storage import workspace_owner; workspace_owner('/data').__enter__()", check=False)
         assert second.returncode != 0 and "already running" in second.stderr
         podman("exec", name, "python", "-m", "backend.storage", "/data/workspace.sqlite3", "/data/verify-backup.sqlite3")
@@ -216,7 +257,7 @@ def verify(image, tunnel=False):
         assert "missing or invalid" in rejected["detail"] and "/run/secrets" not in rejected["detail"]
         api("/api/provider", {"config": state["provider"]["config"]}, method="PUT", headers=headers)
         api("/api/web-search", {"config": {**recovered["web_search"]["config"], "enabled": False}}, method="PUT", headers=headers)
-        print("Podman integration passed: build context, isolation, model choices, persistence, recreation, backup/restore, mounted secrets and invalid-secret recovery.")
+        print("Podman integration passed: build context, isolation, model choices, background reflection and review, persistence, recreation, backup/restore, mounted secrets and invalid-secret recovery.")
     finally:
         podman("rm", "--force", fixture_name, check=False)
         for container, data in ((restored, restored_volume), (name, volume)):

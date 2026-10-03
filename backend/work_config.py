@@ -1,4 +1,4 @@
-"""Saved task models and bounded policy for the future background worker."""
+"""Saved task models and bounded policy for local background work."""
 from pydantic import BaseModel, ConfigDict, Field
 
 
