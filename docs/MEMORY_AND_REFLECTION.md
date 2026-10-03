@@ -1,6 +1,6 @@
 # Private memory and background reflection
 
-Updated: 2026-10-03. Maestro supports manual memory, optional automatic curation and scheduled reflection. It uses the existing API process, private SQLite database and host Ollama, without new services or dependencies. Task execution and delegation remain planned.
+Updated: 2026-10-03. Maestro supports manual memory, optional automatic curation, scheduled reflection and reviewed task suggestions. It uses the existing API process, private SQLite database and host Ollama, without new services or dependencies. Task execution and delegation remain planned.
 
 ## Using background reflection
 
@@ -10,6 +10,8 @@ Updated: 2026-10-03. Maestro supports manual memory, optional automatic curation
 4. Open **Memory** from the sidebar or **Open memory** in Settings. Read **Private reflection journal** for summaries, changes, source references and model names. Edit or forget any memory; editing pins it against automatic changes.
 
 Independent reflection has an initial pass once the worker is idle, then follows the saved interval. It considers eligible conversation evidence, current memories and earlier working notes. It develops concise identity/lesson notes about how Maestro should work. These are revisable practices, not consciousness, user facts or new permissions.
+
+Optionally enable **AI can create tasks during reflection** in **Task models & reflection**. Each periodic pass can suggest at most two supported follow-ups and save independently approved ones directly in **Tasks**. Rows show **Initiated by** You/Maestro and an editable **Suggested for** You/Maestro choice. This setting defaults off, requires automatic curation and independent reflection, and adds no model call or task execution.
 
 Use the thumbs beside an answer to record whether it helped, with an optional correction or explanation. Feedback is saved locally without a model call. The next scheduled reflection prioritizes rated exchanges and reviews complete user/assistant pairs against intent, accuracy and clarity. A rating is a user report, not proof that an answer is correct. Model suggestions remain independently reviewed working notes. Editing or clearing feedback invalidates unfinished review, removes stale derived notes, and clears journal entries that could retain the old comment; it does not erase earlier chats or backups.
 
@@ -32,6 +34,7 @@ Private work_config settings are validated through GET/PUT /api/work-config. Cha
 | Background reflection | Off | Allows new work; pausing invalidates late results. |
 | Automatic memory curation | Off | Formation, independent review and automatic promotion. |
 | Independent reflection | Off | Scheduled identity/lesson maintenance when automatic curation is on. |
+| AI can create tasks during reflection | Off | Allows periodic reflection to add up to two independently approved tasks to the existing list. |
 | Reflection interval | 360 minutes | Initial eligible pass, then six-hour intervals; range 30 minutes to seven days. |
 | Reflection / memory / coding model | Recommended installed tag | gpt-oss:20b / qwen2.5:7b / devstral-small-2:24b; otherwise local chat fallback. |
 | Background context tokens | 32,768 | Separate per-call Ollama context, up to 131,072; also bounded by chat context and request limits. |
@@ -55,6 +58,10 @@ Maintenance prompts examine existing managed entries before adding new ones. Pre
 This uses the add/update/remove/no-op pattern described in the [Mem0 research](https://arxiv.org/html/2504.19413v1#S2.SS1), implemented through Maestro's existing bounded workflow rather than another agent framework. Independent review evaluates necessity as well as support, and rejects redundant additions or destructive consolidation that loses distinct useful information. Automation never edits or removes a user-pinned record.
 
 Formation uses separate schema branches for a new memory (add with an empty ID) and an existing memory (update/remove with a selected editable ID). The review schema permits only indices for the actual proposed changes and an empty approval list when no changes were proposed. The captured draft count is checked between stages; duplicate edits to one memory are rejected before review.
+
+When `auto_create_tasks` is enabled for a periodic job, formation also supplies bounded task drafts and review supplies separately bounded approved-task indices. Both reuse the same source/configuration checks, deadline and daily allowances. Approved tasks are persisted with `initiated_by=maestro` and a suggested assignee; API-created tasks always use `initiated_by=user`. Existing open/completed task titles prevent duplicates, and deleting an AI-created task retains a bounded title hash to suppress the same suggestion. Suggested assignment does not authorize execution or delegation.
+
+AI-created tasks retain source-message, feedback and memory dependencies. Deleting a source chat or correcting/forgetting a source memory removes affected tasks; feedback changes also remove tasks whose captured answer revision is stale. Changing completion or suggested assignee preserves those dependencies. Independent user-created tasks and older records without recorded provenance remain.
 
 Drafts stay in RAM. SQLite stores source references/hashes, captured settings, attempt/stage, request IDs and usage. Promotion requires strict JSON, exact user evidence for facts/preferences, valid scope, matching source/memory revisions, credential checks and independent approval. Scheduled working notes leave source-message/evidence fields empty; Maestro attaches the selected exchanges' provenance, rather than asking the model to turn an assistant quote into user evidence. Explicit memories are protected. Model review can still err; schema validation establishes shape, not truth. Rejected output shows a fixed diagnostic category in Memory; private responses and exception details are not saved as errors.
 
@@ -102,5 +109,6 @@ Management routes remain GET/POST /api/memory and PATCH/DELETE /api/memory/{id}.
 | REF-05 | Scheduled reflection implemented | Initial idle pass, persistent interval, shared limits and editable working notes. |
 | REF-06 | Optional answer feedback and selective review implemented | Editable ratings/comments, complete exchange sampling, short rubric, source revisions and existing six-hour worker. Evaluate whether it reduces repeated mistakes. |
 | REF-07 | Maintenance prompts and selection implemented | Prefer meaningful same-ID refinement, working-note consolidation, supported removal or abstention; rotate managed entries, preserve pins, skip identical rewrites and handle cascaded removals. Evaluate usefulness and preservation of distinct information over repeated passes. |
+| TASK-01 | Reviewed task creation implemented | Optional periodic drafts and independent review, immutable initiator, editable suggested worker, duplicate/dismissal suppression and source attribution. Evaluate usefulness; task execution remains planned. |
 
 Synthetic checks cover deletion, forgetting, pins, feedback edits, interrupted stages and accounting. Small local probes establish execution, not broad memory quality. Compare no-memory, explicit-memory and automatic modes on repeated realistic tasks to assess whether review improves results. [A critical survey of LLM self-correction](https://arxiv.org/abs/2406.01297) supports collecting external feedback; unaided self-review does not reliably establish correctness. Session summaries and a separate review call after every answer are deferred until evidence shows a need.

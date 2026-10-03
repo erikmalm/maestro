@@ -11,6 +11,7 @@ class WorkConfig(BaseModel):
     enabled: bool = False
     auto_curate: bool = False
     periodic_reflection: bool = False
+    auto_create_tasks: bool = False
     reflection_interval_minutes: int = Field(default=360, ge=30, le=10080)
     debounce_seconds: int = Field(default=60, ge=0, le=3600)
     idle_seconds: int = Field(default=30, ge=0, le=3600)

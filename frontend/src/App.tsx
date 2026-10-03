@@ -239,11 +239,13 @@ function TaskRow({
   busy,
   onToggle,
   onDelete,
+  onAssign,
 }: {
   task: Task;
   busy: boolean;
   onToggle: () => void;
   onDelete: () => void;
+  onAssign: (assignee: NonNullable<Task["suggested_assignee"]>) => void;
 }) {
   return (
     <div className={`task-row ${task.done ? "task-done" : ""}`}>
@@ -262,6 +264,27 @@ function TaskRow({
         {task.priority === "high" && (
           <span className="priority-tag">High priority</span>
         )}
+        <div className="task-metadata">
+          <span>
+            Initiated by {task.initiated_by === "maestro" ? "Maestro" : "You"}
+          </span>
+          <label>
+            Suggested for
+            <select
+              aria-label={`Suggested assignee for ${task.title}`}
+              value={task.suggested_assignee ?? "user"}
+              disabled={busy}
+              onChange={(event) =>
+                onAssign(
+                  event.target.value as NonNullable<Task["suggested_assignee"]>,
+                )
+              }
+            >
+              <option value="user">You</option>
+              <option value="maestro">Maestro</option>
+            </select>
+          </label>
+        </div>
       </div>
       <button
         className="icon-button"
@@ -295,6 +318,7 @@ export default function App() {
   const reflectionPolling = useRef(false);
   const [reflectionActions, setReflectionActions] = useState(0);
   const reflectionVisible = page === "settings" || page === "memory";
+  const reflectionWatching = reflectionVisible || page === "tasks";
   const reflectionEnabled = workspace?.work?.config.enabled;
   const reflectionPending =
     !!workspace?.work && (workspace.work.queued > 0 || workspace.work.running);
@@ -323,7 +347,7 @@ export default function App() {
   }, [workspace?.messages.length]);
   useEffect(() => {
     if (
-      !reflectionVisible ||
+      !reflectionWatching ||
       busy ||
       feedbackSaving ||
       reflectionActions ||
@@ -361,7 +385,7 @@ export default function App() {
       document.removeEventListener("visibilitychange", poll);
     };
   }, [
-    reflectionVisible,
+    reflectionWatching,
     busy,
     feedbackSaving,
     reflectionActions,
@@ -445,6 +469,7 @@ export default function App() {
             ...current,
             work,
             ...(work.memories ? { memories: work.memories } : {}),
+            ...(work.tasks ? { tasks: work.tasks } : {}),
           }
         : current,
     );
@@ -529,6 +554,9 @@ export default function App() {
             String(data.get("title")),
             String(data.get("details")),
             String(data.get("priority")),
+            String(data.get("suggested_assignee")) as NonNullable<
+              Task["suggested_assignee"]
+            >,
           ),
         "Task saved locally.",
       )
@@ -584,6 +612,7 @@ export default function App() {
               ...current,
               work: result.work ?? current.work,
               memories: result.memories ?? current.memories,
+              tasks: result.work?.tasks ?? current.tasks,
               messages: current.messages.map((message) =>
                 message.id === result.message_id
                   ? { ...message, feedback: result.feedback }
@@ -1011,13 +1040,21 @@ export default function App() {
                 <Plus size={16} /> New task
               </button>
             </div>
-            <p className="page-note">Save and track tasks manually.</p>
+            <p className="page-note">
+              Create and track tasks here. Maestro can suggest tasks during
+              background reflection; tasks do not run automatically.
+            </p>
             <div className="card task-board">
               {workspace.tasks.map((task) => (
                 <TaskRow
                   key={task.id}
                   task={task}
                   busy={!!busy}
+                  onAssign={(assignee) =>
+                    void perform("assign-task", () =>
+                      api.assignTask(task.id, assignee),
+                    )
+                  }
                   onToggle={() =>
                     void perform("toggle", () =>
                       api.toggleTask(task.id, !task.done),
@@ -1152,6 +1189,13 @@ export default function App() {
               <select name="priority" defaultValue="normal">
                 <option value="normal">Normal</option>
                 <option value="high">High</option>
+              </select>
+            </label>
+            <label>
+              Suggested assignee
+              <select name="suggested_assignee" defaultValue="user">
+                <option value="user">You</option>
+                <option value="maestro">Maestro</option>
               </select>
             </label>
             <p className="form-note">

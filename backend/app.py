@@ -27,6 +27,7 @@ from backend.storage import workspace_owner
 from backend.memory import MAX_CONTENT, MemoryStore
 from backend.work_config import WorkConfig, config_value
 from backend.reflection import ReflectionStore, ReflectionWorker
+from backend.tasks import TaskInput, TaskUpdate, create_task as task_record, dismiss_task, present_task, prune_ai_tasks
 
 ROOT = Path(__file__).resolve().parent.parent
 DATA_DIR = Path(os.environ.get("MAESTRO_DATA_DIR") or Path(os.environ.get("LOCALAPPDATA", Path.home() / ".local" / "share")) / "Maestro" / "preview").expanduser().resolve()
@@ -142,7 +143,7 @@ def snapshot(state: dict, chat_id: str | None = None) -> dict:
     service = provider()
     provider_state = service.read_state()
     return {
-        **{key: state[key] for key in ("tasks", "limits")},
+        "tasks": [present_task(task) for task in state["tasks"]], "limits": state["limits"],
         "chats": [{key: item[key] for key in ("id", "title", "created_at", "updated_at")}
                   for item in sorted(state["chats"], key=lambda item: item["updated_at"], reverse=True)],
         "active_chat_id": chat["id"] if chat else None,
@@ -158,16 +159,6 @@ def snapshot(state: dict, chat_id: str | None = None) -> dict:
 
 class StrictModel(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
-
-
-class TaskInput(StrictModel):
-    title: str = Field(min_length=1, max_length=200)
-    details: str = Field(default="", max_length=16000)
-    priority: str = Field(default="normal", pattern="^(normal|high)$")
-
-
-class DoneInput(StrictModel):
-    done: bool
 
 
 class MemoryContent(StrictModel):
@@ -354,6 +345,7 @@ def delete_chat(chat_id: str):
         state["chats"] = [chat for chat in state["chats"] if chat["id"] != chat_id]
         MemoryStore(DATABASE, TIMEZONE).delete_chat(chat_id, db=db)
         ReflectionStore(DATABASE, TIMEZONE).delete_chat(chat_id, db)
+        prune_ai_tasks(state, db)
     return snapshot(state)
 
 
@@ -391,12 +383,14 @@ def save_feedback(chat_id: str, message_id: str, entry: FeedbackInput):
                 memories = MemoryStore(DATABASE, TIMEZONE)
                 memories.initialize_db(db)
                 memories.remove_stale(db, state["chats"])
+                prune_ai_tasks(state, db)
                 reflection = ReflectionStore(DATABASE, TIMEZONE)
                 reflection.invalidate(db, clear_candidates=False)
                 reflection.touch(state, db)
                 if previous is not None:
                     db.execute("DELETE FROM reflection_journal")
-    return {"message_id": message_id, "feedback": message.get("feedback"), "work": work_status(state),
+    return {"message_id": message_id, "feedback": message.get("feedback"),
+            "work": {**work_status(state), "tasks": [present_task(task) for task in state["tasks"]]},
             "memories": MemoryStore(DATABASE, TIMEZONE).list()}
 
 
@@ -458,7 +452,9 @@ def put_work_config(entry: WorkConfig):
 
 @app.get("/api/reflection")
 def get_reflection():
-    return {**work_status(read_workspace()), "memories": MemoryStore(DATABASE, TIMEZONE).list()}
+    state = read_workspace()
+    return {**work_status(state), "memories": MemoryStore(DATABASE, TIMEZONE).list(),
+            "tasks": [present_task(task) for task in state["tasks"]]}
 
 
 @app.post("/api/reflection/candidates/{candidate_id}/accept")
@@ -541,23 +537,26 @@ def reconcile_provider_charge(entry_id: str, entry: ChargeInput):
 @app.post("/api/tasks")
 def create_task(entry: TaskInput):
     with workspace_transaction() as state:
-        state["tasks"].insert(0, {"id": identifier(), **entry.model_dump(), "done": False, "created_at": now()})
+        state["tasks"].insert(0, task_record(entry, "user", now()))
         return snapshot(state)
 
 
 @app.patch("/api/tasks/{task_id}")
-def update_task(task_id: str, entry: DoneInput):
+def update_task(task_id: str, entry: TaskUpdate):
     with workspace_transaction() as state:
         task = next((task for task in state["tasks"] if task["id"] == task_id), None)
         if task is None:
             raise HTTPException(404, "That task could not be found.")
-        task["done"] = entry.done
+        task.update(entry.model_dump(exclude_unset=True))
         return snapshot(state)
 
 
 @app.delete("/api/tasks/{task_id}")
 def remove_task(task_id: str):
     with workspace_transaction() as state:
+        task = next((task for task in state["tasks"] if task["id"] == task_id), None)
+        if task:
+            dismiss_task(state, task)
         state["tasks"] = [task for task in state["tasks"] if task["id"] != task_id]
         return snapshot(state)
 

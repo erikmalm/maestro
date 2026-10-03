@@ -670,6 +670,26 @@ textarea {
   white-space: pre-wrap;
   margin-top: 5px;
 }
+.task-metadata,
+.task-metadata label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.task-metadata {
+  flex-wrap: wrap;
+  margin-top: 10px;
+  color: var(--muted);
+  font-size: 12px;
+}
+.task-metadata select {
+  padding: 3px 6px;
+  color: var(--accent);
+  background: #f4f1fd;
+  border: 1px solid #d8d2ef;
+  border-radius: 5px;
+  font-size: inherit;
+}
 .priority-tag {
   display: inline-block;
   color: #855224;

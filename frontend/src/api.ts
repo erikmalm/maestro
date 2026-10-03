@@ -5,6 +5,8 @@ export type Task = {
   priority: "normal" | "high";
   done: boolean;
   created_at: string;
+  initiated_by?: "user" | "maestro";
+  suggested_assignee?: "user" | "maestro";
 };
 export type MessageFeedback = {
   rating: "positive" | "negative";
@@ -145,8 +147,25 @@ export const saveMessageFeedback = (
     "PATCH",
     { rating, comment },
   );
-export const addTask = (title: string, details: string, priority: string) =>
-  request<Workspace>("/tasks", "POST", { title, details, priority });
+export const addTask = (
+  title: string,
+  details: string,
+  priority: string,
+  suggested_assignee: NonNullable<Task["suggested_assignee"]> = "user",
+) =>
+  request<Workspace>("/tasks", "POST", {
+    title,
+    details,
+    priority,
+    suggested_assignee,
+  });
+export const assignTask = (
+  id: string,
+  suggested_assignee: NonNullable<Task["suggested_assignee"]>,
+) =>
+  request<Workspace>(`/tasks/${encodeURIComponent(id)}`, "PATCH", {
+    suggested_assignee,
+  });
 export const toggleTask = (id: string, done: boolean) =>
   request<Workspace>(`/tasks/${id}`, "PATCH", { done });
 export const deleteTask = (id: string) =>
@@ -269,6 +288,7 @@ export type WorkConfig = {
   enabled: boolean;
   auto_curate: boolean;
   periodic_reflection: boolean;
+  auto_create_tasks?: boolean;
   reflection_interval_minutes: number;
   background_context_tokens: number;
   reflection_exchange_count: number;
@@ -294,6 +314,7 @@ export type WorkStatus = {
   today_tokens: number;
   memories?: Memory[];
   journal?: ReflectionJournalEntry[];
+  tasks?: Task[];
   next_reflection_at?: string | null;
 };
 export type ReflectionJournalEntry = {
@@ -311,6 +332,11 @@ export type ReflectionJournalEntry = {
   }[];
   sources: { chat_id: string; message_id: string }[];
   models: string[];
+  tasks_created?: {
+    id: string;
+    title: string;
+    suggested_assignee: "user" | "maestro";
+  }[];
 };
 export type MemoryCandidate = {
   id: string;

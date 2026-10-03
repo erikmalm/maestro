@@ -59,6 +59,10 @@ A disposable synthetic workspace supplied three older lessons, a misclassified c
 
 This demonstrates real same-ID refinement, not comprehensive cleanup quality: that pass did not remove all redundant or misclassified records. Synthetic regressions separately cover consolidation, removal, preserved historical sources, pin protection, no-ops and older-record rotation. Continue REF-07 quality evaluation over repeated passes; no model download or agent framework was added.
 
+### Reviewed task suggestions smoke (2026-10-03)
+
+A temporary synthetic workspace exercised task suggestions through the existing periodic workflow: gpt-oss formed two tasks and Qwen independently approved them, one suggested for the user and one for Maestro. The calls used 1,682 actual tokens with a 32,768-token context and a 2,048-token output cap; both tasks retained source provenance and both models unloaded afterward. This verifies task creation, not execution or planning quality over repeated passes. No private chats, additional model calls in the regular workflow, dependencies or downloads were needed.
+
 ## Diversification and next measurements
 
 Use one model at a time and bounded context. Unloaded installed models consume no inference memory; an idle background worker should not keep an LLM resident. Devstral's observed offload/slower throughput make it a poor frequent-reflection default on this GPU. gpt-oss is the stronger first reflection candidate here; Qwen is faster for ordinary interaction. Compare both before choosing automation defaults.

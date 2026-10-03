@@ -41,6 +41,8 @@ class Ollama(BaseHTTPRequestHandler):
             fields = body["format"]["properties"]
             if "approved" in fields:
                 result = {"approved": list(range(len(context["drafts"]))), "summary": "Reviewed the synthetic changes."}
+                if "approved_tasks" in fields:
+                    result["approved_tasks"] = list(range(len(context["task_drafts"])))
             else:
                 periodic = isinstance(context, dict) and "exchanges" in context
                 if periodic:
@@ -53,6 +55,9 @@ class Ollama(BaseHTTPRequestHandler):
                     proposal.update(operation="add", memory_id="", kind="identity" if periodic else "preference",
                                     scope="workspace" if periodic else context["new_memory_scope"])
                     result["summary"] = "Prepared a synthetic working practice." if periodic else "Normalized a synthetic preference."
+                if "tasks" in fields:
+                    result["tasks"] = [{"title": "Review synthetic task suggestions", "details": "Compare the synthetic outcome with its baseline.",
+                                        "priority": "normal", "suggested_assignee": "maestro"}]
             return self.reply({"done": True, "message": {"content": json.dumps(result)},
                                "prompt_eval_count": 30, "eval_count": 10})
         title = body["messages"][0]["content"].startswith("Create a short")
@@ -240,7 +245,7 @@ def verify(image, tunnel=False):
         calls = latest_calls()
         assert [(call["kind"], call["model"], call["stage"]) for call in calls] == [("memory", MODELS[0], 0), ("reflection", MODELS[1], 1)]
         assert api("/api/reflection")["today_jobs"] == 3
-        api("/api/work-config", {**automatic, "periodic_reflection": True}, method="PUT", headers=headers)
+        api("/api/work-config", {**automatic, "periodic_reflection": True, "auto_create_tasks": True}, method="PUT", headers=headers)
         identity = await_memory("identity")
         assert identity["origin"] == "reflective" and identity["scope"] == "workspace"
         calls = latest_calls()
@@ -249,6 +254,12 @@ def verify(image, tunnel=False):
         assert reflection["today_jobs"] == 4 and reflection["today_tokens"] == 240 and reflection["candidates"] == []
         assert reflection["next_reflection_at"] and [entry["kind"] for entry in reflection["journal"]] == ["reflection", "curation"]
         assert [entry["models"] for entry in reflection["journal"]] == [[MODELS[1], MODELS[0]], [MODELS[0], MODELS[1]]]
+        suggested = next(task for task in reflection["tasks"] if task["initiated_by"] == "maestro")
+        assert suggested["suggested_assignee"] == "maestro" and suggested["initiated_model"] == MODELS[1]
+        assert reflection["journal"][0]["tasks_created"][0]["id"] == suggested["id"]
+        reassigned = api(f"/api/tasks/{suggested['id']}", {"suggested_assignee": "user"}, method="PATCH", headers=headers)["tasks"][0]
+        assert reassigned["initiated_by"] == "maestro" and reassigned["suggested_assignee"] == "user"
+        api(f"/api/tasks/{suggested['id']}", method="DELETE", headers=headers)
         api("/api/work-config", policy, method="PUT", headers=headers)
         api(f"/api/memory/{identity['id']}", method="DELETE", headers=headers)
         api(f"/api/memory/{curated['id']}", method="DELETE", headers=headers)
@@ -315,7 +326,7 @@ def verify(image, tunnel=False):
         assert "missing or invalid" in rejected["detail"] and "/run/secrets" not in rejected["detail"]
         api("/api/provider", {"config": state["provider"]["config"]}, method="PUT", headers=headers)
         api("/api/web-search", {"config": {**recovered["web_search"]["config"], "enabled": False}}, method="PUT", headers=headers)
-        print("Podman integration passed: build context, isolation, model choices, reviewed curation and periodic identity, persistence, recreation, backup/restore, mounted secrets and invalid-secret recovery.")
+        print("Podman integration passed: build context, isolation, model choices, reviewed memories and task suggestions, persistence, recreation, backup/restore, mounted secrets and invalid-secret recovery.")
     finally:
         podman("rm", "--force", fixture_name, check=False)
         for container, data in ((restored, restored_volume), (name, volume)):

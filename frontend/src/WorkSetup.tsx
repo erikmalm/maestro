@@ -96,7 +96,7 @@ export default function WorkSetup({
               setConfig({
                 auto_curate: event.target.checked,
                 ...(!event.target.checked
-                  ? { periodic_reflection: false }
+                  ? { periodic_reflection: false, auto_create_tasks: false }
                   : {}),
               })
             }
@@ -109,11 +109,31 @@ export default function WorkSetup({
             checked={config.periodic_reflection}
             disabled={!!busy || !config.auto_curate}
             onChange={(event) =>
-              setConfig({ periodic_reflection: event.target.checked })
+              setConfig({
+                periodic_reflection: event.target.checked,
+                ...(!event.target.checked ? { auto_create_tasks: false } : {}),
+              })
             }
           />
           Reflect periodically on identity and working style
         </label>
+        <label className="reflection-check">
+          <input
+            type="checkbox"
+            checked={config.auto_create_tasks ?? false}
+            disabled={
+              !!busy || !config.auto_curate || !config.periodic_reflection
+            }
+            onChange={(event) =>
+              setConfig({ auto_create_tasks: event.target.checked })
+            }
+          />
+          AI can create tasks during reflection
+        </label>
+        <p className="reflection-note">
+          Reviewed suggestions are added to Tasks with an initiator and
+          suggested assignee.
+        </p>
         <label>
           Reflection interval (minutes)
           <input

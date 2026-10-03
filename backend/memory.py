@@ -144,14 +144,15 @@ class MemoryStore:
         row = db.execute("SELECT value FROM workspace WHERE id=1").fetchone()
         return {chat["id"]: chat for chat in json.loads(row[0]).get("chats", [])} if row else {}
 
-    def valid_source(self, record, chats, memories=None, seen=frozenset()):
+    @classmethod
+    def valid_source(cls, record, chats, memories=None, seen=frozenset()):
         if record["id"] in seen:
             return False
         seen = seen | {record["id"]}
         for source in record.get("provenance", []):
             if "memory_id" in source:
                 target = (memories or {}).get(source["memory_id"])
-                if target is None or revision(target) != source["hash"] or not self.valid_source(target, chats, memories, seen):
+                if target is None or revision(target) != source["hash"] or not cls.valid_source(target, chats, memories, seen):
                     return False
             else:
                 role = source.get("role", "user")
@@ -226,9 +227,9 @@ class MemoryStore:
             self.tombstone(db, old)
             self.barrier(db)
             self.remove_dependents(db, memory_id)
-            self.invalidate_reflection(db)
             db.execute("UPDATE private_memories SET content=:content, origin='explicit', updated_at=:updated_at,chat_id=:chat_id,source_message_id=:source_message_id,metadata=:metadata WHERE id=:id",
                        {**record, "metadata": json.dumps({key: record[key] for key in ("kind", "source_hash", "evidence", "provenance")})})
+            self.invalidate_reflection(db)
         return record
 
     def forget(self, memory_id):
@@ -243,6 +244,11 @@ class MemoryStore:
             self.invalidate_reflection(db)
 
     def invalidate_reflection(self, db, clear_journal=True):
+        if clear_journal and db.execute("SELECT 1 FROM sqlite_master WHERE name='workspace'").fetchone():
+            from backend.tasks import prune_ai_tasks
+            row = db.execute("SELECT value FROM workspace WHERE id=1").fetchone()
+            if row and prune_ai_tasks(workspace := json.loads(row[0]), db):
+                db.execute("UPDATE workspace SET value=? WHERE id=1", (json.dumps(workspace),))
         if db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='reflection_meta'").fetchone():
             from backend.reflection import ReflectionStore
             store = ReflectionStore(self.database, self.timezone)

@@ -1,6 +1,6 @@
 # Maestro development plan
 
-Plan date: 2026-10-03. The current product supports real chat, persistent history, manual to-dos, provider setup and usage accounting. This branch adds private memory, shared local generation and opt-in background reflection. Local Ollama generation has been verified; remote API/accounting and bounded hosted search have synthetic integration coverage. Hosted search requires a successful test with the user's key.
+Plan date: 2026-10-03. The current product supports real chat, persistent history, attributed to-dos, provider setup and usage accounting. Private memory, shared local generation and opt-in background reflection support reviewed AI task suggestions. Local Ollama generation has been verified; remote API/accounting and bounded hosted search have synthetic integration coverage. Hosted search requires a successful test with the user's key.
 
 There is one active connection with saved model preferences and per-message local choices. The chat UI always uses the chat role; the API retains a planning/orchestrator preference. Accepted private memory is recalled in relevant local chats. Background reflection optionally curates normalized memories through two-model review and maintains scheduled identity/lesson notes with a private journal. Maestro cannot execute a to-do, delegate work or automatically route specialist tasks yet. The [architecture](docs/ARCHITECTURE.md) and [memory/reflection design](docs/MEMORY_AND_REFLECTION.md) distinguish working behavior from upcoming increments.
 
@@ -15,7 +15,7 @@ The first supported setup is one user on one Windows computer. Deliver each capa
 ## Current foundation
 
 - **Workspace:** separate persistent chats with live Ollama or compatible API replies, editable titles and optional one-search-per-message Ollama web search. New chat preserves earlier conversations; deleting one retains shared usage accounting.
-- **Tasks:** manual create, complete/reopen and delete operations without model calls.
+- **Tasks:** manual create, complete/reopen, suggested-assignee changes and deletion without model calls. Every task records its initiator; optional periodic reflection adds up to two independently reviewed AI-created tasks per pass to the same list, without execution.
 - **Settings and usage:** one connection with chat/orchestrator model preferences, per-message local choices, OS/session/mounted credentials, search setup, output/context controls, spend/token limits, actual model usage and uncertain-charge reconciliation.
 - **Private storage:** SQLite outside Git; real conversations and accounting survive restart. Previous live history migrates into one conversation. Earlier prototype-only records remain archived privately, with simulated messages excluded from active chat.
 - **Private memory:** dedicated Memory view with interactive map, searchable list, sources, proposals and reflection journal; save/edit/forget, workspace/conversation scopes and bounded lexical recall. Settings contains configuration and links to Memory. Memory and derived replies stay local; relevant IDs are recorded. Human edits pin records; optional automatic curation preserves provenance and deletion barriers.
@@ -60,6 +60,8 @@ Background reflection implements REF-01–03 in the [memory design](docs/MEMORY_
 REF-06 adds optional answer ratings/comments and selects complete exchanges for the same scheduled worker, using a short intent/accuracy/clarity rubric. Feedback uses existing messages and SQLite, with no inference on submission. Background context, exchange sampling and recall are configurable; compare repeated mistakes before/after reviewed lessons to evaluate quality. Per-answer model checks and session summaries remain deferred.
 
 MEM-02 adds the interactive map of existing memory and source references. REF-07 makes the same worker prefer useful refinement, working-note consolidation, removal or abstention; it rotates managed records, retains pins, skips identical updates and handles overlapping dependency removals. Evaluate whether repeated passes preserve unique information and reduce generic or duplicate notes. Both increments reuse existing storage and generation; general task delegation remains the later execution step.
+
+TASK-01 adds opt-in task suggestions to periodic formation/review. The server records Maestro as initiator and lets the user change the suggested worker. Repeated open/completed titles and deleted AI suggestions are suppressed. Suggestions enter the existing list without another call, approval queue or execution process. Evaluate whether they identify useful follow-up work and avoid repeated or unsupported tasks; executing or sweeping the list remains out of scope for this increment.
 
 Add one separate task worker using local Ollama and the shared generation service. A manually queued text-only task has selected context, completion criteria, a persisted attempt and a saved result. It can run with the browser closed. Start with one generation slot and show persisted status in Tasks.
 

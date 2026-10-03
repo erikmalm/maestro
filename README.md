@@ -1,8 +1,8 @@
 # Maestro
 
-A local web interface for persistent chats with your chosen model, usage tracking and to-dos. Workspace, Tasks, Memory and Settings expose live conversation, manual task management, private memory and configuration.
+A local web interface for persistent chats with your chosen model, usage tracking and to-dos. Workspace, Tasks, Memory and Settings expose live conversation, user-created and reviewed AI-created tasks, private memory and configuration.
 
-Maestro saves one provider connection with a chat model and a separate orchestrator preference. Chat supports per-message model choices, Markdown and private memory. Opt-in background reflection curates reviewed memories automatically, maintains working notes and provides a private journal. Task execution and delegation remain future work. Optional Ollama web search is the only model-selected tool. The [development plan](DEVELOPMENT_PLAN.md) and [memory/reflection architecture](docs/MEMORY_AND_REFLECTION.md) describe working behavior and the next increments.
+Maestro saves one provider connection with a chat model and a separate orchestrator preference. Chat supports per-message model choices, Markdown and private memory. Opt-in background reflection curates reviewed memories automatically, maintains working notes and provides a private journal. It can also create independently reviewed task suggestions. Task execution and delegation remain future work. Optional Ollama web search is the only model-selected tool. The [development plan](DEVELOPMENT_PLAN.md) and [memory/reflection architecture](docs/MEMORY_AND_REFLECTION.md) describe working behavior and the next increments.
 
 ## Run locally
 
@@ -47,7 +47,7 @@ Each chat keeps its own history, and only that chat's messages are sent with lat
 
 After the first successful reply, Maestro tries once to name the chat using the same model, a bounded first message and the remaining request allowance, without tools. If naming fails, model settings change or the allowance is insufficient, a short title from the first message remains. A manual rename always takes precedence. Usage totals include title calls. Project grouping is a later increment.
 
-To-dos can be added, completed/reopened and deleted without model calls; saving a task does not execute it.
+To-dos can be added, completed/reopened and deleted without model calls. Each task identifies its initiator and suggests either you or Maestro as its worker; you can change that suggestion without changing the initiator. Optional periodic reflection can add up to two independently reviewed tasks per pass to the same list. Matching open/completed task titles and dismissed AI titles suppress repeats. Saving or suggesting a worker does not execute a task.
 
 Shared local generation and opt-in background reflection now reuse the chat usage ledger. The next execution increment is one durable text-only task, completing with the browser closed and supporting pause/restart recovery. Multiple saved model profiles and bounded delegation follow that working path. See the [build sequence](docs/ARCHITECTURE.md#next-build-sequence).
 
@@ -75,6 +75,8 @@ Memories and replies derived from them stay local: start a new conversation befo
 **Settings → Task models & reflection** saves task models and resource limits. Set local context to at least 8,192 tokens, then enable automatic memory curation and independent reflection for reviewed updates and working notes every six hours. Read results in **Memory → Private reflection journal**; edit to pin a memory or forget it. Chat curation uses the memory model followed by the reflection model; periodic reflection reverses those roles. Blank choices use recommended installed models or chat fallback. Automatic options default off; the earlier accept/reject proposal workflow remains available in Memory. See the [usage guide and design](docs/MEMORY_AND_REFLECTION.md#using-background-reflection), [model assessment](docs/LOCAL_MODELS.md) and [Windows lock/sleep guidance](docs/WINDOWS_BACKGROUND.md).
 
 Optional thumbs and comments on answers provide local feedback for the next scheduled reflection. It reviews complete selected exchanges against intent, accuracy and clarity without adding a model call when you rate an answer. Background context defaults to 32,768 tokens, with eight exchanges, 4,096 output tokens per call, 50 jobs/250,000 tokens per day, and recall of up to 20 memories/16,000 characters. These limits are configurable separately from chat; saved settings retain their values after upgrades.
+
+Enable **AI can create tasks during reflection** in **Task models & reflection** to let independent reflection turn supported follow-up work into to-dos. It defaults off and reuses the same two model calls, source checks and budgets. Results appear in **Tasks**, labeled **Initiated by** and **Suggested for**, with attribution in the private reflection journal. There is no task runner or automatic execution.
 
 ## Usage and limits
 

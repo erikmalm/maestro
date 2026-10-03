@@ -83,6 +83,21 @@ export default function ReflectionJournal({
                 </p>
               ))}
             </details>
+            {!!entry.tasks_created?.length && (
+              <details>
+                <summary>{entry.tasks_created.length} tasks created</summary>
+                <ul>
+                  {entry.tasks_created.map((task) => (
+                    <li key={task.id}>
+                      {task.title} · Suggested for{" "}
+                      {task.suggested_assignee === "maestro"
+                        ? "Maestro"
+                        : "You"}
+                    </li>
+                  ))}
+                </ul>
+              </details>
+            )}
           </div>
         </div>
       ))}
