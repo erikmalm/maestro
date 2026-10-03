@@ -153,6 +153,22 @@ class ClaimedProviderTests(unittest.TestCase):
         options.setdefault("kind", self.prepared["job"].get("kind", "reflection"))
         return self.provider.generate_context(self.prepared["instructions"], self.prepared["messages"], job=self.prepared["job"], **options)
 
+    def test_background_context_is_bounded_without_changing_chat_preferences(self):
+        self.store.recover()
+        self.provider.configure({**self.provider.read_state()["config"], "ollama_context_tokens": 131072}, "", False)
+        self.prepared = self.store.prepare()
+        self.assertEqual(self.prepared["job"]["connection_config"]["ollama_context_tokens"], 131072)
+        with patch("backend.provider.background_network", side_effect=self.network):
+            result = self.generate()
+        self.assertEqual(self.calls[-1][2]["options"]["num_ctx"], 8192)
+        self.store.complete(self.prepared["job"], result, lambda text: text)
+        state = self.provider.read_state()
+        self.assertEqual(state["config"]["ollama_context_tokens"], 131072)
+        self.assertEqual(state["ledger"][-1]["connection_config"]["ollama_context_tokens"], 131072)
+        self.assertEqual(state["ledger"][-1]["status"], "settled")
+        status = self.store.status()
+        self.assertEqual((status["today_jobs"], status["today_tokens"], status["running"]), (1, 40, False))
+
     def test_two_phases_use_separate_saved_models_and_schemas_with_one_job_budget(self):
         self.workspace["work_config"].update(auto_curate=True, memory_model="form:7b", reflection_model="review:7b",
                                              max_jobs_per_day=1, max_tokens_per_day=100000)

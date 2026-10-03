@@ -15,7 +15,7 @@ import httpx
 
 from backend import credentials
 from backend.web_search import WebSearch, TOOL, SEARCH_INSTRUCTIONS, fit_sources
-from backend.work_config import config_value, select_model
+from backend.work_config import BACKGROUND_CONTEXT_TOKENS, config_value, select_model
 
 DEFAULT = {"base_url": "https://api.openai.com/v1", "protocol": "responses", "model": "", "orchestrator_model": "",
            "input_usd_per_million": 0.0, "output_usd_per_million": 0.0,
@@ -363,6 +363,8 @@ class Provider:
                 raise ValueError("Background tasks require Local Ollama; no remote fallback is allowed.")
             if context:
                 config["ollama_keep_alive_minutes"] = 0
+            if job is not None:
+                config["ollama_context_tokens"] = min(config["ollama_context_tokens"], BACKGROUND_CONTEXT_TOKENS)
             key = None if local else credentials.read(config["base_url"])[0]
             if title and (state["config"] != connection_config or key != title_for["key"]):
                 raise ValueError("Connection settings changed; the first-message title was skipped.")

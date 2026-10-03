@@ -2,6 +2,9 @@
 from pydantic import BaseModel, ConfigDict, Field
 
 
+BACKGROUND_CONTEXT_TOKENS = 8192
+
+
 class WorkConfig(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True, str_strip_whitespace=True)
 

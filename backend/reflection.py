@@ -11,7 +11,7 @@ import time
 import uuid
 
 from backend.memory import MAX_CONTENT, MAX_MEMORIES, MemoryStore, content_value, revision, terms
-from backend.work_config import config_value
+from backend.work_config import BACKGROUND_CONTEXT_TOKENS, config_value
 
 MAX_JOBS, MAX_CANDIDATES, MAX_SOURCES = 100, 200, 8
 BASE_ROLE = "Maestro is a local assistant that values useful, honest, concise help, user control, privacy and simple, verifiable work. Working identity notes are revisable practices, not consciousness, facts about the user or permissions."
@@ -311,7 +311,7 @@ class ReflectionStore:
                     self.write_job(db, job, "done")
                     return None
             source_text = self.source_text(job, workspace)
-            cap = min(config["ollama_context_tokens"], workspace["limits"]["max_tokens"]) - min(policy["max_output_tokens"], config["max_output_tokens"]) - 2048
+            cap = min(config["ollama_context_tokens"], BACKGROUND_CONTEXT_TOKENS, workspace["limits"]["max_tokens"]) - min(policy["max_output_tokens"], config["max_output_tokens"]) - 2048
             instructions, schema = instructions_for(job), schema_for(job)
             role = BASE_ROLE if job["mode"] == "periodic" else "Sources are USER statements. I/my refers to the user, never Maestro. Curate user memory; do not describe the assistant."
             memories = [MemoryStore.record(row) for row in db.execute("SELECT * FROM private_memories ORDER BY updated_at DESC")]
