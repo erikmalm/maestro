@@ -172,6 +172,110 @@ class WebSearchTests(unittest.TestCase):
         self.assertNotIn(self.key, removed.text)
         self.assertNotIn(self.key.encode(), backend.DATABASE.read_bytes())
 
+    def test_readiness_reports_static_settings_reasons_without_revealing_credentials(self):
+        state = {"config": DEFAULT.copy(), "tested_at": None, "paused_until": None, "ledger": []}
+        missing = self.service.status(state)
+        self.assertFalse(missing["ready"])
+        self.assertEqual(missing["unavailable_reason"], "Add and test an Ollama search API key in Settings.")
+        self.keys[ENDPOINT] = self.key
+        disabled = self.service.status(state)
+        self.assertFalse(disabled["ready"])
+        self.assertEqual(disabled["unavailable_reason"], "Enable Optional web search in Settings.")
+        state["config"]["enabled"] = True
+        untested = self.service.status(state)
+        self.assertFalse(untested["ready"])
+        self.assertEqual(untested["unavailable_reason"], "Test the Ollama search key in Settings before using web search.")
+        state["tested_at"] = self.service.now().isoformat()
+        ready = self.service.status(state)
+        self.assertTrue(ready["ready"])
+        self.assertIsNone(ready["unavailable_reason"])
+        state["config"]["enabled"] = False
+        self.assertFalse(self.service.status(state)["ready"])  # A tested key never enables search by itself.
+        state["config"]["enabled"] = True
+        self.keys.clear()
+        lost = self.service.status(state)
+        self.assertFalse(lost["ready"])
+        self.assertIsNone(lost["tested_at"])
+        for result in (missing, disabled, untested, ready, lost):
+            self.assertNotIn(self.key, json.dumps(result))
+
+    def test_readiness_matches_quota_cooldown_inflight_and_spacing_gates(self):
+        self.keys[ENDPOINT] = self.key
+        now = self.service.now()
+        base = {"config": {**DEFAULT, "enabled": True}, "tested_at": now.isoformat(), "paused_until": None, "ledger": []}
+        cases = [
+            ({**base, "config": {**base["config"], "daily_limit": 1},
+              "ledger": [{"id": "synthetic-completed", "at": (now - timedelta(seconds=10)).isoformat(), "status": "completed"}]},
+             "Daily web search limit reached. Adjust the search allowance in Settings."),
+            ({**base, "paused_until": (now + timedelta(seconds=30)).isoformat()},
+             "Ollama search is paused after a rate limit. Wait until the cooldown ends."),
+            ({**base, "ledger": [{"id": "synthetic-active", "at": (now - timedelta(seconds=10)).isoformat(), "status": "reserved"}]},
+             "A web search is already running. Wait for it to finish."),
+            ({**base, "ledger": [{"id": "synthetic-recent", "at": (now - timedelta(seconds=4, microseconds=999999)).isoformat(), "status": "failed"}]},
+             "Search requests are spaced at least five seconds apart. Wait before trying again."),
+        ]
+        with patch.object(self.service, "now", return_value=now):
+            for state, reason in cases:
+                original = json.dumps(state, sort_keys=True)
+                with self.subTest(reason=reason):
+                    result = self.service.status(state)
+                    self.assertFalse(result["ready"])
+                    self.assertEqual(result["unavailable_reason"], reason)
+                    self.assertEqual(json.dumps(state, sort_keys=True), original)
+                    self.assertNotIn(self.key, json.dumps(result))
+            boundary = {**base, "ledger": [{"id": "synthetic-boundary", "at": (now - timedelta(seconds=5)).isoformat(), "status": "failed"}]}
+            self.assertTrue(self.service.status(boundary)["ready"])
+
+    def test_readiness_cooldown_and_daily_reset_are_computed_without_rewriting_state(self):
+        self.keys[ENDPOINT] = self.key
+        now = self.service.now()
+        state = {"config": {**DEFAULT, "enabled": True, "daily_limit": 1}, "tested_at": now.isoformat(),
+                 "paused_until": (now - timedelta(seconds=1)).isoformat(),
+                 "ledger": [{"id": "synthetic-yesterday", "at": (now - timedelta(days=1)).isoformat(), "status": "interrupted"}]}
+        original = json.dumps(state, sort_keys=True)
+        with patch.object(self.service, "now", return_value=now):
+            result = self.service.status(state)
+        self.assertTrue(result["ready"])
+        self.assertIsNone(result["unavailable_reason"])
+        self.assertIsNone(result["paused_until"])
+        self.assertEqual(result["searches_today"], 0)
+        self.assertEqual(result["remaining_today"], 1)
+        self.assertEqual(json.dumps(state, sort_keys=True), original)
+
+    def test_status_is_read_only_on_existing_and_absent_databases_and_makes_no_requests(self):
+        fresh = Path(self.directory.name) / "not-created" / "workspace.sqlite3"
+        absent = WebSearch(fresh, backend.TIMEZONE)
+        before = backend.DATABASE.read_bytes()
+        with patch.object(httpx, "AsyncClient", side_effect=AssertionError("Status must not send requests")), patch.object(WebSearch, "transaction", side_effect=AssertionError("Status must not initialize or update SQLite")):
+            default = absent.status()
+            existing = self.service.status()
+            endpoint = self.client.get("/api/web-search")
+        self.assertFalse(fresh.parent.exists())
+        self.assertFalse(default["ready"])
+        self.assertFalse(existing["ready"])
+        self.assertEqual(endpoint.status_code, 200)
+        self.assertFalse(endpoint.json()["ready"])
+        self.assertEqual(backend.DATABASE.read_bytes(), before)
+        self.assertEqual(self.requests, [])
+        self.enable()
+        before = backend.DATABASE.read_bytes()
+        self.assertTrue(self.service.status()["ready"])
+        self.assertEqual(backend.DATABASE.read_bytes(), before)
+
+    def test_credential_read_failure_reports_not_ready_without_search_or_state_mutation(self):
+        with self.service.transaction() as state:
+            state["config"]["enabled"] = True
+            state["tested_at"] = self.service.now().isoformat()
+        before = backend.DATABASE.read_bytes()
+        with patch.object(credentials, "read", side_effect=ValueError("The server's mounted API key is missing or invalid. Check its secret configuration.")):
+            result = self.service.status()
+        self.assertFalse(result["ready"])
+        self.assertFalse(result["credentials_present"])
+        self.assertIsNone(result["tested_at"])
+        self.assertEqual(result["unavailable_reason"], "Add and test an Ollama search API key in Settings.")
+        self.assertEqual(backend.DATABASE.read_bytes(), before)
+        self.assertEqual(self.requests, [])
+
     def test_automatic_search_two_model_calls_sources_and_usage_persist(self):
         self.enable()
         private_context = "Synthetic private chat detail excluded from the public search query"
@@ -458,7 +562,8 @@ class WebSearchTests(unittest.TestCase):
                 self.age_attempts()
                 self.enable()
                 with self.mock_http(handler):
-                    result = self.client.post("/api/chat", headers=self.headers, json={"text": "Synthetic sanitation check"})
+                    result = self.client.post("/api/chat", headers=self.headers,
+                                              json={"text": "Use search for this synthetic sanitation check"})
                 self.assertEqual(result.status_code, 200, result.text)
                 final = json.loads(self.model_requests()[-1].content)
                 self.assertNotIn(key, json.dumps(final))
@@ -472,6 +577,175 @@ class WebSearchTests(unittest.TestCase):
                 self.assertNotIn(encoded_key, json.dumps(final))
                 self.assertNotIn(encoded_key, result.text)
                 self.assertNotIn(encoded_key.encode(), backend.DATABASE.read_bytes())
+
+    def test_rotated_request_credential_is_excluded_from_layered_source_urls_before_archiving(self):
+        from backend.context_store import ContextStore, DEFAULT as ARCHIVE_DEFAULT
+
+        self.enable()
+        original_key = self.key
+        replacement_key = "synthetic-replacement-search-key"
+        encoded = "".join(f"%{ord(char):02X}" for char in original_key)
+        unsafe_urls = ["https://public.example.org/weather?value=" + encoded.replace("%", "%25"),
+                       "https://public.example.org/weather?value=" + encoded.replace("%", "%2525")]
+        safe_url = "https://public.example.org/weather?date=2026-10-05"
+
+        def handler(request):
+            self.assertEqual(request.headers["authorization"], "Bearer " + original_key)
+            self.service.configure(DEFAULT.copy(), replacement_key, False)
+            return self.search_response([
+                *({"title": "Credential URL", "url": url, "content": "Do not retain this source."}
+                  for url in unsafe_urls),
+                {"title": "Public forecast", "url": safe_url, "content": "Synthetic dated public excerpt."},
+            ])
+
+        with self.mock_http(handler):
+            result = self.service.search(self.query)
+        self.assertEqual(self.keys[ENDPOINT], replacement_key)
+        self.assertEqual([source["url"] for source in result["sources"]], [safe_url])
+        self.assertEqual(len(result["completeness"]), 1)
+        self.assertEqual(self.service.read_state()["ledger"][-1]["status"], "completed")
+        self.assertIsNone(self.service.status()["tested_at"])
+
+        with tempfile.TemporaryDirectory(prefix="maestro-public-archive-test-") as archive:
+            store = ContextStore(backend.DATABASE, archive)
+            store.configure({**ARCHIVE_DEFAULT, "enabled": True})
+            captured = store.capture(self.query, result["at"], result["sources"], 3, secrets=(replacement_key,))
+            self.assertEqual(len(captured["sources"]), 1)
+            self.assertEqual(captured["sources"][0]["archive_status"], "saved")
+            self.assertEqual(store.get_capture(captured["sources"][0]["capture_id"])["url"], safe_url)
+            exported = b"".join(path.read_bytes() for path in Path(archive).rglob("*") if path.is_file())
+            for leaked in (original_key, *unsafe_urls):
+                self.assertNotIn(leaked.encode(), exported)
+
+    def test_encoded_credentials_in_titles_and_bodies_are_excluded_before_chat_and_archive(self):
+        from backend.context_store import ContextStore, DEFAULT as ARCHIVE_DEFAULT
+
+        self.enable()
+        encoded = "".join(f"%{ord(char):02X}" for char in self.key)
+        entities = "".join(f"&#x{ord(char):x};" for char in self.key)
+        safe_content = "Normal escaped source text: %41 &amp; &lt;code&gt;. " + "x" * 1300
+
+        def handler(request):
+            if request.url.host == "ollama.com":
+                self.requests.append(request)
+                return self.search_response([
+                    {"title": "Encoded credential " + encoded, "url": "https://public.example.org/title", "content": "Unused."},
+                    {"title": "Public-looking title", "url": "https://public.example.org/body", "content": "Encoded credential " + entities},
+                    {"title": "Safe escaped source", "url": "https://public.example.org/safe", "content": safe_content},
+                ])
+            if request.url.path == "/api/chat" and "tools" in json.loads(request.content):
+                self.requests.append(request)
+                return self.model_response({"role": "assistant", "content": "", "tool_calls": [{"function": {
+                    "name": "search_context", "arguments": {"query": self.query, "freshness": "stable"}}}]})
+            return self.provider_http(request)
+
+        with tempfile.TemporaryDirectory(prefix="maestro-encoded-archive-test-") as archive, \
+                patch.dict("os.environ", {"MAESTRO_CONTEXT_ARCHIVE_DIR": archive}):
+            store = ContextStore(backend.DATABASE, archive)
+            store.configure({**ARCHIVE_DEFAULT, "enabled": True})
+            with self.mock_http(handler):
+                response = self.client.post("/api/chat", headers=self.headers,
+                                            json={"text": "Search for this synthetic credential check"})
+            self.assertEqual(response.status_code, 200, response.text)
+            search = response.json()["messages"][-1]["web_search"]
+            self.assertEqual(len(search["sources"]), 1)
+            source = search["sources"][0]
+            self.assertEqual(source["url"], "https://public.example.org/safe")
+            self.assertEqual(source["archive_status"], "saved")
+            self.assertEqual(source["completeness"], {"maestro_truncated": True, "full_page": False})
+            capture = store.get_capture(source["capture_id"])
+            self.assertEqual(capture["content"], safe_content[:1200])
+            exported = b"".join(path.read_bytes() for path in Path(archive).rglob("*") if path.is_file())
+            final = self.model_requests()[-1].content
+            for value in (self.key, encoded, entities):
+                self.assertNotIn(value.encode(), exported)
+                self.assertNotIn(value.encode(), final)
+                self.assertNotIn(value, response.text)
+            self.assertEqual(len(self.search_requests()), 1)
+
+    def test_rotated_request_credential_is_excluded_from_encoded_titles_and_content(self):
+        self.enable()
+        original_key = self.key
+        encoded = "".join(f"%{ord(char):02X}" for char in original_key).replace("%", "%25")
+        entities = "".join(f"&#{ord(char)};" for char in original_key).replace("&", "%26")
+
+        def handler(request):
+            self.assertEqual(request.headers["authorization"], "Bearer " + original_key)
+            self.service.configure(DEFAULT.copy(), "synthetic-replacement-search-key", False)
+            return self.search_response([
+                {"title": encoded, "url": "https://public.example.org/title", "content": "Unused."},
+                {"title": "Public title", "url": "https://public.example.org/body", "content": entities},
+                {"title": "Safe source", "url": "https://public.example.org/safe", "content": "Normal source."},
+            ])
+
+        with self.mock_http(handler):
+            result = self.service.search(self.query)
+        self.assertEqual([source["url"] for source in result["sources"]], ["https://public.example.org/safe"])
+        self.assertEqual(result["completeness"], [{"maestro_truncated": False, "full_page": False}])
+        for value in (original_key, encoded, entities):
+            self.assertNotIn(value, json.dumps(result))
+        self.assertIsNone(self.service.status()["tested_at"])
+
+    def test_known_remote_provider_credential_is_excluded_from_public_result_fields(self):
+        self.enable()
+        provider_url = "https://synthetic-provider.example.org/v1"
+        provider_key = "synthetic-known-remote-provider-key"
+        self.keys[provider_url] = provider_key
+        with backend.provider().transaction() as state:
+            state["config"].update(protocol="responses", base_url=provider_url)
+        encoded = "".join(f"%{ord(char):02X}" for char in provider_key)
+        entities = "".join(f"&#x{ord(char):x};" for char in provider_key)
+
+        def handler(request):
+            return self.search_response([
+                {"title": encoded, "url": "https://public.example.org/title", "content": "Unused."},
+                {"title": "Public title", "url": "https://public.example.org/body", "content": entities},
+                {"title": "Safe source", "url": "https://public.example.org/safe", "content": "Normal source."},
+            ])
+
+        with self.mock_http(handler):
+            result = self.service.search(self.query)
+        self.assertEqual([source["url"] for source in result["sources"]], ["https://public.example.org/safe"])
+        for value in (provider_key, encoded, entities):
+            self.assertNotIn(value, json.dumps(result))
+
+    def test_only_encoded_credential_titles_and_content_fail_without_inference_or_echo(self):
+        self.enable()
+        encoded = "".join(f"%{ord(char):02X}" for char in self.key)
+        entities = "".join(f"&#x{ord(char):x};" for char in self.key)
+
+        def handler(request):
+            self.requests.append(request)
+            return self.search_response([
+                {"title": encoded, "url": "https://public.example.org/title", "content": "Unused."},
+                {"title": "Public title", "url": "https://public.example.org/body", "content": entities},
+            ])
+
+        with self.mock_http(handler), self.assertRaisesRegex(ValueError, "no usable public sources") as rejected:
+            self.service.search(self.query)
+        self.assertEqual(self.model_requests(), [])
+        self.assertEqual(len(self.search_requests()), 1)
+        for value in (self.key, encoded, entities):
+            self.assertNotIn(value, str(rejected.exception))
+        self.assertEqual(self.service.read_state()["ledger"][-1]["status"], "failed")
+
+    def test_rotated_request_with_only_encoded_credential_sources_fails_without_exposing_key(self):
+        self.enable()
+        original_key = self.key
+        encoded = "".join(f"%{ord(char):02X}" for char in original_key).replace("%", "%2525")
+
+        def handler(request):
+            self.assertEqual(request.headers["authorization"], "Bearer " + original_key)
+            self.service.configure(DEFAULT.copy(), "synthetic-replacement-search-key", False)
+            return self.search_response([{"title": "Credential URL", "url": "https://public.example.org/?value=" + encoded,
+                                          "content": "Unusable synthetic result."}])
+
+        with self.mock_http(handler), self.assertRaisesRegex(ValueError, "no usable public sources") as rejected:
+            self.service.search(self.query)
+        self.assertNotIn(original_key, str(rejected.exception))
+        self.assertNotIn(encoded, str(rejected.exception))
+        self.assertEqual(self.service.read_state()["ledger"][-1]["status"], "failed")
+        self.assertIsNone(self.service.status()["tested_at"])
 
     def test_daily_quota_spacing_rate_cooldown_and_recovery_persist_attempts(self):
         self.assertEqual(self.configure(key=self.key, daily_limit=1).status_code, 200)

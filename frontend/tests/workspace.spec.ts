@@ -737,6 +737,9 @@ test("chat model picker preserves conversation and draft", async ({ page }) => {
     .getByLabel("Available models", { exact: true })
     .selectOption("synthetic-ollama:latest");
   await page
+    .getByRole("combobox", { name: "Chat routing", exact: true })
+    .selectOption("orchestrator");
+  await page
     .getByLabel("Orchestrator default model")
     .selectOption("synthetic-devstral:latest");
   await page
@@ -752,8 +755,14 @@ test("chat model picker preserves conversation and draft", async ({ page }) => {
   await expect(page.getByLabel("Orchestrator default model")).toHaveValue(
     "synthetic-devstral:latest",
   );
+  await expect(
+    page.getByRole("combobox", { name: "Chat routing", exact: true }),
+  ).toHaveValue("orchestrator");
   await page.getByRole("button", { name: "New chat", exact: true }).click();
   await expect(page.getByLabel("Message Maestro")).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: "Choose model:" }),
+  ).toContainText("synthetic-devstral:latest");
   const before = await (await page.request.get("/api/workspace")).json();
   await expect(
     page.getByRole("combobox", { name: "Role", exact: true }),
@@ -792,6 +801,7 @@ test("chat model picker preserves conversation and draft", async ({ page }) => {
       "synthetic-devstral:latest",
     );
     expect(saved.provider.config.model).toBe("synthetic-ollama:latest");
+    expect(saved.provider.config.chat_routing).toBe("orchestrator");
   }
   await expect(page.locator(".chat-message.assistant")).toHaveCount(3);
   await page
@@ -816,6 +826,34 @@ test("verified search key enables bounded local-model search with persistent sou
 }) => {
   await page.goto("/");
   await page.getByRole("button", { name: "Settings", exact: true }).click();
+  const fixture = await (
+    await page.request.get("/api/provider-fixture")
+  ).json();
+  await page
+    .getByLabel("Model provider", { exact: true })
+    .selectOption("ollama");
+  await page
+    .getByLabel("API base URL", { exact: true })
+    .fill(fixture.ollama_url);
+  await page.getByRole("button", { name: "Connect and load models" }).click();
+  await page
+    .getByLabel("Available models", { exact: true })
+    .selectOption("synthetic-ollama:latest");
+  await page
+    .getByRole("combobox", { name: "Chat routing", exact: true })
+    .selectOption("orchestrator");
+  await page
+    .getByLabel("Orchestrator default model")
+    .selectOption("synthetic-devstral:latest");
+  await page
+    .getByRole("button", { name: "Save connection", exact: true })
+    .click();
+  await expect(
+    page.getByText(
+      "Chat model settings saved. Return to Workspace to send a message.",
+      { exact: true },
+    ),
+  ).toBeVisible();
   await expect(page.getByLabel("Model provider", { exact: true })).toHaveValue(
     "ollama",
   );
@@ -918,6 +956,7 @@ test("verified search key enables bounded local-model search with persistent sou
       exact: true,
     }),
   ).toBeVisible();
+  await page.getByRole("button", { name: /^Search options:/ }).click();
   await expect(
     page.getByText(/Automatic web search.*2 \/ 2 today/),
   ).toBeVisible();

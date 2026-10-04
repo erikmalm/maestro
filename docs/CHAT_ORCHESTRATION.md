@@ -1,6 +1,6 @@
 # Chat assessment and delegation
 
-Proposed behavior, 2026-10-04. This document describes the next chat workflow; it is not implemented yet.
+Design updated 2026-10-04. Local coordinator-model selection is implemented. The separate assessment, durable progress and specialist workflow below remain proposed.
 
 Each user message should first reach a coordinator that assesses the request and chooses how to handle it. The coordinator can answer directly, ask a necessary clarification, or assign a bounded task to an available specialist. The user sees useful progress as work happens and receives one coherent answer in the original conversation.
 
@@ -8,9 +8,11 @@ The first implementation should use local Ollama, one specialist at most, and se
 
 ## Current behavior
 
-The chat UI submits `role: chat` to `POST /api/chat`, which waits for `Provider.chat` to finish. The selected model receives conversation context and optional private memory. Optional web search is the only model-selected tool. The browser reveals the completed reply progressively; this is not provider streaming or live execution progress.
+The chat UI submits `role: chat` to `POST /api/chat`, which waits for `Provider.chat` to finish. Local **Chat routing** chooses the normal chat model or configured installed orchestrator model, with chat-model fallback for a blank orchestrator choice. An explicit per-message model overrides that route. Existing configurations default to `direct`; `orchestrator` applies to local Ollama only. The reply and ledger record the actual selected model.
 
-Background reflection has its own fixed formation and review workflow. It can create attributed to-dos, but those records do not execute. The orchestrator model setting is a saved preference, not an active delegation service. See the [architecture](ARCHITECTURE.md) and [development plan](../DEVELOPMENT_PLAN.md).
+The selected model receives conversation context and optional private memory, chooses whether to use the available source tool and writes the answer. Web search or saved-source lookup uses at most one tool round and two answer calls sharing the existing output allowance and generation slot. Local follow-ups can receive bounded server-authored prior-source evidence without another hosted search. Model selection does not add a separate typed assessment call or a worker handoff. The browser reveals the completed reply progressively; provider streaming and durable live stage events remain planned.
+
+Background reflection has its own fixed formation and review workflow. It can create attributed to-dos, but those records do not execute. The coordinator route is a synchronous chat option; general delegation is unavailable. See the [architecture](ARCHITECTURE.md) and [development plan](../DEVELOPMENT_PLAN.md).
 
 ## Proposed user experience
 
@@ -61,7 +63,7 @@ Prefer direct answers for ordinary conversation, explanations, and simple edits.
 
 Use a small typed decision, not a free-form plan or a numerical confidence threshold. The backend checks the route, capabilities, model availability, context permissions, and remaining allowance before acting. User-provided text and retrieved content cannot add capabilities or increase allowances. An unavailable or malformed delegation decision never launches work: answer directly if that still satisfies the request, otherwise explain the missing capability. Record the failed assessment and its usage; do not retry indefinitely.
 
-The assessment must receive enough context to choose a route without repeatedly reprocessing the entire history. Start with the selected chat model for both assessment and direct replies to avoid unnecessary model switches. A separate coordinator model can later use the saved orchestrator preference when explicitly configured and supported. The composer model remains the direct-answer and final-answer model; specialist choices are visible in progress details.
+The planned assessment must receive enough context to choose a route without repeatedly reprocessing the entire history. Start with the model selected by the current direct/orchestrator setting or per-message override for both assessment and replies, avoiding unnecessary switches. A later increment may separate assessment and answer models when measurements justify it. Capture these choices on the run; specialist choices become visible in its progress details.
 
 This adds an inference call before an ordinary answer. Measure the latency and routing benefit before choosing a different default model or raising the assessment allowance. The assessment, reply, optional search, and title all consume the same run allowance and usage ledger. Reserve enough of the allowance for a final answer before starting a child.
 

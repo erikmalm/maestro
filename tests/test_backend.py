@@ -63,7 +63,7 @@ class WorkspaceTests(unittest.TestCase):
         with patch.object(Provider, "chat") as generate:
             response = self.client.post("/api/chat", headers=self.headers, json={"chat_id": chat_id, "text": text})
             self.assertEqual(response.status_code, 200, response.text)
-            generate.assert_called_once_with(text, chat_id, "", "chat")
+            generate.assert_called_once_with(text, chat_id, "", "chat", "prefer_saved")
             too_long = self.client.post("/api/chat", headers=self.headers, json={"chat_id": chat_id, "text": text + "a"})
             self.assertEqual(too_long.status_code, 422, too_long.text)
             self.assertEqual(generate.call_count, 1)

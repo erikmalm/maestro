@@ -11,6 +11,7 @@ param(
     [string]$OllamaUrl = 'http://host.containers.internal:11434',
     [ValidatePattern('^[a-zA-Z0-9][a-zA-Z0-9_.-]*$')][string]$ProviderSecret,
     [ValidatePattern('^[a-zA-Z0-9][a-zA-Z0-9_.-]*$')][string]$SearchSecret,
+    [string]$ContextArchivePath,
     [string]$ApiKeyUrl = 'https://api.openai.com/v1'
 )
 
@@ -34,6 +35,46 @@ function Get-OwnedContainer {
         throw "Container $Name is not owned by this launcher with volume $volumeName."
     }
     return $container
+}
+function Get-SelectedLocalMachine {
+    $machine = @(Invoke-Podman machine inspect | ConvertFrom-Json)[0]
+    if ($machine.State -ne 'running' -or $machine.SSHConfig.RemoteUsername -notmatch '^[a-zA-Z0-9_.-]+$') { throw 'Start the default Podman machine before using -Tunnel or -ContextArchivePath.' }
+    $connectionUrl = $env:CONTAINER_HOST
+    if ($env:CONTAINER_CONNECTION -or -not $connectionUrl) {
+        $connections = Invoke-Podman system connection list --format json | ConvertFrom-Json
+        $connection = @($connections | Where-Object { if ($env:CONTAINER_CONNECTION) { $_.Name -ceq $env:CONTAINER_CONNECTION } else { $_.Default } })[0]
+        $connectionUrl = $connection.URI
+    }
+    try { $endpoint = [uri]$connectionUrl } catch { throw 'Could not read the active Podman connection.' }
+    if ($endpoint.Scheme -ne 'ssh' -or $endpoint.Host -notin @('127.0.0.1', 'localhost', '[::1]') -or $endpoint.Port -ne $machine.SSHConfig.Port) {
+        throw 'Tunnel and archive mounting require the active Podman connection to use the default machine.'
+    }
+    return $machine
+}
+function Get-ArchiveMountSource($directory, $machine) {
+    if ($env:OS -ne 'Windows_NT' -or (Split-Path -Leaf $machine.ConfigDir.Path) -ne 'wsl') {
+        throw '-ContextArchivePath currently requires a local Windows WSL Podman machine.'
+    }
+    try { $item = Get-Item -LiteralPath $directory -Force } catch { throw 'Choose an existing directory for -ContextArchivePath; the launcher does not create it.' }
+    if ($item.PSProvider.Name -ne 'FileSystem' -or -not $item.PSIsContainer) { throw 'Choose an existing filesystem directory for -ContextArchivePath.' }
+    $absolute = $item.FullName.TrimEnd('\')
+    if ($absolute -notmatch '^[a-zA-Z]:\\' -or $absolute.Substring(2) -match '[:\r\n]') { throw 'Choose a local Windows drive directory for -ContextArchivePath; UNC and device paths are unsupported.' }
+    $repoAbsolute = [IO.Path]::GetFullPath($repoDirectory).TrimEnd('\')
+    if ($absolute -eq $repoAbsolute -or $absolute.StartsWith($repoAbsolute + '\', [StringComparison]::OrdinalIgnoreCase)) {
+        throw 'Choose -ContextArchivePath outside the Git checkout.'
+    }
+    for ($ancestor = $item; $ancestor; $ancestor = $ancestor.Parent) {
+        if ($ancestor.LinkType -in @('SymbolicLink', 'Junction')) { throw 'Choose -ContextArchivePath without symbolic links or junctions.' }
+    }
+    $mapped = '/mnt/' + $absolute.Substring(0, 1).ToLowerInvariant() + '/' + $absolute.Substring(3).Replace('\', '/')
+    # Podman executes SSH commands in a shell: quote the path as one literal operand.
+    $quoted = "'" + $mapped.Replace("'", "'\''") + "'"
+    try {
+        $null = Invoke-Podman machine ssh $machine.Name "test -d $quoted"
+        $canonical = @(Invoke-Podman machine ssh $machine.Name "readlink -e -- $quoted")
+    } catch { throw 'The selected archive directory is unavailable in the default WSL Podman machine.' }
+    if ($canonical.Count -ne 1 -or $canonical[0] -cne $mapped) { throw 'The archive directory resolves differently inside the Podman machine; choose a direct Windows directory.' }
+    return $mapped
 }
 function Wait-Ready($container) {
     $launchId = ($container.Config.Env | Where-Object { $_.StartsWith('MAESTRO_LAUNCH_ID=') }) -replace '^MAESTRO_LAUNCH_ID=', ''
@@ -96,19 +137,8 @@ if ($Action -eq 'build') {
     Invoke-Podman build --format docker --http-proxy=false --file (Join-Path $repoDirectory 'Containerfile') --tag $Image $repoDirectory
     return
 }
-if ($Action -eq 'start' -and $Tunnel) {
-    $machine = @(Invoke-Podman machine inspect | ConvertFrom-Json)[0]
-    if ($machine.State -ne 'running' -or $machine.SSHConfig.RemoteUsername -notmatch '^[a-zA-Z0-9_.-]+$') { throw 'Start the default Podman machine before using -Tunnel.' }
-    $connectionUrl = $env:CONTAINER_HOST
-    if ($env:CONTAINER_CONNECTION -or -not $connectionUrl) {
-        $connections = Invoke-Podman system connection list --format json | ConvertFrom-Json
-        $connection = @($connections | Where-Object { if ($env:CONTAINER_CONNECTION) { $_.Name -ceq $env:CONTAINER_CONNECTION } else { $_.Default } })[0]
-        $connectionUrl = $connection.URI
-    }
-    try { $endpoint = [uri]$connectionUrl } catch { throw 'Could not read the active Podman connection.' }
-    if ($endpoint.Scheme -ne 'ssh' -or $endpoint.Host -notin @('127.0.0.1', 'localhost', '[::1]') -or $endpoint.Port -ne $machine.SSHConfig.Port) {
-        throw 'Tunnel mode requires the active Podman connection to use the default machine.'
-    }
+if ($Action -eq 'start' -and ($Tunnel -or $ContextArchivePath)) {
+    $machine = Get-SelectedLocalMachine
 }
 $container = Get-OwnedContainer
 if ($Action -eq 'status') {
@@ -134,6 +164,10 @@ $runOptions = $networkOptions + @('--volume', "${volumeName}:/data:U",
     '--pids-limit', '64', '--read-only', '--tmpfs', '/tmp:rw,noexec,nosuid,size=64m,mode=1777', '--cap-drop', 'all', '--security-opt', 'no-new-privileges', '--umask', '0077',
     '--log-driver', 'k8s-file', '--log-opt', 'max-size=10mb', '--restart', 'unless-stopped', '--http-proxy=false',
     '--env', "MAESTRO_PORT=$Port", '--env', "MAESTRO_OLLAMA_URL=$OllamaUrl")
+if ($ContextArchivePath) {
+    $archiveSource = Get-ArchiveMountSource $ContextArchivePath $machine
+    $runOptions += @('--volume', "${archiveSource}:/archive:rw,noexec,nosuid,nodev", '--env', 'MAESTRO_CONTEXT_ARCHIVE_DIR=/archive')
+}
 if ($ProviderSecret) {
     $runOptions += @('--secret', "$ProviderSecret,target=maestro-provider-key,uid=1000,gid=1000,mode=0400",
         '--env', 'MAESTRO_API_KEY_FILE=/run/secrets/maestro-provider-key', '--env', "MAESTRO_API_KEY_URL=$ApiKeyUrl")

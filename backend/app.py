@@ -1,6 +1,6 @@
 """Local workspace with configurable live chat and persistent to-dos."""
 
-from contextlib import closing, contextmanager, asynccontextmanager
+from contextlib import closing, contextmanager, asynccontextmanager, ExitStack
 import asyncio
 from datetime import datetime
 import hashlib
@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Literal
 import secrets
 import sqlite3
+import threading
 import uuid
 from zoneinfo import ZoneInfo
 
@@ -18,12 +19,13 @@ from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 from backend.provider import Provider
 from backend import credentials
 from backend.capabilities import CAPABILITIES
 from backend.web_search import WebSearch, ENDPOINT as SEARCH_ENDPOINT
+from backend.context_store import ContextStore, validate_search, decoded_url_variants
 from backend.storage import workspace_owner
 from backend.memory import MAX_CONTENT, MemoryStore
 from backend.work_config import WorkConfig, config_value
@@ -152,6 +154,7 @@ def snapshot(state: dict, chat_id: str | None = None) -> dict:
         "usage": service.usage(provider_state),
         "provider": service.status(provider_state),
         "web_search": WebSearch(DATABASE, TIMEZONE).status(),
+        "context_archive": context_store().status(),
         "memories": MemoryStore(DATABASE, TIMEZONE).list(),
         "work": work_status(state),
         "capabilities": {"mode": "local", **CAPABILITIES, "secure_credentials": os.name == "nt"},
@@ -181,6 +184,7 @@ class TextInput(StrictModel):
     chat_id: str | None = Field(default=None, min_length=1, max_length=100)
     model: str = Field(default="", max_length=200, pattern=r"^[A-Za-z0-9_./:-]*$")
     role: Literal["chat", "orchestrator"] = "chat"
+    context_mode: Literal["prefer_saved", "refresh", "saved_only"] = "prefer_saved"
 
 
 class ChatTitleInput(StrictModel):
@@ -213,6 +217,7 @@ class ProviderConfig(StrictModel):
     protocol: Literal["responses", "chat_completions", "ollama"] = "responses"
     model: str = Field(default="", max_length=200, pattern=r"^[A-Za-z0-9_./:-]*$")
     orchestrator_model: str = Field(default="", max_length=200, pattern=r"^[A-Za-z0-9_./:-]*$")
+    chat_routing: Literal["direct", "orchestrator"] = "direct"
     input_usd_per_million: float = Field(default=0, ge=0, le=10000, allow_inf_nan=False)
     output_usd_per_million: float = Field(default=0, ge=0, le=10000, allow_inf_nan=False)
     pricing_verified: bool = False
@@ -240,8 +245,52 @@ class WebSearchSetup(StrictModel):
     persist: bool = True
 
 
+class ContextArchiveConfig(StrictModel):
+    enabled: bool = Field(default=False, strict=True)
+    capture_policy: Literal["approved_sources", "all_public"] = "approved_sources"
+    public_sources: list[str] = Field(default_factory=list, max_length=100)
+    reuse_hours: int = Field(default=24, ge=1, le=168, strict=True)
+    max_bytes: int = Field(default=10737418240, ge=1048576, le=107374182400, strict=True)
+    max_items: int = Field(default=200000, ge=100, le=200000, strict=True)
+
+
+class ContextRebuildInput(StrictModel):
+    limit: int = Field(default=1000, ge=1, le=5000, strict=True)
+    continuation: str | None = Field(default=None, pattern=r"^[a-f0-9]{32}$")
+
+
+class ContextSearchInput(StrictModel):
+    query: str = Field(min_length=1, max_length=512)
+    limit: int = Field(default=10, ge=1, le=20, strict=True)
+    domain: str | None = Field(default=None, min_length=1, max_length=253)
+    retrieved_from: str | None = Field(default=None, pattern=r"^\d{4}-\d{2}-\d{2}$")
+    retrieved_to: str | None = Field(default=None, pattern=r"^\d{4}-\d{2}-\d{2}$")
+    allow_stale: bool = Field(default=True, strict=True)
+
+    @model_validator(mode="after")
+    def validate_lookup(self):
+        validate_search(self.query, self.limit, domain=self.domain,
+                        retrieved_from=self.retrieved_from, retrieved_to=self.retrieved_to)
+        return self
+
+
+_context_lock = threading.RLock()
+_archive_config_lock = threading.RLock()
+
+
+def context_store():
+    # The same instance owns the archive across lifespan, provider and API threads.
+    identity = (str(DATABASE.resolve()), os.environ.get("MAESTRO_CONTEXT_ARCHIVE_DIR", ""))
+    with _context_lock:
+        current = getattr(app.state, "context_store", None)
+        if current is None or getattr(app.state, "context_store_identity", None) != identity:
+            current = ContextStore(DATABASE)
+            app.state.context_store, app.state.context_store_identity = current, identity
+        return current
+
+
 def provider():
-    return Provider(DATABASE, TIMEZONE)
+    return Provider(DATABASE, TIMEZONE, context_store=context_store())
 
 
 @contextmanager
@@ -254,8 +303,19 @@ def conflict_errors():
 
 @asynccontextmanager
 async def lifespan(application):
-    with workspace_owner(DATABASE.parent):
+    with workspace_owner(DATABASE.parent), ExitStack() as archive_ownership:
         read_workspace()
+        store = context_store()
+        application.state.archive_ownership = archive_ownership
+        application.state.archive_owner = False
+        if store.status()["config"]["enabled"]:
+            try:
+                archive_ownership.enter_context(store.archive_owner())
+                store.initialize()
+                application.state.archive_owner = True
+            except (ValueError, OSError):
+                archive_ownership.close()
+                store.record_error("Saved sources are unavailable or their archive is owned by another instance. Check the archive setup before saving sources.")
         provider().recover()
         WebSearch(DATABASE, TIMEZONE).recover()
         MemoryStore(DATABASE, TIMEZONE).initialize()
@@ -269,6 +329,8 @@ async def lifespan(application):
         finally:
             stop.set()
             await worker
+            application.state.archive_ownership = None
+            application.state.archive_owner = False
 
 
 app = FastAPI(title="Maestro", docs_url=None, redoc_url=None, openapi_url=None, lifespan=lifespan)
@@ -442,8 +504,6 @@ def put_work_config(entry: WorkConfig):
         connection = provider().read_state()["config"]
         if entry.enabled and (connection["protocol"] != "ollama" or not connection["model"]):
             raise ValueError("Select a local Ollama chat model before enabling reflection.")
-        if entry.enabled and entry.auto_curate and connection["ollama_context_tokens"] < 8192:
-            raise ValueError("Automatic memory curation needs at least 8192 context tokens. Update Local worker settings first.")
         for model in (entry.reflection_model, entry.memory_model, entry.coding_model):
             safe_private_content(model)
         with workspace_transaction(with_db=True) as (state, db):
@@ -489,6 +549,83 @@ def get_web_search():
     return WebSearch(DATABASE, TIMEZONE).status()
 
 
+@app.get("/api/context")
+def get_context_archive():
+    return context_store().status()
+
+
+@app.put("/api/context")
+def configure_context_archive(entry: ContextArchiveConfig):
+    # Factory access must remain available to reflection validators holding SQLite.
+    with conflict_errors(), _archive_config_lock:
+        safe_private_content("\n".join(variant for scope in entry.public_sources
+                                       for variant in decoded_url_variants(scope)))
+        store = context_store()
+        ownership = getattr(app.state, "archive_ownership", None)
+        acquired = False
+        try:
+            if entry.enabled and ownership is not None and not getattr(app.state, "archive_owner", False):
+                ownership.enter_context(store.archive_owner())
+                acquired = True
+            result = store.configure(entry.model_dump())
+            if ownership is not None:
+                if entry.enabled:
+                    app.state.archive_owner = True
+                else:
+                    ownership.close()
+                    app.state.archive_owner = False
+            return result
+        except Exception:
+            if acquired:
+                ownership.close()
+                app.state.archive_owner = False
+            raise
+
+
+@app.post("/api/context/rebuild")
+def rebuild_context_archive(entry: ContextRebuildInput):
+    with conflict_errors():
+        return context_store().rebuild(limit=entry.limit, continuation=entry.continuation)
+
+
+@app.post("/api/context/search")
+def search_saved_context(entry: ContextSearchInput):
+    with conflict_errors():
+        store = context_store()
+        status = store.status()
+        if not status["configured"] or not status["config"]["enabled"]:
+            raise ValueError("Enable a configured saved-source archive before searching it.")
+        if not store.archive.is_dir():
+            raise ValueError("The saved-source archive directory is unavailable. Check its local storage before searching.")
+        # POST protects private terms from URL logging; lookup has no writes or inference.
+        return store.search(entry.query, entry.limit, domain=entry.domain,
+                            retrieved_from=entry.retrieved_from, retrieved_to=entry.retrieved_to,
+                            allow_stale=entry.allow_stale)
+
+
+@app.get("/api/context/sources/{capture_id}")
+def get_saved_source(capture_id: str, expected_hash: str | None = None, expected_manifest_hash: str | None = None):
+    for value in (expected_hash, expected_manifest_hash):
+        if value is not None and (len(value) != 64 or any(c not in "0123456789abcdef" for c in value)):
+            raise HTTPException(422, "Check the saved source reference and try again.")
+    try:
+        with conflict_errors():
+            return context_store().get_capture(capture_id, expected_hash=expected_hash,
+                                                expected_manifest_hash=expected_manifest_hash)
+    except KeyError:
+        raise HTTPException(404, "That saved source is unavailable or has been removed.") from None
+
+
+@app.delete("/api/context/sources/{capture_id}")
+def remove_saved_source(capture_id: str):
+    try:
+        with conflict_errors():
+            context_store().delete_capture(capture_id)
+            return context_store().status()
+    except KeyError:
+        raise HTTPException(404, "That saved source is unavailable or has been removed.") from None
+
+
 @app.put("/api/web-search")
 def configure_web_search(entry: WebSearchSetup):
     with conflict_errors():
@@ -503,7 +640,15 @@ def configure_web_search(entry: WebSearchSetup):
 def test_web_search():
     service = WebSearch(DATABASE, TIMEZONE)
     with conflict_errors():
-        service.search("Ollama official web search documentation", test=True)
+        result = service.search("Ollama official web search documentation", test=True)
+        store = context_store()
+        settings = store.status()["config"]
+        if settings["enabled"] and settings["capture_policy"] == "all_public":
+            key = credentials.read(SEARCH_ENDPOINT)[0]
+            sources = [dict(source, **flags) for source, flags in
+                       zip(result["sources"], result.get("completeness", [{}] * len(result["sources"])))]
+            store.capture(result["query"], result["at"], sources,
+                          service.read_state()["config"]["max_results"], secrets=(key or "",))
         return service.status()
 
 
@@ -588,7 +733,7 @@ def chat(entry: TextInput):
             state["chats"].append(target)
         chat_id = target["id"]
     with conflict_errors():
-        provider().chat(entry.text, chat_id, entry.model, entry.role)
+        provider().chat(entry.text, chat_id, entry.model, entry.role, entry.context_mode)
     state = read_workspace()
     return snapshot(state, chat_id if any(item["id"] == chat_id for item in state["chats"]) else None)
 

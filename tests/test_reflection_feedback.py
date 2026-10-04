@@ -205,7 +205,7 @@ class FeedbackTests(unittest.TestCase):
         self.assertEqual(self.store.status()["today_tokens"], 300)
 
     def test_review_that_cannot_fit_abstains_before_second_inference(self):
-        self.workspace["work_config"]["max_output_tokens"] = 512
+        self.workspace["work_config"].update(max_output_tokens=512, background_context_tokens=8192)
         self.save()
         with self.provider.transaction() as state:
             state["config"].update(ollama_context_tokens=8192, max_output_tokens=512)

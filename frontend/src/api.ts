@@ -13,6 +13,20 @@ export type MessageFeedback = {
   comment: string;
   updated_at: string;
 };
+export type ContextMode = "prefer_saved" | "refresh" | "saved_only";
+export type CitationSource = {
+  title: string;
+  url: string;
+  capture_id?: string;
+  content_kind?: string;
+  retrieved_at?: string;
+  published_at?: string | null;
+  modified_at?: string | null;
+  content_hash?: string;
+  manifest_hash?: string;
+  stale?: boolean;
+  archive_status?: "saved" | "not_saved" | "skipped";
+};
 export type Message = {
   id: string;
   role: "user" | "assistant";
@@ -27,8 +41,18 @@ export type Message = {
   output_tokens?: number;
   web_search?: {
     query: string;
-    at: string;
-    sources: { title: string; url: string }[];
+    at: string | null;
+    from_cache?: boolean;
+    stale?: boolean;
+    retrieval?: "exact_query" | "keyword" | "web_search";
+    filters?: {
+      domain?: string;
+      retrieved_from?: string;
+      retrieved_to?: string;
+    };
+    search_limited?: boolean;
+    archive_warning?: string;
+    sources: CitationSource[];
   };
 };
 export type Limits = {
@@ -69,6 +93,7 @@ export type Workspace = {
   };
   provider: ProviderStatus;
   web_search: WebSearchStatus;
+  context_archive?: ContextArchiveStatus;
   capabilities: {
     mode: "local";
     live_ai: boolean;
@@ -181,10 +206,12 @@ export const sendMessage = (
   text: string,
   chat_id?: string | null,
   model = "",
+  context_mode: ContextMode = "prefer_saved",
 ) =>
   request<Workspace>("/chat", "POST", {
     text,
     role: "chat",
+    context_mode,
     ...(model ? { model } : {}),
     ...(chat_id ? { chat_id } : {}),
   });
@@ -196,6 +223,7 @@ export type ProviderConfig = {
   protocol: "responses" | "chat_completions" | "ollama";
   model: string;
   orchestrator_model: string;
+  chat_routing?: "direct" | "orchestrator";
   input_usd_per_million: number;
   output_usd_per_million: number;
   pricing_verified: boolean;
@@ -249,6 +277,8 @@ export type WebSearchStatus = CredentialStatus & {
   remaining_today: number;
   paused_until: string | null;
   tested_at: string | null;
+  ready?: boolean;
+  unavailable_reason?: string | null;
 };
 export const loadWebSearch = () => request<WebSearchStatus>("/web-search");
 export const saveWebSearch = (
@@ -261,6 +291,148 @@ export const testWebSearch = () =>
   request<WebSearchStatus>("/web-search/test", "POST", {});
 export const deleteWebSearchKey = () =>
   request<WebSearchStatus>("/web-search/key", "DELETE");
+
+export type ContextArchiveConfig = {
+  enabled: boolean;
+  capture_policy?: "approved_sources" | "all_public";
+  public_sources: string[];
+  reuse_hours: number;
+  max_bytes: number;
+  max_items: number;
+};
+export type ContextArchiveStatus = {
+  configured: boolean;
+  available: boolean;
+  path: string | null;
+  config: ContextArchiveConfig;
+  indexed_count: number;
+  missing_count: number;
+  corrupt_count: number;
+  archive_bytes: number;
+  archive_items: number;
+  last_error: string | null;
+  last_indexed_at: string | null;
+  rebuild_progress?: {
+    id: string;
+    processed: number;
+    total: number;
+    complete: boolean;
+  } | null;
+  last_capture?: {
+    retrieved_at: string;
+    sources_received: number;
+    sources_saved: number;
+    excerpt_bytes: number;
+    manifest_bytes: number;
+    object_bytes: number;
+    new_bytes: number;
+  } | null;
+};
+export type ContextCapture = {
+  capture_id: string;
+  title: string;
+  url: string;
+  content: string;
+  content_hash: string;
+  manifest_hash: string;
+  content_kind: string;
+  retrieved_at: string;
+  published_at: string | null;
+  modified_at: string | null;
+  completeness: { maestro_truncated: boolean; full_page: false };
+  archive_status: "saved";
+  stale?: boolean;
+};
+export type ContextSearchInput = {
+  query: string;
+  limit?: number;
+  domain?: string;
+  retrieved_from?: string;
+  retrieved_to?: string;
+  allow_stale?: boolean;
+};
+export type ContextSearchResult = {
+  query: string;
+  at: string | null;
+  sources: ContextCapture[];
+  from_cache: true;
+  stale: boolean;
+  retrieval: "keyword";
+  search_limited?: boolean;
+};
+export const searchContextArchive = (input: ContextSearchInput) =>
+  request<ContextSearchResult>("/context/search", "POST", input);
+export const loadContextArchive = () =>
+  request<ContextArchiveStatus>("/context");
+export const saveContextArchive = (config: ContextArchiveConfig) =>
+  request<ContextArchiveStatus>("/context", "PUT", config);
+export async function rebuildContextArchive(
+  onProgress?: (status: ContextArchiveStatus) => boolean | void,
+) {
+  let previous:
+    NonNullable<ContextArchiveStatus["rebuild_progress"]> | undefined;
+  for (;;) {
+    const status = await request<ContextArchiveStatus>(
+      "/context/rebuild",
+      "POST",
+      {
+        limit: 1000,
+        ...(previous ? { continuation: previous.id } : {}),
+      },
+    );
+    const progress = status.rebuild_progress;
+    if (!progress) {
+      if (previous)
+        throw new Error(
+          "Source index rebuild progress changed. Refresh the archive status and retry.",
+        );
+      onProgress?.(status);
+      return status;
+    }
+    if (
+      typeof progress.id !== "string" ||
+      !/^[a-f0-9]{32}$/.test(progress.id) ||
+      !Number.isInteger(progress.processed) ||
+      !Number.isInteger(progress.total) ||
+      progress.processed < 0 ||
+      progress.total < 0 ||
+      progress.total > 200000 ||
+      progress.processed > progress.total ||
+      typeof progress.complete !== "boolean" ||
+      progress.complete !== (progress.processed === progress.total) ||
+      (!progress.complete && progress.processed === 0) ||
+      (previous &&
+        (progress.id !== previous.id ||
+          progress.total !== previous.total ||
+          progress.processed <= previous.processed))
+    )
+      throw new Error(
+        "Source index rebuild did not make valid progress. Refresh the archive status and retry.",
+      );
+    const proceed = onProgress?.(status);
+    if (progress.complete || proceed === false) return status;
+    previous = progress;
+  }
+}
+export const loadContextCapture = (
+  id: string,
+  expectedHash?: string,
+  expectedManifestHash?: string,
+) => {
+  const parameters = new URLSearchParams();
+  if (expectedHash !== undefined) parameters.set("expected_hash", expectedHash);
+  if (expectedManifestHash !== undefined)
+    parameters.set("expected_manifest_hash", expectedManifestHash);
+  const query = parameters.toString();
+  return request<ContextCapture>(
+    `/context/sources/${encodeURIComponent(id)}${query ? `?${query}` : ""}`,
+  );
+};
+export const deleteContextCapture = (id: string) =>
+  request<ContextArchiveStatus>(
+    `/context/sources/${encodeURIComponent(id)}`,
+    "DELETE",
+  );
 
 export type Memory = {
   id: string;

@@ -11,6 +11,7 @@ import {
   ChevronDown,
   CheckSquare,
   Coins,
+  Globe,
   LoaderCircle,
   Menu,
   MessageCircle,
@@ -25,6 +26,10 @@ import {
 } from "lucide-react";
 import * as api from "./api";
 import type {
+  ContextArchiveStatus,
+  ContextCapture,
+  ContextMode,
+  ContextSearchResult,
   Limits,
   LocalRequest,
   MessageFeedback,
@@ -32,12 +37,19 @@ import type {
   WorkConfig,
   WorkStatus,
   Workspace,
+  WebSearchStatus,
 } from "./api";
 import ProviderSetup from "./ProviderSetup";
 import OllamaSearchSetup from "./OllamaSearchSetup";
+import { NumberFields, useSetupForm } from "./SetupForm";
 
 type Page = "workspace" | "tasks" | "memory" | "settings";
 type Panel = "task" | "usage" | "rename-chat" | "delete-chat" | null;
+type SavedSourceSelection = {
+  id: string;
+  expectedHash?: string;
+  expectedManifestHash?: string;
+};
 const money = (value: number) =>
   `$${value.toFixed(value > 0 && value < 0.01 ? 4 : 2)}`;
 const tokens = (value: number) =>
@@ -58,6 +70,331 @@ function sourceURL(value: string) {
   }
 }
 
+function sourceDate(value: string | null) {
+  if (value === null) return "date unknown";
+  if (/^\d{4}-\d{2}-\d{2}$/.test(value)) return value;
+  const date = new Date(value);
+  return Number.isFinite(date.getTime()) ? date.toLocaleString() : value;
+}
+
+function archiveSize(value: number) {
+  if (value < 1024) return `${value.toLocaleString()} B`;
+  if (value < 1048576) return `${(value / 1024).toFixed(1)} KiB`;
+  if (value < 1073741824) return `${(value / 1048576).toFixed(1)} MiB`;
+  return `${(value / 1073741824).toFixed(1)} GiB`;
+}
+
+function ArchiveAccounting({
+  status,
+  compact = false,
+}: {
+  status: ContextArchiveStatus;
+  compact?: boolean;
+}) {
+  const capture = status.last_capture;
+  return (
+    <div className="archive-accounting" aria-label="Archive storage usage">
+      <p>
+        {status.indexed_count.toLocaleString()} saved source snapshots
+        {!compact &&
+          ` · ${status.missing_count} missing · ${status.corrupt_count} corrupt`}
+      </p>
+      <p>
+        Archive storage: {archiveSize(status.archive_bytes)}{" "}
+        {!compact && `(${status.archive_bytes.toLocaleString()} bytes) `}of{" "}
+        {archiveSize(status.config.max_bytes)} ·{" "}
+        {status.archive_items.toLocaleString()} of{" "}
+        {status.config.max_items.toLocaleString()} files/directories
+      </p>
+      {capture && (
+        <>
+          <p>
+            Last fresh retrieval {sourceDate(capture.retrieved_at)} ·{" "}
+            {capture.sources_saved} of {capture.sources_received} results saved
+            · {archiveSize(capture.excerpt_bytes)} excerpt text ·{" "}
+            {archiveSize(capture.new_bytes)} new source files
+          </p>
+          {!compact && (
+            <p>
+              New text objects: {archiveSize(capture.object_bytes)} · New
+              snapshot manifests: {archiveSize(capture.manifest_bytes)}. New
+              source-file size excludes archive control files and the private
+              index; total archive storage includes control files.
+            </p>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
+function onlineSearchReadiness(status: WebSearchStatus) {
+  let reason: string | null = null;
+  if (!status.credentials_present)
+    reason = "Add and test an Ollama search API key in Settings.";
+  else if (!status.config.enabled)
+    reason = "Enable Optional web search in Settings.";
+  else if (!status.tested_at)
+    reason = "Test the search key in Settings before using online search.";
+  else if (status.remaining_today <= 0)
+    reason =
+      "The daily online search allowance is used up. Adjust the allowance in Settings or wait until tomorrow.";
+  else if (status.paused_until && Date.parse(status.paused_until) > Date.now())
+    reason = `Online search is paused after a rate limit until ${sourceDate(status.paused_until)}.`;
+  const ready = status.ready ?? reason === null;
+  return {
+    ready,
+    reason: ready
+      ? null
+      : (status.unavailable_reason ??
+        reason ??
+        "Online search is unavailable. Open Settings to check the search setup."),
+  };
+}
+
+function SearchOptions({
+  status,
+  archive,
+  mode,
+  onMode,
+  memoryDerived,
+  busy,
+  onSettings,
+  onManageSources,
+  onNewChat,
+}: {
+  status: WebSearchStatus;
+  archive?: ContextArchiveStatus;
+  mode: ContextMode;
+  onMode: (mode: ContextMode) => void;
+  memoryDerived: boolean;
+  busy: boolean;
+  onSettings: () => void;
+  onManageSources: () => void;
+  onNewChat: () => void;
+}) {
+  const popup = useRef<HTMLDivElement>(null);
+  const trigger = useRef<HTMLButtonElement>(null);
+  const [expanded, setExpanded] = useState(false);
+  const online = onlineSearchReadiness(status);
+  const savedAvailable = !!archive?.configured && archive.config.enabled;
+  const publicPolicy = archive?.config.capture_policy === "all_public";
+  const modeLabel =
+    mode === "saved_only"
+      ? "Saved only"
+      : mode === "refresh"
+        ? "Fresh search"
+        : "Prefer saved";
+  const readiness = memoryDerived
+    ? "online search blocked in this chat"
+    : mode === "saved_only"
+      ? "online search off"
+      : online.ready
+        ? "online search ready"
+        : "online search unavailable";
+  const indicator =
+    mode === "saved_only"
+      ? "saved"
+      : memoryDerived || !online.ready
+        ? "unavailable"
+        : "ready";
+  const saving = !archive?.configured
+    ? "Source saving is not configured."
+    : !archive.config.enabled
+      ? "Source saving is off."
+      : !publicPolicy && !archive.config.public_sources.length
+        ? "Source saving needs approved public sources."
+        : !archive.available
+          ? "Source saving is unavailable."
+          : publicPolicy
+            ? "Saving eligible public search results."
+            : "Saving approved public sources.";
+  function close() {
+    popup.current?.hidePopover();
+    trigger.current?.focus();
+  }
+  return (
+    <div className="search-control">
+      <button
+        ref={trigger}
+        className="search-trigger"
+        type="button"
+        popoverTarget="chat-search-options"
+        aria-label={`Search options: ${modeLabel}; ${readiness}`}
+        title={`Search options: ${modeLabel}; ${readiness}`}
+        aria-haspopup="dialog"
+        aria-expanded={expanded}
+        aria-controls="chat-search-options"
+      >
+        <Globe size={18} aria-hidden="true" />
+        <span className={`search-indicator ${indicator}`} aria-hidden="true" />
+      </button>
+      <div
+        id="chat-search-options"
+        className="search-options"
+        ref={popup}
+        popover="auto"
+        role="dialog"
+        aria-labelledby="search-options-title"
+        onBeforeToggle={(event) =>
+          setExpanded((event.nativeEvent as ToggleEvent).newState === "open")
+        }
+        onToggle={(event) => {
+          const opened = (event.nativeEvent as ToggleEvent).newState === "open";
+          if (opened)
+            popup.current
+              ?.querySelector<HTMLElement>("select, button")
+              ?.focus();
+        }}
+      >
+        <div className="search-options-heading">
+          <h3 id="search-options-title">Search options</h3>
+          <button
+            className="icon-button"
+            type="button"
+            onClick={close}
+            aria-label="Close search options"
+          >
+            <X size={16} />
+          </button>
+        </div>
+        {archive && (
+          <>
+            <label className="context-mode-control">
+              Source mode
+              <select
+                value={mode}
+                disabled={busy}
+                onChange={(event) => onMode(event.target.value as ContextMode)}
+              >
+                <option value="prefer_saved">Prefer saved</option>
+                <option value="refresh">Fresh search</option>
+                <option value="saved_only">Saved only</option>
+              </select>
+            </label>
+            <p>
+              {mode === "saved_only"
+                ? "Saved only uses archived evidence without online search."
+                : mode === "refresh"
+                  ? "Fresh search requires ready online search and a chat without replies informed by private memory."
+                  : "Prefer saved reuses archived evidence locally. Current information, including weather, needs fresh search when ready and permitted for this chat."}
+            </p>
+          </>
+        )}
+        <div
+          className="search-readiness"
+          role="status"
+          aria-label="Online search readiness"
+        >
+          <p>
+            <strong>
+              {memoryDerived
+                ? "Online search is blocked in this chat."
+                : mode === "saved_only"
+                  ? "Saved only keeps online search off."
+                  : online.ready
+                    ? "Online search is ready."
+                    : "Online search is unavailable."}
+            </strong>
+          </p>
+          {memoryDerived && (
+            <p>
+              Earlier replies used private memory. Start a new chat to use
+              online search.
+            </p>
+          )}
+          {!online.ready && <p>{online.reason}</p>}
+          {!online.ready &&
+            status.paused_until &&
+            Date.parse(status.paused_until) > Date.now() && (
+              <p>Cooldown ends {sourceDate(status.paused_until)}.</p>
+            )}
+          {online.ready && (memoryDerived || mode === "saved_only") && (
+            <p>
+              The online search setup is ready for a chat and source mode that
+              permit it.
+            </p>
+          )}
+          {savedAvailable && (!online.ready || memoryDerived) && (
+            <p>
+              {mode === "refresh"
+                ? "Choose Prefer saved or Saved only to use saved public sources locally."
+                : "Saved public sources remain available locally."}
+            </p>
+          )}
+          <div className="search-readiness-actions">
+            <button
+              className="button subtle"
+              type="button"
+              onClick={() => {
+                close();
+                onSettings();
+              }}
+            >
+              Open Settings
+            </button>
+            {memoryDerived && (
+              <button
+                className="button secondary"
+                type="button"
+                disabled={busy}
+                onClick={onNewChat}
+              >
+                <Plus size={14} />
+                New chat for online search
+              </button>
+            )}
+          </div>
+        </div>
+        {status.config.enabled && !memoryDerived && mode !== "saved_only" && (
+          <p>
+            Automatic web search · one search maximum per message ·{" "}
+            {status.searches_today} / {status.config.daily_limit} today. Queries
+            go to Ollama.com.
+          </p>
+        )}
+        <div
+          className="source-saving-status"
+          role="status"
+          aria-label="Source saving status"
+        >
+          <p>
+            <strong>{saving}</strong>
+          </p>
+          <p>
+            Search can work without saving.{" "}
+            {publicPolicy
+              ? "When enabled, eligible public results are saved automatically as dated search excerpts."
+              : "Only results from approved public URLs are archived."}
+          </p>
+          {archive?.configured && (
+            <>
+              <ArchiveAccounting status={archive} compact />
+              {!publicPolicy && (
+                <p>
+                  {archive.config.public_sources.length} approved public{" "}
+                  {archive.config.public_sources.length === 1 ? "URL" : "URLs"}
+                </p>
+              )}
+            </>
+          )}
+          {archive?.last_error && <p>{archive.last_error}</p>}
+          <button
+            className="button subtle"
+            type="button"
+            onClick={() => {
+              close();
+              onManageSources();
+            }}
+          >
+            Manage saved sources
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function Modal({
   title,
   children,
@@ -70,8 +407,12 @@ function Modal({
   const dialog = useRef<HTMLDialogElement>(null);
   useEffect(() => {
     const element = dialog.current;
+    const opener = document.activeElement;
     element?.showModal();
-    return () => element?.close();
+    return () => {
+      element?.close();
+      if (opener instanceof HTMLElement && opener.isConnected) opener.focus();
+    };
   }, []);
   return (
     <dialog
@@ -98,6 +439,678 @@ function Modal({
       </div>
       {children}
     </dialog>
+  );
+}
+
+function ContextArchiveSetup({
+  initialStatus,
+  onAction,
+  active,
+  onOpenSource,
+  removedCaptureIds,
+}: {
+  initialStatus: ContextArchiveStatus;
+  active: boolean;
+  onOpenSource: (source: SavedSourceSelection) => void;
+  removedCaptureIds: ReadonlySet<string>;
+  onAction: (
+    action: () => Promise<ContextArchiveStatus>,
+  ) => Promise<ContextArchiveStatus>;
+}) {
+  const { status, config, setConfig, busy, error, notice, act } = useSetupForm(
+    initialStatus,
+    () => {},
+    "Could not update saved web sources.",
+  );
+  const [rebuildProgress, setRebuildProgress] = useState<
+    ContextArchiveStatus["rebuild_progress"] | undefined
+  >(undefined);
+  const [pauseRequested, setPauseRequested] = useState(false);
+  const rebuildContinue = useRef(false);
+  const rebuildActive = useRef(active);
+  const mounted = useRef(true);
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+      rebuildContinue.current = false;
+    };
+  }, []);
+  useEffect(() => {
+    rebuildActive.current = active;
+    if (!active) rebuildContinue.current = false;
+  }, [active]);
+  const progress =
+    rebuildProgress === undefined ? status.rebuild_progress : rebuildProgress;
+  async function rebuild() {
+    if (busy) return;
+    rebuildContinue.current = true;
+    setPauseRequested(false);
+    await act(
+      "rebuild",
+      () =>
+        onAction(() =>
+          api.rebuildContextArchive((next) => {
+            if (!mounted.current || !rebuildActive.current) return false;
+            setRebuildProgress(next.rebuild_progress);
+            return rebuildContinue.current;
+          }),
+        ),
+      "",
+      () => onAction(api.loadContextArchive),
+    );
+    if (mounted.current) setRebuildProgress(undefined);
+  }
+  return (
+    <section className="card reflection-box context-archive-setup">
+      <div className="reflection-title">
+        <div>
+          <h2 id="saved-web-sources">Saved web sources</h2>
+          <p>Reuse dated public search excerpts before searching again.</p>
+        </div>
+        <span className="badge neutral">
+          {!status.configured
+            ? "Not configured"
+            : !status.available
+              ? "Unavailable"
+              : status.config.enabled
+                ? "Enabled"
+                : "Disabled"}
+        </span>
+      </div>
+      {error && (
+        <div className="error-banner" role="alert">
+          {error}
+        </div>
+      )}
+      {notice && <p role="status">{notice}</p>}
+      <p className="reflection-note archive-path">
+        {status.configured ? (
+          <>Archive folder: {status.path}</>
+        ) : (
+          "An archive folder has not been configured for this Maestro server."
+        )}
+      </p>
+      {status.last_error && (
+        <p className="reflection-note" role="status">
+          {status.last_error}
+        </p>
+      )}
+      <ArchiveAccounting status={status} />
+      <form
+        onSubmit={(event) => {
+          event.preventDefault();
+          if (busy) return;
+          void act(
+            "save",
+            () =>
+              onAction(() =>
+                api.saveContextArchive({
+                  ...config,
+                  public_sources: config.public_sources
+                    .map((value) => value.trim())
+                    .filter(Boolean),
+                }),
+              ),
+            "Saved source settings updated.",
+            () => onAction(api.loadContextArchive),
+          );
+        }}
+      >
+        <label className="reflection-check">
+          <input
+            type="checkbox"
+            checked={config.enabled}
+            disabled={!!busy || (!config.enabled && !status.configured)}
+            onChange={(event) => setConfig({ enabled: event.target.checked })}
+          />
+          Save and reuse public search results
+        </label>
+        <label>
+          Source saving policy
+          <select
+            value={config.capture_policy ?? "approved_sources"}
+            onChange={(event) =>
+              setConfig({
+                capture_policy: event.target.value as
+                  "all_public" | "approved_sources",
+              })
+            }
+          >
+            <option value="all_public">
+              Save eligible public search results
+            </option>
+            <option value="approved_sources">Only approved URLs</option>
+          </select>
+        </label>
+        {(config.capture_policy ?? "approved_sources") ===
+          "approved_sources" && (
+          <>
+            <label>
+              Approved public source URLs (one per line)
+              <textarea
+                rows={4}
+                maxLength={32000}
+                value={config.public_sources.join("\n")}
+                placeholder="https://docs.example.org/"
+                onChange={(event) =>
+                  setConfig({
+                    public_sources: event.target.value.split(/\r?\n/),
+                  })
+                }
+              />
+            </label>
+            <p className="reflection-note">
+              URLs without parameters cover that public path and its child
+              pages. A URL with parameters approves only that complete URL.
+              Approve only public sources suitable for the archive folder.
+            </p>
+          </>
+        )}
+        <p className="reflection-note">
+          Maestro saves eligible search excerpts automatically, independently of
+          the model's reply. Each fresh retrieval has its own dated snapshot;
+          these contain excerpts, not full pages. Queries, conversations and
+          private memory stay in private Maestro storage. OneDrive folders sync
+          the saved excerpts to your account.
+        </p>
+        <div className="reflection-fields">
+          <NumberFields
+            values={config}
+            onChange={(key, value) => setConfig({ [key]: value })}
+            fields={[
+              ["reuse_hours", "Reuse saved searches for (hours)", 1, 168],
+              ["max_items", "Maximum archive files/directories", 100, 200000],
+            ]}
+          />
+          <label>
+            Archive size limit (MiB)
+            <input
+              required
+              type="number"
+              min={1}
+              max={102400}
+              step="any"
+              value={config.max_bytes / 1048576}
+              onChange={(event) =>
+                setConfig({
+                  max_bytes: Math.round(Number(event.target.value) * 1048576),
+                })
+              }
+            />
+          </label>
+        </div>
+        <div className="reflection-actions">
+          <button className="button primary" disabled={!!busy}>
+            {busy === "save" && <LoaderCircle size={15} className="spin" />}
+            Save source settings
+          </button>
+          <button
+            className="button secondary"
+            type="button"
+            disabled={!!busy}
+            onClick={() =>
+              void act(
+                "refresh",
+                () => onAction(api.loadContextArchive),
+                "Archive status refreshed.",
+              )
+            }
+          >
+            Refresh archive status
+          </button>
+          <button
+            className="button subtle"
+            type="button"
+            disabled={!!busy || !status.available || !status.config.enabled}
+            onClick={() => void rebuild()}
+          >
+            {busy === "rebuild" && <LoaderCircle size={15} className="spin" />}
+            {progress && !progress.complete && busy !== "rebuild"
+              ? "Continue source index rebuild"
+              : "Rebuild source index"}
+          </button>
+          {busy === "rebuild" && (
+            <button
+              className="button subtle"
+              type="button"
+              disabled={pauseRequested}
+              onClick={() => {
+                rebuildContinue.current = false;
+                setPauseRequested(true);
+              }}
+            >
+              {pauseRequested
+                ? "Pausing after this batch…"
+                : "Pause after current batch"}
+            </button>
+          )}
+        </div>
+        {progress && (
+          <p className="reflection-note" role="status">
+            {progress.complete
+              ? "Source index rebuild complete"
+              : busy === "rebuild"
+                ? "Rebuilding source index"
+                : "Source index rebuild paused"}
+            : {progress.processed.toLocaleString()} of{" "}
+            {progress.total.toLocaleString()} source records checked.
+            {!progress.complete &&
+              " The previous index stays available until the rebuild finishes."}
+          </p>
+        )}
+        {status.last_indexed_at && (
+          <p className="reflection-note">
+            Last indexed {sourceDate(status.last_indexed_at)}.
+          </p>
+        )}
+      </form>
+      <SavedSourceFinder
+        status={status}
+        active={active}
+        onOpenSource={onOpenSource}
+        removedCaptureIds={removedCaptureIds}
+      />
+    </section>
+  );
+}
+
+function SavedSourceFinder({
+  status,
+  active,
+  onOpenSource,
+  removedCaptureIds,
+}: {
+  status: ContextArchiveStatus;
+  active: boolean;
+  onOpenSource: (source: SavedSourceSelection) => void;
+  removedCaptureIds: ReadonlySet<string>;
+}) {
+  const emptyDraft = () => ({
+    query: "",
+    domain: "",
+    retrieved_from: "",
+    retrieved_to: "",
+    limit: 10,
+    allow_stale: true,
+  });
+  const [draft, setDraft] = useState(emptyDraft);
+  const [result, setResult] = useState<ContextSearchResult | null>(null);
+  const [searching, setSearching] = useState(false);
+  const [error, setError] = useState("");
+  const revision = useRef(0);
+  const keywords = useRef<HTMLInputElement>(null);
+  const ready = active && status.configured && status.config.enabled;
+  const eligibility = JSON.stringify([
+    status.config.capture_policy ?? "approved_sources",
+    status.config.public_sources,
+    status.config.reuse_hours,
+  ]);
+  useEffect(() => {
+    revision.current += 1;
+    setResult(null);
+    setSearching(false);
+    setError("");
+    return () => {
+      revision.current += 1;
+    };
+  }, [ready, eligibility]);
+  function edit(next: Partial<typeof draft>) {
+    revision.current += 1;
+    setDraft((current) => ({ ...current, ...next }));
+    setResult(null);
+    setError("");
+    setSearching(false);
+  }
+  function clear() {
+    revision.current += 1;
+    setDraft(emptyDraft());
+    setResult(null);
+    setError("");
+    setSearching(false);
+    keywords.current?.focus();
+  }
+  async function search(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!ready || searching) return;
+    if (!draft.query.trim()) {
+      setError("Enter keywords to search the saved sources.");
+      return;
+    }
+    const request = ++revision.current;
+    setSearching(true);
+    setError("");
+    setResult(null);
+    try {
+      const next = await api.searchContextArchive({
+        query: draft.query.trim(),
+        limit: draft.limit,
+        allow_stale: draft.allow_stale,
+        ...(draft.domain.trim() ? { domain: draft.domain.trim() } : {}),
+        ...(draft.retrieved_from
+          ? { retrieved_from: draft.retrieved_from }
+          : {}),
+        ...(draft.retrieved_to ? { retrieved_to: draft.retrieved_to } : {}),
+      });
+      if (revision.current === request) setResult(next);
+    } catch (reason) {
+      if (revision.current === request)
+        setError(
+          reason instanceof Error
+            ? reason.message
+            : "Could not search the saved sources.",
+        );
+    } finally {
+      if (revision.current === request) setSearching(false);
+    }
+  }
+  const sources =
+    result?.sources
+      .slice(0, 20)
+      .filter((source) => !removedCaptureIds.has(source.capture_id)) ?? [];
+  return (
+    <section
+      className="saved-source-finder"
+      aria-labelledby="saved-source-finder-title"
+    >
+      <h3 id="saved-source-finder-title">Find saved sources</h3>
+      <p className="reflection-note" id="saved-source-finder-note">
+        Search saved excerpt text locally. This makes no online search or AI
+        request. Date filters use when Maestro retrieved a source (UTC dates);
+        publication dates may be unknown.
+      </p>
+      <form onSubmit={(event) => void search(event)} aria-busy={searching}>
+        <label>
+          Keywords
+          <input
+            ref={keywords}
+            required
+            maxLength={512}
+            value={draft.query}
+            aria-describedby="saved-source-finder-note"
+            onChange={(event) => edit({ query: event.target.value })}
+          />
+        </label>
+        <div className="archive-search-fields">
+          <label>
+            Domain (optional)
+            <input
+              maxLength={253}
+              placeholder="docs.example.org"
+              value={draft.domain}
+              onChange={(event) => edit({ domain: event.target.value })}
+            />
+          </label>
+          <label>
+            Retrieved from
+            <input
+              type="date"
+              value={draft.retrieved_from}
+              onChange={(event) => edit({ retrieved_from: event.target.value })}
+            />
+          </label>
+          <label>
+            Retrieved to
+            <input
+              type="date"
+              value={draft.retrieved_to}
+              onChange={(event) => edit({ retrieved_to: event.target.value })}
+            />
+          </label>
+          <label>
+            Maximum results
+            <input
+              required
+              type="number"
+              min={1}
+              max={20}
+              step={1}
+              value={draft.limit}
+              onChange={(event) => edit({ limit: Number(event.target.value) })}
+            />
+          </label>
+        </div>
+        <p className="reflection-note">
+          Use an exact hostname without a URL, port or path.
+        </p>
+        <label className="reflection-check">
+          <input
+            type="checkbox"
+            checked={draft.allow_stale}
+            onChange={(event) => edit({ allow_stale: event.target.checked })}
+          />
+          Include older saved evidence
+        </label>
+        <div className="reflection-actions">
+          <button className="button primary" disabled={!ready || searching}>
+            {searching && <LoaderCircle size={15} className="spin" />}
+            Search saved sources
+          </button>
+          <button className="button secondary" type="button" onClick={clear}>
+            Clear saved search
+          </button>
+        </div>
+      </form>
+      {!ready && active && (
+        <p className="reflection-note">
+          Enable a configured source archive to search saved text.
+        </p>
+      )}
+      {searching && <p role="status">Searching saved source text…</p>}
+      {error && (
+        <div className="error-banner" role="alert">
+          {error}
+        </div>
+      )}
+      {result && ready && (
+        <section
+          className="archive-search-results"
+          aria-label="Saved source results"
+        >
+          <p role="status">
+            {sources.length
+              ? `${sources.length} saved ${sources.length === 1 ? "source" : "sources"} for “${result.query}”.`
+              : result.sources.length
+                ? "No saved sources remain in these results."
+                : result.search_limited
+                  ? `No saved sources found for “${result.query}” within this search’s work limit.`
+                  : `No saved sources matched “${result.query}”.`}
+          </p>
+          {result.search_limited && (
+            <p className="reflection-note" role="status">
+              Saved search reached its work limit. Narrow the keywords, domain
+              or retrieval dates.
+            </p>
+          )}
+          <ol>
+            {sources.map((source, index) => {
+              const url = sourceURL(source.url);
+              const domain = url ? new URL(url).hostname : "";
+              return (
+                <li key={source.capture_id}>
+                  <h4>{source.title || "Untitled saved source"}</h4>
+                  <p className="archive-result-url">
+                    {url ? (
+                      <a href={url} target="_blank" rel="noopener noreferrer">
+                        {source.url}
+                      </a>
+                    ) : (
+                      source.url
+                    )}
+                  </p>
+                  <p className="reflection-note">
+                    {domain && `${domain} · `}Search excerpt · Retrieved{" "}
+                    {sourceDate(source.retrieved_at)}
+                    {source.stale && <> · Older saved evidence</>}
+                    <br />
+                    {source.published_at
+                      ? `Published ${sourceDate(source.published_at)}`
+                      : "Publication date unknown"}
+                  </p>
+                  <p className="archive-result-excerpt">
+                    {source.content.slice(0, 360)}
+                    {source.content.length > 360 && "…"}
+                  </p>
+                  <button
+                    className="button subtle"
+                    type="button"
+                    onClick={() =>
+                      onOpenSource({
+                        id: source.capture_id,
+                        expectedHash: source.content_hash,
+                        expectedManifestHash: source.manifest_hash,
+                      })
+                    }
+                  >
+                    View saved result {index + 1}
+                  </button>
+                </li>
+              );
+            })}
+          </ol>
+        </section>
+      )}
+    </section>
+  );
+}
+
+function SavedSource({
+  id,
+  expectedHash,
+  expectedManifestHash,
+  onAction,
+  onRemoved,
+}: {
+  id: string;
+  expectedHash?: string;
+  expectedManifestHash?: string;
+  onAction: (
+    action: () => Promise<ContextArchiveStatus>,
+  ) => Promise<ContextArchiveStatus>;
+  onRemoved: (id: string) => void;
+}) {
+  const [capture, setCapture] = useState<ContextCapture | null>(null);
+  const [error, setError] = useState("");
+  const [loading, setLoading] = useState(true);
+  const [removing, setRemoving] = useState(false);
+  const [confirmRemove, setConfirmRemove] = useState(false);
+  const [removed, setRemoved] = useState(false);
+  useEffect(() => {
+    let active = true;
+    void api
+      .loadContextCapture(id, expectedHash, expectedManifestHash)
+      .then(
+        (next) => {
+          if (active) setCapture(next);
+        },
+        (reason: Error) => {
+          if (active) setError(reason.message);
+        },
+      )
+      .finally(() => {
+        if (active) setLoading(false);
+      });
+    return () => {
+      active = false;
+    };
+  }, [id, expectedHash, expectedManifestHash]);
+  async function remove() {
+    if (removing) return;
+    setRemoving(true);
+    setError("");
+    try {
+      await onAction(() => api.deleteContextCapture(id));
+      onRemoved(id);
+      setRemoved(true);
+    } catch (reason) {
+      setError(
+        reason instanceof Error
+          ? reason.message
+          : "Could not remove the saved source.",
+      );
+    } finally {
+      setRemoving(false);
+    }
+  }
+  if (loading) return <p role="status">Loading saved source…</p>;
+  if (removed)
+    return (
+      <p role="status">
+        Saved source removed. Earlier answers keep their text; this saved source
+        is now unavailable.
+      </p>
+    );
+  const url = capture && sourceURL(capture.url);
+  return (
+    <div className="saved-source-view">
+      {error && (
+        <div className="error-banner" role="alert">
+          {error}
+        </div>
+      )}
+      {capture && (
+        <>
+          <h3>{capture.title}</h3>
+          {url && (
+            <a href={url} target="_blank" rel="noopener noreferrer">
+              Open live source
+            </a>
+          )}
+          <p className="reflection-note">
+            Search excerpt · Retrieved {sourceDate(capture.retrieved_at)}
+            <br />
+            {capture.published_at
+              ? `Published ${sourceDate(capture.published_at)}`
+              : "Publication date unknown"}
+            {capture.modified_at && (
+              <>
+                <br />
+                Updated {sourceDate(capture.modified_at)}
+              </>
+            )}
+          </p>
+          <pre
+            className="source-snapshot"
+            tabIndex={0}
+            aria-label="Saved source text"
+          >
+            {capture.content}
+          </pre>
+          {confirmRemove ? (
+            <div className="source-remove-confirmation">
+              <p>
+                Remove this saved source? Earlier citations will show that it is
+                unavailable.
+              </p>
+              <div className="form-actions">
+                <button
+                  className="button secondary"
+                  disabled={removing}
+                  onClick={() => setConfirmRemove(false)}
+                >
+                  Keep source
+                </button>
+                <button
+                  className="button primary"
+                  disabled={removing}
+                  onClick={() => void remove()}
+                >
+                  {removing && <LoaderCircle size={15} className="spin" />}
+                  Confirm removal
+                </button>
+              </div>
+            </div>
+          ) : (
+            <button
+              className="button subtle"
+              onClick={() => setConfirmRemove(true)}
+            >
+              Remove saved source
+            </button>
+          )}
+        </>
+      )}
+    </div>
   );
 }
 
@@ -395,6 +1408,13 @@ export default function App() {
   const [replyId, setReplyId] = useState("");
   const [feedbackSaving, setFeedbackSaving] = useState(false);
   const [model, setModel] = useState("");
+  const [contextMode, setContextMode] = useState<ContextMode>("prefer_saved");
+  const [sourceView, setSourceView] = useState<SavedSourceSelection | null>(
+    null,
+  );
+  const [removedCaptureIds, setRemovedCaptureIds] = useState<Set<string>>(
+    () => new Set(),
+  );
   const modelPicker = useRef<HTMLDivElement>(null);
   const [mobileNav, setMobileNav] = useState(false);
   const navigationDrawer = useRef<HTMLElement>(null);
@@ -430,6 +1450,76 @@ export default function App() {
   useEffect(() => {
     chatEnd.current?.scrollIntoView({ behavior: "smooth", block: "nearest" });
   }, [workspace?.messages.length]);
+  useEffect(() => {
+    const original = workspace?.web_search;
+    if (
+      page !== "workspace" ||
+      workspace?.provider.config.protocol !== "ollama" ||
+      busy ||
+      feedbackSaving ||
+      reflectionActions ||
+      !original?.config.enabled ||
+      !original.credentials_present ||
+      !original.tested_at ||
+      original.remaining_today <= 0 ||
+      original.ready !== false
+    )
+      return;
+    let active = true;
+    let polling = false;
+    let timer: number | undefined;
+    const cooldown = original.paused_until
+      ? Date.parse(original.paused_until) - Date.now()
+      : 0;
+    const delay = Number.isFinite(cooldown)
+      ? Math.min(60000, Math.max(5000, cooldown))
+      : 5000;
+    let refreshAt = Date.now() + delay;
+    function schedule() {
+      window.clearTimeout(timer);
+      if (active && !document.hidden)
+        timer = window.setTimeout(
+          () => void poll(),
+          Math.max(0, refreshAt - Date.now()),
+        );
+    }
+    async function poll() {
+      if (!active || document.hidden || polling) return;
+      polling = true;
+      refreshAt = Date.now() + delay;
+      const revision = workspaceRevision.current;
+      try {
+        const status = await api.loadWebSearch();
+        if (active && !document.hidden)
+          setWorkspace((current) =>
+            current &&
+            workspaceRevision.current === revision &&
+            current.web_search === original
+              ? { ...current, web_search: status }
+              : current,
+          );
+      } catch {
+        // Keep the current readiness and retry without replacing chat errors.
+      } finally {
+        polling = false;
+        schedule();
+      }
+    }
+    schedule();
+    document.addEventListener("visibilitychange", schedule);
+    return () => {
+      active = false;
+      window.clearTimeout(timer);
+      document.removeEventListener("visibilitychange", schedule);
+    };
+  }, [
+    workspace?.web_search,
+    workspace?.provider.config.protocol,
+    page,
+    busy,
+    feedbackSaving,
+    reflectionActions,
+  ]);
   useEffect(() => {
     if (
       busy ||
@@ -545,6 +1635,18 @@ export default function App() {
         if (workspaceRevision.current === revision) setError(reason.message);
       });
   }
+  async function archiveAction(action: () => Promise<ContextArchiveStatus>) {
+    const revision = ++workspaceRevision.current;
+    const status = await action();
+    if (workspaceRevision.current === revision) {
+      setWorkspace((current) =>
+        current ? { ...current, context_archive: status } : current,
+      );
+    } else {
+      await refreshWorkspace();
+    }
+    return status;
+  }
   function applyReflection(work: WorkStatus, revision: number) {
     setWorkspace((current) =>
       current && workspaceRevision.current === revision
@@ -620,10 +1722,13 @@ export default function App() {
     setPage(next);
     setMobileNav(false);
   }
-  async function switchChat(action: () => Promise<Workspace>) {
+  async function switchChat(
+    action: () => Promise<Workspace>,
+    preserveDraft = false,
+  ) {
     if (await perform("select-chat", action, undefined, true)) {
       setReplyId("");
-      setChat("");
+      if (!preserveDraft) setChat("");
       navigate("workspace");
     }
   }
@@ -661,7 +1766,12 @@ export default function App() {
         }
         if (!id)
           throw new Error("Could not create a conversation. Please try again.");
-        const next = await api.sendMessage(submitted, id, requestedModel);
+        const next = await api.sendMessage(
+          submitted,
+          id,
+          requestedModel,
+          local ? contextMode : "prefer_saved",
+        );
         const reply = next.messages.at(-1);
         if (reply?.role === "assistant") setReplyId(reply.id);
         return next;
@@ -743,8 +1853,25 @@ export default function App() {
     (thread) => thread.id === workspace.active_chat_id,
   );
   const local = workspace.provider.config.protocol === "ollama";
+  const memoryDerived = workspace.messages.some(
+    (message) => !!message.memory_ids?.length,
+  );
   const requestedModel = local ? model : "";
-  const defaultModel = workspace.provider.config.model;
+  const archivePolicy =
+    workspace.context_archive?.config.capture_policy ?? "approved_sources";
+  const sourceViewEligibility = JSON.stringify([
+    workspace.context_archive?.configured ?? false,
+    workspace.context_archive?.config.enabled ?? false,
+    archivePolicy,
+    archivePolicy === "approved_sources"
+      ? [...(workspace.context_archive?.config.public_sources ?? [])].sort()
+      : [],
+  ]);
+  const defaultModel =
+    local && workspace.provider.config.chat_routing === "orchestrator"
+      ? workspace.provider.config.orchestrator_model ||
+        workspace.provider.config.model
+      : workspace.provider.config.model;
   const selectedModel = requestedModel || defaultModel;
   const unavailableModel =
     local &&
@@ -966,7 +2093,29 @@ export default function App() {
                     )}
                     {message.web_search && (
                       <div className="message-sources">
-                        <p>Search query: {message.web_search.query}</p>
+                        <p>
+                          {message.web_search.from_cache
+                            ? "Saved sources for:"
+                            : "Search query:"}{" "}
+                          {message.web_search.query}
+                        </p>
+                        {message.web_search.from_cache && (
+                          <p>Reused saved evidence; no new web search.</p>
+                        )}
+                        {message.web_search.stale && (
+                          <p>Older saved evidence</p>
+                        )}
+                        {message.web_search.search_limited && (
+                          <p role="status">
+                            Saved lookup reached its work limit; narrow keywords
+                            or saved-source filters for a more complete lookup.
+                          </p>
+                        )}
+                        {message.web_search.archive_warning && (
+                          <p role="status">
+                            {message.web_search.archive_warning}
+                          </p>
+                        )}
                         <ol>
                           {message.web_search.sources.map((source, index) => {
                             const url = sourceURL(source.url);
@@ -983,6 +2132,52 @@ export default function App() {
                                 ) : (
                                   source.title
                                 )}
+                                <div className="source-details">
+                                  <span>
+                                    Search excerpt ·{" "}
+                                    {(source.stale ??
+                                      message.web_search!.stale) &&
+                                      "Older saved evidence · "}
+                                    Retrieved{" "}
+                                    {sourceDate(
+                                      source.retrieved_at ??
+                                        message.web_search!.at,
+                                    )}
+                                  </span>
+                                  <span>
+                                    {source.published_at
+                                      ? `Published ${sourceDate(source.published_at)}`
+                                      : "Publication date unknown"}
+                                  </span>
+                                  {source.modified_at && (
+                                    <span>
+                                      Updated {sourceDate(source.modified_at)}
+                                    </span>
+                                  )}
+                                  {source.archive_status === "saved" &&
+                                  source.capture_id ? (
+                                    <button
+                                      className="button subtle"
+                                      type="button"
+                                      onClick={() =>
+                                        setSourceView({
+                                          id: source.capture_id!,
+                                          expectedHash: source.content_hash,
+                                          expectedManifestHash:
+                                            source.manifest_hash,
+                                        })
+                                      }
+                                    >
+                                      View saved source {index + 1}
+                                    </button>
+                                  ) : (
+                                    <span>
+                                      {source.archive_status === "not_saved"
+                                        ? "Source was not saved"
+                                        : "Not archived"}
+                                    </span>
+                                  )}
+                                </div>
                               </li>
                             );
                           })}
@@ -1030,60 +2225,86 @@ export default function App() {
                   }}
                 />
                 <div className="composer-bottom">
-                  {local ? (
-                    <div className="model-control">
-                      <button
-                        className="model-trigger"
-                        type="button"
-                        popoverTarget="chat-model-picker"
-                        disabled={!!busy}
-                        aria-label={`Choose model: ${selectedModel || "none"}`}
-                      >
-                        {selectedModel || "Choose a model"}
-                        <ChevronDown size={14} />
-                      </button>
-                      <div
-                        id="chat-model-picker"
-                        className="model-picker"
-                        popover="auto"
-                        ref={modelPicker}
-                      >
-                        <p>Chat model</p>
-                        {[
-                          ...new Set([
-                            defaultModel,
-                            ...workspace.provider.models,
-                          ]),
-                        ]
-                          .filter(Boolean)
-                          .map((choice) => (
-                            <button
-                              key={choice}
-                              type="button"
-                              disabled={
-                                !!busy ||
-                                !workspace.provider.models.includes(choice)
-                              }
-                              aria-pressed={selectedModel === choice}
-                              onClick={() => {
-                                setModel(choice === defaultModel ? "" : choice);
-                                modelPicker.current?.hidePopover();
-                              }}
-                            >
-                              <span>
-                                {choice}
-                                {choice === defaultModel && (
-                                  <small>Default</small>
+                  <div className="composer-controls">
+                    {local && (
+                      <SearchOptions
+                        status={workspace.web_search}
+                        archive={workspace.context_archive}
+                        mode={contextMode}
+                        onMode={setContextMode}
+                        memoryDerived={memoryDerived}
+                        busy={!!busy}
+                        onSettings={() => navigate("settings")}
+                        onManageSources={() => {
+                          navigate("settings");
+                          window.requestAnimationFrame(() =>
+                            document
+                              .getElementById("saved-web-sources")
+                              ?.scrollIntoView({ block: "start" }),
+                          );
+                        }}
+                        onNewChat={() => void switchChat(api.createChat, true)}
+                      />
+                    )}
+                    {local ? (
+                      <div className="model-control">
+                        <button
+                          className="model-trigger"
+                          type="button"
+                          popoverTarget="chat-model-picker"
+                          disabled={!!busy}
+                          aria-label={`Choose model: ${selectedModel || "none"}`}
+                        >
+                          {selectedModel || "Choose a model"}
+                          <ChevronDown size={14} />
+                        </button>
+                        <div
+                          id="chat-model-picker"
+                          className="model-picker"
+                          popover="auto"
+                          ref={modelPicker}
+                        >
+                          <p>Chat model</p>
+                          {[
+                            ...new Set([
+                              defaultModel,
+                              ...workspace.provider.models,
+                            ]),
+                          ]
+                            .filter(Boolean)
+                            .map((choice) => (
+                              <button
+                                key={choice}
+                                type="button"
+                                disabled={
+                                  !!busy ||
+                                  !workspace.provider.models.includes(choice)
+                                }
+                                aria-pressed={selectedModel === choice}
+                                onClick={() => {
+                                  setModel(
+                                    choice === defaultModel ? "" : choice,
+                                  );
+                                  modelPicker.current?.hidePopover();
+                                }}
+                              >
+                                <span>
+                                  {choice}
+                                  {choice === defaultModel && (
+                                    <small>Default</small>
+                                  )}
+                                </span>
+                                {selectedModel === choice && (
+                                  <Check size={16} />
                                 )}
-                              </span>
-                              {selectedModel === choice && <Check size={16} />}
-                            </button>
-                          ))}
+                              </button>
+                            ))}
+                        </div>
                       </div>
-                    </div>
-                  ) : (
-                    <small>{selectedModel || "No model selected"}</small>
-                  )}
+                    ) : (
+                      <small>{selectedModel || "No model selected"}</small>
+                    )}
+                  </div>
                   <button
                     className="send-button"
                     type="submit"
@@ -1108,15 +2329,6 @@ export default function App() {
                 Chat is saved locally and sent to your configured model provider
                 when you send a message.
               </p>
-              {workspace.provider.config.protocol === "ollama" &&
-                workspace.web_search.config.enabled && (
-                  <p className="composer-note">
-                    Automatic web search · one search maximum per message ·{" "}
-                    {workspace.web_search.searches_today} /{" "}
-                    {workspace.web_search.config.daily_limit} today. Queries go
-                    to Ollama.com.
-                  </p>
-                )}
             </div>
           </main>
         )}
@@ -1225,6 +2437,15 @@ export default function App() {
                   provider={workspace.provider}
                   onChange={refreshWorkspace}
                 />
+                {workspace.context_archive && (
+                  <ContextArchiveSetup
+                    initialStatus={workspace.context_archive}
+                    onAction={archiveAction}
+                    active={page === "settings"}
+                    onOpenSource={setSourceView}
+                    removedCaptureIds={removedCaptureIds}
+                  />
+                )}
               </div>
             </div>
           </main>
@@ -1267,6 +2488,21 @@ export default function App() {
           </main>
         )}
       </div>
+
+      {sourceView && (
+        <Modal title="Saved source" onClose={() => setSourceView(null)}>
+          <SavedSource
+            key={`${sourceView.id}:${sourceView.expectedHash ?? ""}:${sourceView.expectedManifestHash ?? ""}:${sourceViewEligibility}`}
+            id={sourceView.id}
+            expectedHash={sourceView.expectedHash}
+            expectedManifestHash={sourceView.expectedManifestHash}
+            onAction={archiveAction}
+            onRemoved={(id) =>
+              setRemovedCaptureIds((current) => new Set(current).add(id))
+            }
+          />
+        </Modal>
+      )}
 
       {panel === "task" && (
         <Modal title="New task" onClose={() => setPanel(null)}>

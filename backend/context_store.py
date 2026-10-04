@@ -1,0 +1,975 @@
+"""Opt-in public search excerpts, immutable files and a private rebuildable index."""
+from contextlib import closing, contextmanager
+from datetime import date, datetime, timedelta, timezone
+from functools import wraps
+import hashlib
+import html
+import json
+import os
+from pathlib import Path
+import re
+import shutil
+import sqlite3
+import threading
+import time
+import unicodedata
+from urllib.parse import parse_qsl, unquote, urlsplit, urlunsplit
+import uuid
+
+from backend.web_search import safe_url
+
+
+MAX_ARCHIVE_ITEMS = 200000
+DEFAULT = {"enabled": False, "capture_policy": "all_public", "public_sources": [], "reuse_hours": 24,
+           "max_bytes": 10 * 1024 ** 3, "max_items": MAX_ARCHIVE_ITEMS}
+SCHEMA = 1
+SOURCE_BYTES = 8192
+MANIFEST_BYTES = 16384
+SEARCH_CANDIDATES = 200
+SEARCH_SECONDS = 2
+REBUILD_SECONDS = 5
+ID = re.compile(r"[a-f0-9]{32}\Z")
+HASH = re.compile(r"[a-f0-9]{64}\Z")
+ROOT = Path(__file__).resolve().parent.parent
+_owners = {}
+_owner_lock = threading.RLock()
+
+
+def storage_errors(action):
+    @wraps(action)
+    def guarded(self, *args, **kwargs):
+        try:
+            return action(self, *args, **kwargs)
+        except (OSError, sqlite3.Error):
+            try:
+                self.record_error()
+            except (OSError, sqlite3.Error):
+                pass
+            raise ValueError("Context storage could not finish this operation. Check archive and local storage, then retry.") from None
+    return guarded
+
+
+def decoded_url_variants(value):
+    """Bounded safety views only; callers must retain the original URL identity."""
+    if not isinstance(value, str) or len(value) > 2048:
+        raise ValueError("Use a valid public source URL.")
+    variants = [value]
+    try:
+        for _ in range(8):
+            decoded = unquote(variants[-1], errors="strict")
+            if decoded == variants[-1]:
+                return tuple(variants)
+            variants.append(decoded)
+    except UnicodeError:
+        pass
+    raise ValueError("Use a valid public source URL.")
+
+
+def contains_url_secret(value, secrets):
+    try:
+        return any(secret and secret in variant for variant in decoded_url_variants(value) for secret in secrets)
+    except ValueError:
+        return True  # Invalid escape sequences must never reach the public archive.
+
+
+def contains_source_secret(value, secrets):
+    """Inspect bounded safety views without changing source text or URL identity."""
+    secrets = tuple(secret for secret in secrets if secret)
+    if not secrets:
+        return False
+    # Search responses already have this wire bound. Keep direct callers bounded
+    # too, and fail closed if repeated escaping cannot be checked within it.
+    if not isinstance(value, str) or len(value) > 131072:
+        return True
+    for _ in range(8):
+        if any(secret in value for secret in secrets):
+            return True
+        decoded = html.unescape(unquote(value, errors="replace"))
+        if decoded == value:
+            return False
+        value = decoded
+    return True
+
+
+def public_url(value, *, allow_query=False, allow_http=False):
+    """A conservative export scope; explicit query scopes retain their identity."""
+    error = ("Use a public HTTPS source without credentials, fragments or control characters." if allow_query
+             else "Use a public HTTPS origin and path without query parameters or credentials.")
+    if (not isinstance(value, str) or not value or len(value) > 2048
+            or any(ord(c) <= 32 or unicodedata.category(c) == "Cc" for c in value)):
+        raise ValueError(error)
+    try:
+        parts = urlsplit(value)
+        if (parts.scheme not in (("https", "http") if allow_http else ("https",)) or not safe_url(value)
+                or parts.port not in (None, 443 if parts.scheme == "https" else 80)
+                or parts.fragment or "#" in value or "\\" in value
+                or ("?" in value and (not allow_query or not parts.query))):
+            raise ValueError()
+        path = parts.path or "/"
+        # Encoded separators/dot segments and repeated decoding make path scopes ambiguous.
+        decoded = unquote(path, errors="strict")
+        if ("%" in decoded or "\\" in decoded or any(ord(c) <= 32 or unicodedata.category(c) == "Cc" for c in decoded)
+                or re.search(r"%(?:2f|5c)", path, re.I) or any(p in (".", "..") for p in decoded.split("/"))):
+            raise ValueError()
+        # Decode only for validation, never for URL identity. Bound repeated
+        # escaping so encoded controls/backslashes cannot evade the check.
+        if any("\\" in decoded or any(unicodedata.category(c) == "Cc" for c in decoded)
+               for decoded in decoded_url_variants(parts.query)):
+            raise ValueError()
+        host = parts.hostname.encode("idna").decode("ascii").lower()
+        if host.endswith("."):
+            raise ValueError()
+        return urlunsplit((parts.scheme, "[" + host + "]" if ":" in host else host, path, parts.query, ""))
+    except (ValueError, UnicodeError):
+        raise ValueError(error) from None
+
+
+def approved(value, scopes):
+    try:
+        normalized = public_url(value, allow_query=True)
+        url = urlsplit(normalized)
+        for item in scopes:
+            scope_url = public_url(item, allow_query=True)
+            scope = urlsplit(scope_url)
+            if url.query or scope.query:
+                if normalized == scope_url:
+                    return True
+            elif (url.netloc == scope.netloc and (scope.path == "/" or url.path == scope.path.rstrip("/")
+                                                  or url.path.startswith(scope.path.rstrip("/") + "/"))):
+                return True
+        return False
+    except ValueError:
+        return False
+
+
+def eligible(value, config):
+    """Public excerpts only; URL checks cannot establish the publisher's access policy."""
+    try:
+        public_url(value, allow_query=True, allow_http=config["capture_policy"] == "all_public")
+        # Decode only safety views, retaining the original query and URL identity.
+        sensitive = {"token", "accesstoken", "refreshtoken", "idtoken", "apikey", "key", "auth", "authorization",
+                     "password", "passwd", "pwd", "secret", "session", "sessionid", "sid", "cookie",
+                     "credential", "credentials", "signature", "sig", "signed", "jwt", "bearer",
+                     "accesskey", "awsaccesskeyid", "googleaccessid", "privatekey", "email", "emailaddress",
+                     "username", "userid", "user", "account", "accountid", "customerid", "patientid",
+                     "member", "memberid", "profile", "profileid", "employeeid", "personid",
+                     "personal", "private", "ssn"}
+        private_paths = {"login", "signin", "sign-in", "oauth", "authorize", "account", "accounts", "my-account",
+                         "inbox", "admin", "dashboard", "private"}
+        for variant in decoded_url_variants(value):
+            parts = urlsplit(variant)
+            if (parts.hostname or "").casefold().endswith((".internal", ".lan", ".home", ".corp", ".onion")):
+                return False
+            if any(segment.casefold() in private_paths for segment in parts.path.split("/")):
+                return False
+            for key, item in parse_qsl(parts.query, keep_blank_values=True, errors="strict", max_num_fields=100):
+                name = re.sub(r"[^a-z0-9]", "", key.casefold())
+                if (name in sensitive or name.startswith(("xamz", "xgoog", "oauth", "auth"))
+                        or name.endswith(("token", "password", "secret", "signature", "apikey", "sessionid"))
+                        or re.search(r"[^\s@]+@[^\s@]+\.[^\s@]+", item)):
+                    return False
+        return config["capture_policy"] == "all_public" or approved(value, config["public_sources"])
+    except (ValueError, UnicodeError, TypeError, KeyError):
+        return False
+
+
+def normalize_query(query):
+    if not isinstance(query, str) or not 1 <= len(query.strip()) <= 512:
+        raise ValueError("Provide one search query of at most 512 characters.")
+    return " ".join(query.split())
+
+
+def _search_terms(query):
+    # Match the default unicode61 tokenizer's letters, numbers and private-use
+    # characters. Combining marks remain with their word, including NFD text.
+    terms, current = [], []
+    for character in query:
+        category = unicodedata.category(character)
+        if category[0] in ("L", "N") or category == "Co" or category[0] == "M" and current:
+            current.append(character)
+        elif current:
+            terms.append("".join(current))
+            current = []
+    if current:
+        terms.append("".join(current))
+    if not terms or len(terms) > 16:
+        raise ValueError("Use one to sixteen literal keywords for saved-source search.")
+    return terms
+
+
+def validate_search(query, limit=3, *, domain=None, retrieved_from=None, retrieved_to=None):
+    """Shared public validation; operators are always interpreted as words."""
+    query = normalize_query(query)
+    _search_terms(query)
+    if type(limit) is not int or not 1 <= limit <= 20:
+        raise ValueError("Choose one to twenty saved search results.")
+    if domain is not None:
+        if (not isinstance(domain, str) or len(domain) > 253 or not domain
+                or any(character in domain for character in "/\\:@?#*%[]")
+                or any(ord(character) <= 32 or ord(character) == 127 for character in domain)):
+            raise ValueError("Use an exact public hostname without a URL, path, port or wildcard.")
+        try:
+            domain = urlsplit(public_url("https://" + domain + "/")).hostname
+            if (not re.fullmatch(r"(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z](?:[a-z0-9-]*[a-z0-9])?", domain)
+                    or len(domain) > 253 or any(len(label) > 63 for label in domain.split("."))):
+                raise ValueError()
+        except (ValueError, TypeError):
+            raise ValueError("Use an exact public hostname without a URL, path, port or wildcard.") from None
+    dates = []
+    for value in (retrieved_from, retrieved_to):
+        if value is not None:
+            try:
+                if not isinstance(value, str) or not re.fullmatch(r"\d{4}-\d{2}-\d{2}", value):
+                    raise ValueError()
+                date.fromisoformat(value)
+            except ValueError:
+                raise ValueError("Use valid retrieval dates in YYYY-MM-DD format.") from None
+        dates.append(value)
+    if all(dates) and dates[0] > dates[1]:
+        raise ValueError("The retrieval start date must not follow its end date.")
+    return {"query": query, "limit": limit, "domain": domain,
+            "retrieved_from": retrieved_from, "retrieved_to": retrieved_to}
+
+
+def timestamp(value):
+    try:
+        parsed = datetime.fromisoformat(value)
+        if parsed.tzinfo is None:
+            raise ValueError()
+        return parsed.astimezone(timezone.utc).isoformat()
+    except (ValueError, TypeError, AttributeError):
+        raise ValueError("Source retrieval time must include its timezone.") from None
+
+
+def manifest_hash(manifest):
+    return hashlib.sha256(json.dumps(manifest, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")).hexdigest()
+
+
+def configuration(value):
+    if not isinstance(value, dict):
+        raise ValueError("Invalid context archive settings.")
+    value = {"capture_policy": "approved_sources", **value}
+    if (set(value) != set(DEFAULT) or type(value["enabled"]) is not bool
+            or value["capture_policy"] not in ("approved_sources", "all_public")):
+        raise ValueError("Invalid context archive settings.")
+    for field, minimum, maximum in (("reuse_hours", 1, 168), ("max_bytes", 1024 * 1024, 100 * 1024 ** 3), ("max_items", 100, MAX_ARCHIVE_ITEMS)):
+        if type(value[field]) is not int or not minimum <= value[field] <= maximum:
+            raise ValueError("Context archive limits are outside their supported range.")
+    scopes = value["public_sources"]
+    if not isinstance(scopes, list) or len(scopes) > 100:
+        raise ValueError("Choose at most 100 approved public source scopes.")
+    scopes = list(dict.fromkeys(public_url(scope, allow_query=True) for scope in scopes))
+    if value["enabled"] and value["capture_policy"] == "approved_sources" and not scopes:
+        raise ValueError("Approve public HTTPS source scopes before enabling the archive.")
+    return {**value, "public_sources": scopes}
+
+
+class ContextStore:
+    def __init__(self, database, archive_dir=None):
+        self.database = Path(database).expanduser().resolve()
+        self.index = self.database.parent / "context" / "index.sqlite3"
+        raw = os.environ.get("MAESTRO_CONTEXT_ARCHIVE_DIR") if archive_dir is None else archive_dir
+        self.archive = None
+        if raw:
+            path = Path(raw).expanduser()
+            if not path.is_absolute():
+                raise ValueError("Choose an absolute context archive path outside the checkout.")
+            path = path.resolve()
+            if (path == ROOT or ROOT in path.parents or path in ROOT.parents or path == self.database.parent
+                    or path in self.database.parent.parents or self.database.parent in path.parents):
+                raise ValueError("Keep the context archive outside the checkout and private database directory.")
+            self.archive = path
+        self._token = uuid.uuid4().hex
+        self._write_lock = threading.RLock()
+
+    def now(self):
+        return datetime.now(timezone.utc)
+
+    def _state(self):
+        default = {"config": {**DEFAULT, "public_sources": []}, "last_error": None, "last_indexed_at": None,
+                   "archive_bytes": 0, "archive_items": 0, "missing_count": 0, "corrupt_count": 0,
+                   "write_unavailable": False, "last_capture": None, "rebuild_progress": None}
+        if not self.database.is_file():
+            return default
+        with closing(sqlite3.connect(self.database.as_uri() + "?mode=ro", uri=True)) as db:
+            if not db.execute("SELECT 1 FROM sqlite_master WHERE name='context_state'").fetchone():
+                return default
+            row = db.execute("SELECT value FROM context_state WHERE id=1").fetchone()
+            if not row:
+                return default
+            saved = json.loads(row[0])
+            legacy_config = saved.get("config", {})
+            return {**default, **saved, "config": {**DEFAULT, **legacy_config,
+                    "capture_policy": legacy_config.get("capture_policy", "approved_sources")}}
+
+    def initialize(self):
+        """Explicit private initialization; disabled archives are never created."""
+        self.database.parent.mkdir(parents=True, exist_ok=True)
+        with closing(sqlite3.connect(self.database, timeout=10)) as db, db:
+            db.execute("CREATE TABLE IF NOT EXISTS context_state(id INTEGER PRIMARY KEY CHECK(id=1),value TEXT NOT NULL)")
+            db.execute("CREATE TABLE IF NOT EXISTS context_queries(key TEXT PRIMARY KEY,query TEXT NOT NULL,at TEXT NOT NULL,captures TEXT NOT NULL)")
+        if self._state()["config"]["enabled"]:
+            with self._writer():
+                self._format()
+        return self.status()
+
+    def record_error(self, message=None):
+        # Never persist arbitrary exceptions, paths or provider-generated prose.
+        with self._write_lock:
+            with self._transaction() as (state, _):
+                state["last_error"] = "The context archive is unavailable. Check its directory and writer ownership."
+                state["write_unavailable"] = True
+        return self.status()
+
+    @contextmanager
+    def _transaction(self):
+        # Initializing private schema here must not recursively initialize the archive.
+        self.database.parent.mkdir(parents=True, exist_ok=True)
+        with closing(sqlite3.connect(self.database, timeout=10)) as db, db:
+            db.execute("CREATE TABLE IF NOT EXISTS context_state(id INTEGER PRIMARY KEY CHECK(id=1),value TEXT NOT NULL)")
+            db.execute("CREATE TABLE IF NOT EXISTS context_queries(key TEXT PRIMARY KEY,query TEXT NOT NULL,at TEXT NOT NULL,captures TEXT NOT NULL)")
+            db.execute("PRAGMA secure_delete=ON")
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute("SELECT value FROM context_state WHERE id=1").fetchone()
+            state = json.loads(row[0]) if row else self._state()
+            yield state, db
+            db.execute("INSERT INTO context_state VALUES(1,?) ON CONFLICT(id) DO UPDATE SET value=excluded.value", (json.dumps(state),))
+
+    def status(self):
+        state = self._state()
+        count = 0
+        if self.index.is_file():
+            try:
+                with closing(sqlite3.connect(self.index.as_uri() + "?mode=ro", uri=True)) as db:
+                    count = db.execute("SELECT COUNT(*) FROM captures").fetchone()[0]
+            except sqlite3.Error:
+                state = {**state, "last_error": "The local source index needs rebuilding."}
+        available = bool(self.archive and self.archive.is_dir() and not state.get("write_unavailable"))
+        if available:
+            claim = self.archive / "writer-owner.tmp"
+            if claim.exists():
+                try:
+                    with _owner_lock:
+                        available = (_owners.get(os.path.normcase(str(self.archive))) == self._token
+                                     and self._read("writer-owner.tmp", 64).decode("ascii") == self._token)
+                except (OSError, ValueError, UnicodeError):
+                    available = False
+        return {"configured": self.archive is not None, "available": available,
+                "path": str(self.archive) if self.archive else None, "config": state["config"], "indexed_count": count,
+                **{field: state[field] for field in ("missing_count", "corrupt_count", "archive_bytes", "archive_items",
+                                                    "last_error", "last_indexed_at", "last_capture", "rebuild_progress")}}
+
+    @contextmanager
+    def archive_owner(self):
+        """Atomic cross-runtime local claim; stale claims require explicit cleanup."""
+        if self.archive is None:
+            raise ValueError("Configure a context archive directory on the server first.")
+        key = os.path.normcase(str(self.archive))
+        with _owner_lock:
+            if key in _owners:
+                if _owners[key] != self._token:
+                    raise ValueError("Another Maestro workspace owns this archive. Stop it before enabling a second writer.")
+                nested = True
+            else:
+                nested = False
+                try:
+                    self.archive.mkdir(parents=True, exist_ok=True)
+                except OSError:
+                    raise ValueError("The context archive directory is unavailable or cannot be written.") from None
+                claim = self.archive / "writer-owner.tmp"
+                try:
+                    with os.fdopen(os.open(claim, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "w", encoding="ascii") as stream:
+                        stream.write(self._token)
+                        stream.flush()
+                        os.fsync(stream.fileno())
+                except FileExistsError:
+                    raise ValueError("This archive has an existing writer claim. Stop its previous Maestro instance before removing writer-owner.tmp and retrying.") from None
+                except OSError:
+                    raise ValueError("The context archive writer claim could not be created. Check its directory permissions.") from None
+                _owners[key] = self._token
+        try:
+            yield self
+        finally:
+            if not nested:
+                with self._write_lock, _owner_lock:
+                    _owners.pop(key, None)
+                    try:
+                        if self._read("writer-owner.tmp", 64).decode("ascii") == self._token:
+                            (self.archive / "writer-owner.tmp").unlink()
+                    except (OSError, ValueError, UnicodeError):
+                        pass  # An uncleared claim blocks the next writer safely.
+
+    @contextmanager
+    def _writer(self):
+        with self._write_lock, self.archive_owner():
+            if self._read("writer-owner.tmp", 64).decode("ascii") != self._token:
+                raise ValueError("The archive writer claim changed. Stop capture and check its ownership.")
+            yield
+
+    def _path(self, relative):
+        if self.archive is None or not isinstance(relative, str):
+            raise ValueError("The source archive is unavailable.")
+        parts = Path(relative)
+        if parts.is_absolute() or ".." in parts.parts or "\\" in relative:
+            raise ValueError("Invalid archived source path.")
+        path = self.archive / parts
+        for parent in (path, *path.parents):
+            if parent == self.archive:
+                break
+            if parent.is_symlink() or getattr(parent, "is_junction", lambda: False)():
+                raise ValueError("Archived source links are not supported.")
+        if self.archive not in path.resolve().parents:
+            raise ValueError("Invalid archived source path.")
+        return path
+
+    def _read(self, relative, limit):
+        path = self._path(relative)
+        if path.stat().st_size > limit:
+            raise ValueError("An archived source exceeds its supported size.")
+        with path.open("rb") as stream:
+            data = stream.read(limit + 1)
+        if len(data) > limit:
+            raise ValueError("An archived source exceeds its supported size.")
+        return data
+
+    def _publish(self, relative, data):
+        path = self._path(relative)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if path.exists():
+            if self._read(relative, max(len(data), MANIFEST_BYTES)) != data:
+                raise ValueError("Existing archive content does not match its hash.")
+            return False
+        temporary = path.with_name(path.name + "." + uuid.uuid4().hex + ".tmp")
+        try:
+            with temporary.open("xb") as stream:
+                stream.write(data)
+                stream.flush()
+                os.fsync(stream.fileno())
+            # Ownership excludes other writers; never overwrite an existing artifact.
+            if path.exists():
+                raise ValueError("The archive changed during publication.")
+            temporary.rename(path)
+            return True
+        finally:
+            if temporary.exists():
+                temporary.unlink()
+
+    def _format(self):
+        expected = {"format": "maestro-public-context", "schema_version": SCHEMA}
+        path = self._path("format.json")
+        if path.exists():
+            if json.loads(self._read("format.json", 4096)) != expected:
+                raise ValueError("The archive uses an unsupported format.")
+        else:
+            self._publish("format.json", json.dumps(expected).encode())
+
+    @storage_errors
+    def configure(self, config):
+        config = configuration(config)
+        if config["enabled"]:
+            with self._writer():
+                self._format()
+                if config != self._state()["config"]:
+                    self._invalidate_rebuild()
+                # Saving a lower cap remains possible for an already larger archive.
+                total, items, _ = self._inventory(MAX_ARCHIVE_ITEMS)
+                with self._transaction() as (state, db):
+                    state.update(config=config, last_error=None, write_unavailable=False,
+                                 archive_bytes=total, archive_items=items)
+                    db.execute("DELETE FROM context_queries")
+        else:
+            with self._write_lock:
+                if config != self._state()["config"]:
+                    self._invalidate_rebuild()
+                with self._transaction() as (state, db):
+                    state["config"] = config
+                    db.execute("DELETE FROM context_queries")
+        return self.status()
+
+    def _inventory(self, max_items):
+        count = total = 0
+        captures = []
+        started = time.monotonic()
+        if not self.archive or not self.archive.is_dir():
+            raise ValueError("The context archive is unavailable.")
+        pending = [self.archive]
+        while pending:
+            with os.scandir(pending.pop()) as entries:
+                for entry in entries:
+                    count += 1
+                    if count > max_items or time.monotonic() - started > 10:
+                        raise ValueError("The archive exceeds its item or scan allowance.")
+                    relative = Path(entry.path).relative_to(self.archive).as_posix()
+                    path = self._path(relative)
+                    if entry.is_dir(follow_symlinks=False):
+                        pending.append(path)
+                    else:
+                        total += path.stat().st_size
+                        if re.fullmatch(r"records/captures/\d{4}-\d{2}/[a-f0-9]{32}\.json", relative):
+                            captures.append(relative)
+        return total, count, captures
+
+    def _index_connection(self, path=None):
+        path = path or self.index
+        path.parent.mkdir(parents=True, exist_ok=True)
+        db = sqlite3.connect(path, timeout=10)
+        try:
+            db.execute("PRAGMA secure_delete=ON")
+            db.execute("CREATE TABLE IF NOT EXISTS captures(id TEXT PRIMARY KEY,manifest TEXT NOT NULL,title TEXT NOT NULL,url TEXT NOT NULL,content TEXT NOT NULL,at TEXT NOT NULL,manifest_hash TEXT)")
+            if "manifest_hash" not in {row[1] for row in db.execute("PRAGMA table_info(captures)")}:
+                db.execute("ALTER TABLE captures ADD COLUMN manifest_hash TEXT")
+            db.execute("CREATE VIRTUAL TABLE IF NOT EXISTS captures_fts USING fts5(id UNINDEXED,title,content)")
+        except sqlite3.Error:
+            db.close()
+            raise
+        return db
+
+    def _index_capture(self, manifest, relative, content):
+        self._invalidate_rebuild()
+        with closing(self._index_connection()) as db, db:
+            db.execute("DELETE FROM captures_fts WHERE id=?", (manifest["capture_id"],))
+            db.execute("INSERT OR REPLACE INTO captures VALUES(?,?,?,?,?,?,?)", (manifest["capture_id"], relative, manifest["title"], manifest["source_url"], content, manifest["retrieved_at"], manifest_hash(manifest)))
+            db.execute("INSERT INTO captures_fts(id,title,content) VALUES(?,?,?)", (manifest["capture_id"], manifest["title"], content))
+
+    def _deleted(self, capture_id):
+        return self._path("records/deletions/" + capture_id + ".json").exists()
+
+    def _manifest(self, relative, config):
+        data = json.loads(self._read(relative, MANIFEST_BYTES))
+        required = {"schema_version", "capture_id", "source_id", "source_url", "title", "object", "retrieved_at", "content_kind", "completeness", "published_at", "modified_at"}
+        if (not isinstance(data, dict) or set(data) != required or type(data["schema_version"]) is not int or data["schema_version"] != SCHEMA
+                or not isinstance(data["capture_id"], str) or not ID.fullmatch(data["capture_id"])
+                or not relative.endswith("/" + data["capture_id"] + ".json") or self._deleted(data["capture_id"])
+                or not eligible(data["source_url"], config)
+                or data["source_id"] != hashlib.sha256(public_url(data["source_url"], allow_query=True, allow_http=True).encode()).hexdigest()
+                or not isinstance(data["title"], str) or len(data["title"]) > 200
+                or data["content_kind"] != "search_excerpt" or data["published_at"] is not None or data["modified_at"] is not None
+                or not isinstance(data["completeness"], dict) or set(data["completeness"]) != {"maestro_truncated", "full_page"}
+                or type(data["completeness"]["maestro_truncated"]) is not bool or data["completeness"]["full_page"] is not False):
+            raise ValueError("Invalid or unavailable source capture.")
+        if relative != "records/captures/" + timestamp(data["retrieved_at"])[:7] + "/" + data["capture_id"] + ".json":
+            raise ValueError("Invalid capture observation path.")
+        obj = data["object"]
+        if (not isinstance(obj, dict) or set(obj) != {"path", "sha256", "bytes", "encoding"}
+                or not isinstance(obj["sha256"], str) or not HASH.fullmatch(obj["sha256"])
+                or obj["path"] != "objects/sha256/" + obj["sha256"][:2] + "/" + obj["sha256"] + ".txt"
+                or obj["encoding"] != "utf-8" or type(obj["bytes"]) is not int or not 1 <= obj["bytes"] <= SOURCE_BYTES):
+            raise ValueError("Invalid archived source object.")
+        raw = self._read(obj["path"], SOURCE_BYTES)
+        if len(raw) != obj["bytes"] or hashlib.sha256(raw).hexdigest() != obj["sha256"]:
+            raise ValueError("An archived source failed its hash check.")
+        return data, raw.decode("utf-8")
+
+    @staticmethod
+    def _source(manifest, content):
+        return {"capture_id": manifest["capture_id"], "title": manifest["title"], "url": manifest["source_url"], "content": content,
+                "content_hash": manifest["object"]["sha256"], "manifest_hash": manifest_hash(manifest), "archive_status": "saved",
+                **{key: manifest[key] for key in ("content_kind", "completeness", "retrieved_at", "published_at", "modified_at")}}
+
+    def _key(self, query, max_results):
+        if type(max_results) is not int or not 1 <= max_results <= 3:
+            raise ValueError("Choose one to three search results.")
+        return hashlib.sha256(json.dumps([normalize_query(query), max_results, "ollama_web_search", SCHEMA]).encode()).hexdigest()
+
+    def lookup(self, query, max_results, allow_stale=False):
+        with self._write_lock:
+            return self._lookup(query, max_results, allow_stale)
+
+    def _lookup(self, query, max_results, allow_stale):
+        key = self._key(query, max_results)
+        state = self._state()
+        if not state["config"]["enabled"] or not self.database.is_file() or not self.archive or not self.archive.is_dir():
+            return None
+        try:
+            with closing(sqlite3.connect(self.database.as_uri() + "?mode=ro", uri=True)) as db:
+                row = db.execute("SELECT at,captures FROM context_queries WHERE key=?", (key,)).fetchone()
+            if not row:
+                return None
+            at = datetime.fromisoformat(row[0])
+            age = self.now() - at
+            stale = age > timedelta(hours=state["config"]["reuse_hours"])
+            if age < timedelta(0) or not allow_stale and stale:
+                return None
+            sources = [{**self.get_capture(item["capture_id"], expected_hash=item["content_hash"], expected_manifest_hash=item["manifest_hash"]), "stale": stale}
+                       for item in json.loads(row[1])]
+            return {"query": normalize_query(query), "at": row[0], "sources": sources, "from_cache": True, "stale": stale}
+        except (OSError, sqlite3.Error, ValueError, KeyError, TypeError):
+            return None
+
+    def search(self, query, limit=3, *, domain=None, retrieved_from=None, retrieved_to=None, allow_stale=False):
+        filters = validate_search(query, limit, domain=domain, retrieved_from=retrieved_from, retrieved_to=retrieved_to)
+        if type(allow_stale) is not bool:
+            raise ValueError("Choose whether historical saved sources are allowed.")
+        result = {"query": filters["query"], "at": None, "sources": [], "from_cache": True, "stale": False,
+                  "retrieval": "keyword", "search_limited": False}
+        work_exceeded = False
+        # This is a reader: never initialize schema, claim the archive, remember
+        # the query or repair the index as a side effect of searching.
+        with self._write_lock:
+            try:
+                config = self._state()["config"]
+                if (not config["enabled"] or not self.archive or not self.archive.is_dir() or not self.index.is_file()):
+                    return result
+                now = self.now()
+                earliest = now - timedelta(hours=config["reuse_hours"])
+                deadline = time.monotonic() + SEARCH_SECONDS
+                expression = " AND ".join('"' + term.replace('"', '""') + '"' for term in _search_terms(filters["query"]))
+                clauses, parameters = ["julianday(c.at)<=julianday(?)"], [now.isoformat()]
+                if not allow_stale:
+                    clauses.append("julianday(c.at)>=julianday(?)")
+                    parameters.append(earliest.isoformat())
+                if filters["domain"]:
+                    clauses.append("context_host(c.url)=?")
+                    parameters.append(filters["domain"])
+                for field, operator in (("retrieved_from", ">="), ("retrieved_to", "<=")):
+                    if filters[field]:
+                        clauses.append("date(c.at)" + operator + "?")
+                        parameters.append(filters[field])
+                eligibility = " AND ".join(clauses)
+
+                def canonical(value):
+                    nonlocal work_exceeded
+                    if time.monotonic() > deadline:
+                        work_exceeded = True
+                        raise ValueError("Saved-source search exceeded its time allowance.")
+                    try:
+                        return public_url(value, allow_query=True, allow_http=True)
+                    except ValueError:
+                        return None
+
+                def host(value):
+                    normalized = canonical(value)
+                    return urlsplit(normalized).hostname if normalized else None
+
+                def observation(value):
+                    nonlocal work_exceeded
+                    if time.monotonic() > deadline:
+                        work_exceeded = True
+                        raise ValueError("Saved-source search exceeded its time allowance.")
+                    try:
+                        return datetime.fromisoformat(timestamp(value)).isoformat(timespec="microseconds")
+                    except ValueError:
+                        return None
+
+                with closing(sqlite3.connect(self.index.as_uri() + "?mode=ro", uri=True, timeout=0.5)) as db:
+                    callbacks = 0
+                    def progress():
+                        nonlocal callbacks, work_exceeded
+                        callbacks += 1
+                        work_exceeded = callbacks > 10000 or time.monotonic() > deadline
+                        return work_exceeded
+                    db.set_progress_handler(progress, 1000)
+                    db.create_function("context_url", 1, canonical)
+                    db.create_function("context_host", 1, host)
+                    db.create_function("context_time", 1, observation)
+                    candidates = db.execute(
+                        "WITH matches AS MATERIALIZED (SELECT context_url(c.url) AS url,"
+                        "bm25(captures_fts,0.0,5.0,1.0) AS score,context_time(c.at) AS observed "
+                        "FROM captures_fts JOIN captures c ON c.id=captures_fts.id "
+                        "WHERE captures_fts MATCH ? AND " + eligibility + ") "
+                        "SELECT url FROM matches WHERE url IS NOT NULL GROUP BY url "
+                        "ORDER BY MIN(score),MAX(observed) DESC,url LIMIT ?",
+                        [expression, *parameters, SEARCH_CANDIDATES + 1]).fetchall()
+                    result["search_limited"] = len(candidates) > SEARCH_CANDIDATES
+                    urls = [row[0] for row in candidates[:SEARCH_CANDIDATES]]
+                    if not urls:
+                        return result
+                    # Select versions independently of keywords. A recent
+                    # conflicting version cannot be replaced by an older hit.
+                    versions = db.execute(
+                        "WITH eligible AS MATERIALIZED (SELECT c.id,"
+                        "context_url(c.url) AS source_url,context_time(c.at) AS observed FROM captures c WHERE " + eligibility +
+                        " AND context_url(c.url) IN (" + ",".join("?" for _ in urls) + ")),"
+                        "versions AS (SELECT *,ROW_NUMBER() OVER (PARTITION BY source_url ORDER BY observed DESC,id) AS version "
+                        "FROM eligible),chosen AS MATERIALIZED (SELECT id,source_url,version FROM versions "
+                        "ORDER BY version,source_url LIMIT ?) "
+                        "SELECT c.id,c.title,c.url,c.content,c.at,c.manifest_hash FROM chosen JOIN captures c ON c.id=chosen.id "
+                        "ORDER BY chosen.version,chosen.source_url",
+                        [*parameters, *urls, SEARCH_CANDIDATES + 1]).fetchall()
+                    found, seen = [], set()
+                    for capture_id, title, url, content, at, digest in versions[:SEARCH_CANDIDATES]:
+                        if time.monotonic() > deadline:
+                            work_exceeded = True
+                            raise ValueError("Saved-source search exceeded its time allowance.")
+                        canonical_url = public_url(url, allow_query=True, allow_http=True)
+                        if canonical_url in seen:
+                            continue
+                        try:
+                            source = self.get_capture(capture_id, expected_manifest_hash=digest)
+                        except KeyError:
+                            continue
+                        if (title, url, content, at) != (source["title"], source["url"], source["content"], source["retrieved_at"]):
+                            continue  # The disposable index disagrees with verified evidence.
+                        observed = datetime.fromisoformat(timestamp(source["retrieved_at"]))
+                        stale = observed < earliest
+                        if (observed > now or stale and not allow_stale
+                                or filters["domain"] and urlsplit(public_url(source["url"], allow_query=True, allow_http=True)).hostname != filters["domain"]
+                                or filters["retrieved_from"] and observed.date().isoformat() < filters["retrieved_from"]
+                                or filters["retrieved_to"] and observed.date().isoformat() > filters["retrieved_to"]):
+                            continue
+                        seen.add(canonical_url)
+                        match = db.execute(
+                            "SELECT bm25(captures_fts,0.0,5.0,1.0),title,content FROM captures_fts "
+                            "WHERE captures_fts MATCH ? AND id=? ORDER BY 1 LIMIT 1", (expression, capture_id)).fetchone()
+                        if match and (match[1], match[2]) == (source["title"], source["content"]):
+                            found.append((match[0], -observed.timestamp(), capture_id, {**source, "stale": stale}))
+                    result["sources"] = [entry[3] for entry in sorted(found, key=lambda item: item[:3])[:filters["limit"]]]
+                    result["at"] = max((source["retrieved_at"] for source in result["sources"]),
+                                       key=datetime.fromisoformat, default=None)
+                    result["stale"] = any(source["stale"] for source in result["sources"])
+                    result["search_limited"] |= len(versions) > SEARCH_CANDIDATES and len(seen) < len(urls)
+                    return result
+            except (OSError, sqlite3.Error, ValueError, KeyError, TypeError, UnicodeError):
+                if work_exceeded:
+                    raise ValueError("Saved-source search exceeded its work allowance. Narrow keywords or filters and retry.") from None
+                raise ValueError("The local source index could not be searched. Rebuild it and retry.") from None
+
+    def capture(self, query, at, sources, max_results, secrets=()):
+        key, at = self._key(query, max_results), timestamp(at)
+        query = normalize_query(query)
+        result = {"query": query, "at": at, "sources": [], "from_cache": False}
+        saved = []
+        measured = {"retrieved_at": at, "sources_received": len(sources[:max_results]), "sources_saved": 0,
+                    "excerpt_bytes": 0, "manifest_bytes": 0, "object_bytes": 0, "new_bytes": 0}
+        config = self._state()["config"]
+        for source in sources[:max_results]:
+            if not isinstance(source, dict) or not all(isinstance(source.get(field), str) for field in ("title", "url", "content")):
+                continue
+            if contains_url_secret(source["url"], secrets) or contains_source_secret(source["url"], secrets):
+                continue  # Never forward a credential embedded in a source link.
+            clean = {field: source[field] for field in ("title", "url", "content")}
+            for field in ("title", "content"):
+                for secret in secrets:
+                    if secret:
+                        clean[field] = clean[field].replace(secret, "\u2588")
+            if any(contains_source_secret(clean[field], secrets) for field in ("title", "content")):
+                continue  # Encoded credentials must not reach inference or synced files.
+            existing = source.get("completeness")
+            completeness = {"maestro_truncated": bool(source.get("maestro_truncated") or (existing.get("maestro_truncated") if isinstance(existing, dict) else False)), "full_page": False}
+            clean.update(archive_status="skipped", content_kind="search_excerpt", retrieved_at=at,
+                         published_at=None, modified_at=None, completeness=completeness)
+            result["sources"].append(clean)
+        if not config["enabled"]:
+            return result
+        try:
+            with self._writer():
+                config = self._state()["config"]
+                if not config["enabled"]:
+                    return result
+                self._format()
+                total, items, _ = self._inventory(config["max_items"])
+                for clean in result["sources"]:
+                    if (not eligible(clean["url"], config)
+                            or contains_url_secret(clean["url"], secrets)):
+                        continue
+                    clean["archive_status"] = "not_saved"
+                    raw = clean["content"].encode("utf-8")
+                    if not 1 <= len(raw) <= SOURCE_BYTES:
+                        raise ValueError("A source excerpt exceeds its archive allowance.")
+                    content_hash = hashlib.sha256(raw).hexdigest()
+                    capture_id = uuid.uuid4().hex
+                    relative = "records/captures/" + at[:7] + "/" + capture_id + ".json"
+                    obj = {"path": "objects/sha256/" + content_hash[:2] + "/" + content_hash + ".txt", "sha256": content_hash, "bytes": len(raw), "encoding": "utf-8"}
+                    manifest = {"schema_version": SCHEMA, "capture_id": capture_id,
+                                "source_id": hashlib.sha256(public_url(clean["url"], allow_query=True, allow_http=True).encode()).hexdigest(),
+                                "source_url": clean["url"], "title": clean["title"][:200], "object": obj,
+                                "retrieved_at": at, "content_kind": "search_excerpt", "completeness": clean["completeness"], "published_at": None, "modified_at": None}
+                    encoded = json.dumps(manifest, ensure_ascii=False).encode("utf-8")
+                    extra = len(encoded) + (0 if self._path(obj["path"]).exists() else len(raw))
+                    new_paths = {self._path(name) for name in (obj["path"], relative)}
+                    new_paths |= {parent for path in tuple(new_paths) for parent in path.parents if parent != self.archive and self.archive in parent.parents}
+                    additions = sum(not path.exists() for path in new_paths)
+                    if total + extra > config["max_bytes"] or items + additions > config["max_items"] or shutil.disk_usage(self.archive).free < extra + 65536:
+                        raise ValueError("The archive has reached its byte, item or free-space allowance.")
+                    if self._publish(obj["path"], raw):
+                        measured["object_bytes"] += len(raw)
+                        measured["new_bytes"] += len(raw)
+                    if self._publish(relative, encoded):
+                        measured["manifest_bytes"] += len(encoded)
+                        measured["new_bytes"] += len(encoded)
+                    self._index_capture(manifest, relative, clean["content"])
+                    clean.update(self._source(manifest, clean["content"]))
+                    saved.append({"capture_id": capture_id, "content_hash": content_hash, "manifest_hash": manifest_hash(manifest)})
+                    measured["sources_saved"] += 1
+                    measured["excerpt_bytes"] += len(raw)
+                    total += extra
+                    items += additions
+                with self._transaction() as (state, db):
+                    if saved:
+                        db.execute("INSERT INTO context_queries VALUES(?,?,?,?) ON CONFLICT(key) DO UPDATE SET query=excluded.query,at=excluded.at,captures=excluded.captures", (key, query, at, json.dumps(saved)))
+                    total, items, _ = self._inventory(config["max_items"])
+                    state.update(archive_bytes=total, archive_items=items, last_error=None,
+                                 write_unavailable=False, last_capture=measured)
+                    if saved:
+                        state["last_indexed_at"] = self.now().isoformat()
+        except (OSError, sqlite3.Error, ValueError, UnicodeError):
+            result["archive_warning"] = "Some source evidence could not be saved. Existing captures remain unchanged."
+            try:
+                try:
+                    total, items, _ = self._inventory(config["max_items"])
+                except (OSError, ValueError):
+                    total = items = None
+                with self._write_lock, self._transaction() as (state, _):
+                    state["last_error"] = result["archive_warning"]
+                    state["last_capture"] = measured
+                    if total is not None:
+                        state.update(archive_bytes=total, archive_items=items)
+            except (OSError, sqlite3.Error):
+                pass
+        return result
+
+    def get_capture(self, capture_id, expected_hash=None, expected_manifest_hash=None):
+        with self._write_lock:
+            return self._get_capture(capture_id, expected_hash, expected_manifest_hash)
+
+    @contextmanager
+    def evidence_guard(self, sources):
+        """Validate and commit evidence under mutation exclusion, never over inference."""
+        with self._write_lock:
+            try:
+                for source in sources:
+                    if source.get("archive_status") == "saved":
+                        self.get_capture(source["capture_id"], expected_hash=source["content_hash"], expected_manifest_hash=source["manifest_hash"])
+            except (KeyError, ValueError, TypeError):
+                raise ValueError("Saved source evidence changed or was removed. Refresh the source choice before answering.") from None
+            yield
+
+    def _get_capture(self, capture_id, expected_hash=None, expected_manifest_hash=None):
+        if not isinstance(capture_id, str) or not ID.fullmatch(capture_id):
+            raise KeyError(capture_id)
+        config = self._state()["config"]
+        if not config["enabled"] or not self.index.is_file():
+            raise KeyError(capture_id)
+        try:
+            with closing(sqlite3.connect(self.index.as_uri() + "?mode=ro", uri=True)) as db:
+                row = db.execute("SELECT manifest,manifest_hash FROM captures WHERE id=?", (capture_id,)).fetchone()
+            if not row:
+                raise KeyError(capture_id)
+            manifest, content = self._manifest(row[0], config)
+            digest = manifest_hash(manifest)
+            if row[1] != digest or expected_manifest_hash is not None and expected_manifest_hash != digest:
+                raise KeyError(capture_id)
+            if expected_hash is not None and manifest["object"]["sha256"] != expected_hash:
+                raise KeyError(capture_id)
+            return self._source(manifest, content)
+        except (OSError, sqlite3.Error, ValueError, TypeError, UnicodeError):
+            raise KeyError(capture_id) from None
+
+    @storage_errors
+    def delete_capture(self, capture_id):
+        if not isinstance(capture_id, str) or not ID.fullmatch(capture_id):
+            raise KeyError(capture_id)
+        with self._writer():
+            self._invalidate_rebuild()
+            # Tombstones are portable; retained objects preserve other captures.
+            relative = "records/deletions/" + capture_id + ".json"
+            if not self._deleted(capture_id):
+                self.get_capture(capture_id)
+                self._publish(relative, json.dumps({"schema_version": SCHEMA, "capture_id": capture_id}).encode())
+            total, items, _ = self._inventory(MAX_ARCHIVE_ITEMS)
+            with self._transaction() as (state, db):
+                state.update(archive_bytes=total, archive_items=items)
+                for key, raw in db.execute("SELECT key,captures FROM context_queries").fetchall():
+                    if any(item.get("capture_id") == capture_id for item in json.loads(raw)):
+                        db.execute("DELETE FROM context_queries WHERE key=?", (key,))
+            if self.index.is_file():
+                with closing(self._index_connection()) as db, db:
+                    db.execute("DELETE FROM captures_fts WHERE id=?", (capture_id,))
+                    db.execute("DELETE FROM captures WHERE id=?", (capture_id,))
+
+    @property
+    def _rebuild_path(self):
+        return self.index.with_name("rebuild.sqlite3")
+
+    def _invalidate_rebuild(self):
+        """A replacement cannot discard changes made after its snapshot."""
+        for suffix in ("-journal", "-wal", "-shm"):
+            self._rebuild_path.with_name(self._rebuild_path.name + suffix).unlink(missing_ok=True)
+        self._rebuild_path.unlink(missing_ok=True)
+        if self._state()["rebuild_progress"] is not None:
+            with self._transaction() as (state, _):
+                state["rebuild_progress"] = None
+
+    @staticmethod
+    def _capture_inventory_hash(paths):
+        return hashlib.sha256("\n".join(sorted(paths)).encode("utf-8")).hexdigest()
+
+    @storage_errors
+    def rebuild(self, limit=1000, continuation=None):
+        """Process one durable batch; publish only a complete verified index."""
+        if type(limit) is not int or not 1 <= limit <= 5000:
+            raise ValueError("Choose a rebuild batch between 1 and 5000 captures.")
+        if continuation is not None and (not isinstance(continuation, str) or not ID.fullmatch(continuation)):
+            raise ValueError("Use the current source index rebuild reference.")
+        config = self._state()["config"]
+        if not config["enabled"]:
+            raise ValueError("Enable the configured source archive before rebuilding.")
+        with self._writer():
+            config = self._state()["config"]
+            if not config["enabled"]:
+                raise ValueError("Enable the configured source archive before rebuilding.")
+            self._format()
+            self.index.parent.mkdir(parents=True, exist_ok=True)
+            stage = self._rebuild_path
+            job = None
+            if stage.is_file():
+                try:
+                    with closing(sqlite3.connect(stage.as_uri() + "?mode=ro", uri=True)) as db:
+                        row = db.execute("SELECT value FROM rebuild_job WHERE id=1").fetchone()
+                        job = json.loads(row[0]) if row else None
+                    if job is None or job["config"] != config:
+                        self._invalidate_rebuild()
+                        job = None
+                except (sqlite3.Error, ValueError, KeyError, TypeError):
+                    self._invalidate_rebuild()
+                    job = None
+            if continuation is not None and (job is None or job["id"] != continuation):
+                raise ValueError("The archive changed during index rebuild. Start or resume a new rebuild.")
+            if job is None:
+                total, items, paths = self._inventory(config["max_items"])
+                job = {"id": uuid.uuid4().hex, "config": config, "processed": 0, "total": len(paths),
+                       "missing": 0, "corrupt": 0, "inventory_hash": self._capture_inventory_hash(paths)}
+                with closing(self._index_connection(stage)) as db, db:
+                    db.execute("CREATE TABLE rebuild_queue(position INTEGER PRIMARY KEY,manifest TEXT NOT NULL)")
+                    db.executemany("INSERT INTO rebuild_queue VALUES(?,?)", enumerate(sorted(paths)))
+                    db.execute("CREATE TABLE rebuild_job(id INTEGER PRIMARY KEY,value TEXT NOT NULL)")
+                    db.execute("INSERT INTO rebuild_job VALUES(1,?)", (json.dumps(job),))
+            started = time.monotonic()
+            processed_before = job["processed"]
+            with closing(self._index_connection(stage)) as db, db:
+                rows = db.execute("SELECT position,manifest FROM rebuild_queue WHERE position>=? ORDER BY position LIMIT ?",
+                                  (job["processed"], limit)).fetchall()
+                for position, relative in rows:
+                    if job["processed"] > processed_before and time.monotonic() - started >= REBUILD_SECONDS:
+                        break
+                    if not self._deleted(Path(relative).stem):
+                        try:
+                            manifest, content = self._manifest(relative, config)
+                        except FileNotFoundError:
+                            job["missing"] += 1
+                        except (OSError, ValueError, TypeError, UnicodeError):
+                            job["corrupt"] += 1
+                        else:
+                            db.execute("INSERT INTO captures VALUES(?,?,?,?,?,?,?)", (manifest["capture_id"], relative, manifest["title"], manifest["source_url"], content, manifest["retrieved_at"], manifest_hash(manifest)))
+                            db.execute("INSERT INTO captures_fts VALUES(?,?,?)", (manifest["capture_id"], manifest["title"], content))
+                    job["processed"] = position + 1
+                db.execute("UPDATE rebuild_job SET value=? WHERE id=1", (json.dumps(job),))
+            complete = job["processed"] == job["total"]
+            progress = {field: job[field] for field in ("id", "processed", "total")}
+            progress["complete"] = complete
+            if complete:
+                total, items, paths = self._inventory(config["max_items"])
+                if self._capture_inventory_hash(paths) != job["inventory_hash"]:
+                    self._invalidate_rebuild()
+                    raise ValueError("The archive changed during index rebuild. Start or resume a new rebuild.")
+                with closing(sqlite3.connect(stage)) as db, db:
+                    db.execute("DROP TABLE rebuild_queue")
+                    db.execute("DROP TABLE rebuild_job")
+                os.replace(stage, self.index)
+            with self._transaction() as (state, _):
+                state["rebuild_progress"] = progress
+                if complete:
+                    state.update(archive_bytes=total, archive_items=items, missing_count=job["missing"], corrupt_count=job["corrupt"],
+                                 last_error="Some archived sources are missing or invalid." if job["missing"] or job["corrupt"] else None,
+                                 write_unavailable=False, last_indexed_at=self.now().isoformat())
+            return self.status()
