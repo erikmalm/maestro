@@ -59,13 +59,17 @@ def probe(model, case, thinking):
     watcher = threading.Thread(target=monitor, daemon=True)
     watcher.start()
     start = time.perf_counter()
-    row = {"model": model, "case": case["name"]}
+    row = {"model": model, "case": case["name"], "inference_uncertain": False}
+    completed = False
     try:
         data = request("/api/chat", {"model": model, "stream": False, "keep_alive": 0,
                        "format": SCHEMA, "think": thinking,
                        "options": {"temperature": 0, "seed": 42, "num_ctx": 4096, "num_predict": 512},
                        "messages": [{"role": "system", "content": INSTRUCTIONS},
                                     {"role": "user", "content": json.dumps(case["sources"], ensure_ascii=False)}]})
+        completed = isinstance(data, dict) and data.get("done") is True
+        if not completed:
+            raise ValueError("Ollama did not confirm inference completion.")
         content = data.get("message", {}).get("content", "")
         row.update(output=content, done_reason=data.get("done_reason"),
                    input_tokens=data.get("prompt_eval_count"), output_tokens=data.get("eval_count"),
@@ -81,7 +85,7 @@ def probe(model, case, thinking):
             and entry["content"] in (expected["content"], sources[expected["source_id"]])
             for entry, expected in zip(entries, case["expected"]))
     except (OSError, ValueError, KeyError, TypeError, AttributeError) as error:
-        row.update(passed=False, error=str(error))
+        row.update(passed=False, error=str(error), inference_uncertain=not completed)
     finally:
         row["wall_seconds"] = round(time.perf_counter() - start, 2)
         stopped.set()
@@ -100,7 +104,7 @@ def main():
     output = args.output.resolve()
     if output.is_relative_to(checkout):
         parser.error("Keep benchmark reports outside the public checkout.")
-    if request("/api/ps").get("models"):
+    if request("/api/ps").get("models") != []:
         parser.error("Ollama has a loaded model. Run this probe when your other local sessions are idle.")
     installed = {item["name"]: item for item in request("/api/tags")["models"]}
     if any(model not in installed for model in args.models):
@@ -109,7 +113,10 @@ def main():
               "context_tokens": 4096, "output_cap": 512, "cold_calls": True,
               "fixtures": CASES, "models": {}, "results": []}
     output.parent.mkdir(parents=True, exist_ok=True)
+    stopped_reason = None
     for model in args.models:
+        if stopped_reason:
+            break
         metadata = request("/api/show", {"model": model})
         if (metadata.get("remote_host") or metadata.get("remote_model")
                 or metadata.get("details", {}).get("format") != "gguf"
@@ -119,13 +126,23 @@ def main():
                                   "capabilities": metadata.get("capabilities"), "thinking": metadata.get("thinking")}
         thinking = "low" if model.startswith("gpt-oss:") else False
         for case in CASES:
+            if request("/api/ps").get("models") != []:
+                stopped_reason = "Ollama has a loaded model; stopped before another benchmark call."
+                break
             row = probe(model, case, thinking)
             report["results"].append(row)
             output.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
             print(f"{model}: {row['case']} {'PASS' if row['passed'] else 'FAIL'} ({row['wall_seconds']}s)", flush=True)
+            if row["inference_uncertain"]:
+                stopped_reason = "Inference completion is uncertain; wait for Ollama to finish before rerunning the probe."
+                break
+    if stopped_reason:
+        report["stopped_reason"] = stopped_reason
     report["loaded_after"] = request("/api/ps").get("models", [])
     output.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
     print(f"Report: {output}", flush=True)
+    if stopped_reason:
+        parser.exit(1, stopped_reason + "\n")
 
 
 if __name__ == "__main__":

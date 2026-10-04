@@ -660,10 +660,134 @@ test("reflection polling preserves drafts, avoids overlap, and ignores late stat
   await page.clock.fastForward(3000);
   await expect.poll(fixture.polls).toBe(3);
   await page.getByRole("button", { name: "Workspace", exact: true }).click();
-  await fixture.pending()!.fulfill({ json: stale });
-  await page.clock.fastForward(6000);
-  expect(fixture.polls()).toBe(3);
+  await fixture.pending()!.fulfill({ json: fixture.work });
+  await page.clock.fastForward(3000);
+  await expect.poll(fixture.polls).toBe(4);
   await expect(
     page.getByRole("heading", { name: "Source conversation", exact: true }),
   ).toBeVisible();
+});
+
+test("Workspace usage stays current while background reflection completes", async ({
+  page,
+}) => {
+  await page.clock.install();
+  const fixture = await reflectionFixture(page);
+  let workspaceReads = 0;
+  page.on("request", (request) => {
+    if (new URL(request.url()).pathname === "/api/workspace")
+      workspaceReads += 1;
+  });
+  await page.getByRole("button", { name: "Workspace", exact: true }).click();
+  const heading = page.getByRole("heading", {
+    name: "Source conversation",
+    exact: true,
+  });
+  await expect(heading).toBeVisible();
+  fixture.work.running = true;
+  fixture.work.today_jobs = 1;
+  fixture.work.today_tokens = 1800;
+  fixture.work.usage = {
+    ...fixture.state.usage,
+    input_tokens: 1300,
+    output_tokens: 500,
+    calls: 1,
+  };
+  await page.clock.fastForward(3000);
+  await expect.poll(fixture.polls).toBe(1);
+  await expect(page.locator(".usage-tokens")).toHaveText("1.8k tokens");
+  await page
+    .getByRole("button", { name: "View usage and manage budgets" })
+    .click();
+  const usage = page.getByRole("dialog", { name: "Usage & limits" });
+  await expect(
+    usage
+      .getByText("API requests", { exact: true })
+      .locator("..")
+      .locator("strong"),
+  ).toHaveText("1");
+  fixture.work.running = false;
+  fixture.work.today_tokens = 3600;
+  fixture.work.usage = {
+    ...fixture.state.usage,
+    input_tokens: 2600,
+    output_tokens: 1000,
+    calls: 2,
+  };
+  await page.clock.fastForward(3000);
+  await expect.poll(fixture.polls).toBe(2);
+  await expect(page.locator(".usage-tokens")).toHaveText("3.6k tokens");
+  for (const [label, value] of [
+    ["Input tokens", "2,600"],
+    ["Output tokens", "1,000"],
+    ["API requests", "2"],
+  ])
+    await expect(
+      usage.getByText(label, { exact: true }).locator("..").locator("strong"),
+    ).toHaveText(value);
+  await usage.getByRole("button", { name: "Close dialog" }).click();
+  await expect(heading).toBeVisible();
+  expect(workspaceReads).toBe(0);
+});
+
+test("reflection polling refreshes shared usage without reloading workspace and ignores stale totals", async ({
+  page,
+}) => {
+  await page.clock.install();
+  const fixture = await reflectionFixture(page);
+  let workspaceReads = 0;
+  page.on("request", (request) => {
+    if (new URL(request.url()).pathname === "/api/workspace")
+      workspaceReads += 1;
+  });
+  fixture.work.today_tokens = 1800;
+  fixture.work.usage = {
+    ...fixture.state.usage,
+    input_tokens: 1300,
+    output_tokens: 500,
+    calls: 2,
+  };
+  await page.clock.fastForward(3000);
+  await expect.poll(fixture.polls).toBe(1);
+  await expect(page.locator(".usage-tokens")).toHaveText("1.8k tokens");
+  expect(workspaceReads).toBe(0);
+  await page
+    .getByRole("button", { name: "View usage and manage budgets" })
+    .click();
+  const usage = page.getByRole("dialog", { name: "Usage & limits" });
+  for (const [label, value] of [
+    ["Input tokens", "1,300"],
+    ["Output tokens", "500"],
+    ["API requests", "2"],
+  ])
+    await expect(
+      usage.getByText(label, { exact: true }).locator("..").locator("strong"),
+    ).toHaveText(value);
+  await usage.getByRole("button", { name: "Close dialog" }).click();
+
+  const stale = structuredClone(fixture.work);
+  fixture.holdNext();
+  await page.clock.fastForward(3000);
+  await expect.poll(fixture.polls).toBe(2);
+  const newerUsage = {
+    ...fixture.state.usage,
+    input_tokens: 2000,
+    output_tokens: 1000,
+    calls: 4,
+  };
+  await page.route("**/api/limits", async (route) => {
+    fixture.state.limits = route.request().postDataJSON();
+    fixture.state.usage = newerUsage;
+    await route.fulfill({ json: fixture.state });
+  });
+  await page
+    .getByRole("button", { name: "View usage and manage budgets" })
+    .click();
+  await usage.getByRole("button", { name: "Save limits", exact: true }).click();
+  await expect(usage).toBeHidden();
+  await expect(page.locator(".usage-tokens")).toHaveText("3.0k tokens");
+  await fixture.pending()!.fulfill({ json: stale });
+  await page.clock.runFor(100);
+  await expect(page.locator(".usage-tokens")).toHaveText("3.0k tokens");
+  expect(workspaceReads).toBe(0);
 });

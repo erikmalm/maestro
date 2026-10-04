@@ -457,7 +457,7 @@ def put_work_config(entry: WorkConfig):
 def get_reflection():
     state = read_workspace()
     return {**work_status(state), "memories": MemoryStore(DATABASE, TIMEZONE).list(),
-            "tasks": [present_task(task) for task in state["tasks"]]}
+            "tasks": [present_task(task) for task in state["tasks"]], "usage": provider().usage()}
 
 
 @app.post("/api/reflection/candidates/{candidate_id}/accept")

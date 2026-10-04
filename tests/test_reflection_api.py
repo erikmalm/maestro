@@ -130,4 +130,21 @@ class ReflectionAPITests(unittest.TestCase):
                 response = self.client.get("/api/reflection")
                 self.assertEqual(response.status_code, 200)
                 self.assertEqual(response.json()["memories"], self.memory.list())
+                self.assertEqual(response.json()["usage"], backend.provider().usage())
             self.assertEqual(monitor.execute("PRAGMA data_version").fetchone()[0], version)
+
+    def test_status_polling_reports_background_calls_and_later_accounting_changes(self):
+        self.proposal()
+        usage = self.client.get("/api/reflection").json()["usage"]
+        self.assertEqual(usage["input_tokens"], 25)
+        self.assertEqual(usage["output_tokens"], 12)
+        self.assertEqual(usage["calls"], 1)
+        service = backend.provider()
+        with service.transaction() as state:
+            state["ledger"].append({"id": "synthetic-later-call", "at": service.stamp(),
+                                    "status": "settled", "cost": 0, "input_tokens": 40, "output_tokens": 10})
+        latest = self.client.get("/api/reflection").json()["usage"]
+        self.assertEqual(latest["input_tokens"], 65)
+        self.assertEqual(latest["output_tokens"], 22)
+        self.assertEqual(latest["calls"], 2)
+        self.assertEqual(latest, self.client.get("/api/workspace").json()["usage"])

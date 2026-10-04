@@ -318,7 +318,6 @@ export default function App() {
   const reflectionPolling = useRef(false);
   const [reflectionActions, setReflectionActions] = useState(0);
   const reflectionVisible = page === "settings" || page === "memory";
-  const reflectionWatching = reflectionVisible || page === "tasks";
   const reflectionEnabled = workspace?.work?.config.enabled;
   const reflectionPending =
     !!workspace?.work && (workspace.work.queued > 0 || workspace.work.running);
@@ -347,7 +346,6 @@ export default function App() {
   }, [workspace?.messages.length]);
   useEffect(() => {
     if (
-      !reflectionWatching ||
       busy ||
       feedbackSaving ||
       reflectionActions ||
@@ -385,7 +383,6 @@ export default function App() {
       document.removeEventListener("visibilitychange", poll);
     };
   }, [
-    reflectionWatching,
     busy,
     feedbackSaving,
     reflectionActions,
@@ -470,6 +467,7 @@ export default function App() {
             work,
             ...(work.memories ? { memories: work.memories } : {}),
             ...(work.tasks ? { tasks: work.tasks } : {}),
+            ...(work.usage ? { usage: work.usage } : {}),
           }
         : current,
     );

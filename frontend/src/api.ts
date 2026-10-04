@@ -314,6 +314,7 @@ export type WorkStatus = {
   memories?: Memory[];
   journal?: ReflectionJournalEntry[];
   tasks?: Task[];
+  usage?: Workspace["usage"];
   next_reflection_at?: string | null;
 };
 export type ReflectionJournalEntry = {

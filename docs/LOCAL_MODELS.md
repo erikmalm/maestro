@@ -36,7 +36,7 @@ Reproduce deliberately with other Ollama sessions idle:
 .\.venv\Scripts\python.exe scripts/benchmark_memory_models.py --output "$env:LOCALAPPDATA\Maestro\benchmarks\memory-probe.json"
 ```
 
-The raw report stays outside the checkout. The opt-in probe reads only Ollama metadata and public fixtures. It does not run in CI or at startup. An HTTP timeout may leave inference running until the server finishes; `keep_alive=0` then unloads, and the report records remaining loaded models.
+The raw report stays outside the checkout. The opt-in probe reads only Ollama metadata and public fixtures. It does not run in CI or at startup. It checks for no loaded models before every call and stops if completion is uncertain. An HTTP timeout may leave inference running until the server finishes; wait for Ollama to finish before rerunning. `keep_alive=0` unloads after completion, and the report records remaining loaded models.
 
 ## Automatic workflow smoke (2026-10-03)
 

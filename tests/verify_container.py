@@ -259,6 +259,7 @@ def verify(image, tunnel=False):
         assert [(call["kind"], call["model"], call["stage"]) for call in calls] == [("reflection", MODELS[1], 0), ("memory", MODELS[0], 1)]
         reflection = api("/api/reflection")
         assert reflection["today_jobs"] == 4 and reflection["today_tokens"] == 240 and reflection["candidates"] == []
+        assert reflection["usage"] == api("/api/workspace")["usage"]
         assert reflection["next_reflection_at"] and [entry["kind"] for entry in reflection["journal"]] == ["reflection", "curation"]
         assert reflection["config"]["reflection_interval_minutes"] == 15
         assert [entry["models"] for entry in reflection["journal"]] == [[MODELS[1], MODELS[0]], [MODELS[0], MODELS[1]]]

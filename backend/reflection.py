@@ -460,6 +460,10 @@ class ReflectionStore:
             if job["tasks_enabled"]:
                 job["task_revision"] = task_revision(workspace)
             if job["mode"] == "periodic":
+                # A queued pass may survive accepting a proposal in conversation
+                # scope. Reapply privacy before building its source context.
+                private_chats = {row[0] for row in db.execute("SELECT chat_id FROM private_memories WHERE scope='conversation'")}
+                job["sources"] = [source for source in job["sources"] if source["chat_id"] not in private_chats]
                 job["workspace_checkpoint"] = self.workspace_checkpoint(workspace)
                 job.pop("assistant_versions", None)  # A queued/recovered claim takes a fresh snapshot.
             if job["epoch"] != epoch or not self.sources_valid(job, workspace):
