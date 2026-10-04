@@ -25,7 +25,7 @@ export default function MemorySetup({
   automatic: boolean;
   chats: Chat[];
   chatId: string | null;
-  onChange: () => void;
+  onChange: () => Promise<void>;
   onAction: (action: () => Promise<unknown>) => Promise<unknown>;
 }) {
   const [content, setContent] = useState("");
@@ -61,7 +61,7 @@ export default function MemorySetup({
     setNotice("");
     try {
       await onAction(action);
-      onChange();
+      await onChange();
       if (clearDraft) {
         setContent("");
         setEditing("");

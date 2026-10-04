@@ -69,6 +69,8 @@ The private journal stores summaries, applied changes, source references, models
 
 Records distinguish fact, preference, identity and lesson, with explicit, curated or reflective origin. Metadata contains evidence and provenance. Human corrections become explicit pinned authority; automation changes managed records only. Earlier model ideas cannot justify invented user facts. Working notes enter local prompts as quoted suggestions.
 
+New working notes retain revisioned dependencies on unchanged source memories, so correcting or forgetting a source also removes dependent notes and tasks. When one reviewed batch updates or consolidates source memories, Maestro carries their earlier source lineage forward while avoiding references that would become stale or cyclic in that same batch.
+
 ## Runtime and resource bounds
 
 One worker runs in FastAPI's lifespan under exclusive workspace ownership. Processing runs off the API event loop; the idle loop makes no inference calls. Ready jobs proceed ahead of debouncing or previously paused work. Jobs share chat's single reservation slot and usage ledger. Chat can run between formation and review; new activity or changed sources can invalidate review. In-flight generation can briefly delay chat; instant preemption is not implemented.

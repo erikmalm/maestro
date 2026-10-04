@@ -86,7 +86,9 @@ The header shows today's tokens and estimated USD. Each answer shows its model, 
 
 Tokens come from provider responses. USD uses your configured prices and excludes cache discounts; it is not an invoice or a billing feed. Maestro does not adjust saved rates for longer contexts; update them manually using the provider's applicable rates. [OpenAI pricing](https://developers.openai.com/api/docs/pricing) lists separate short- and long-context rates. Changing prices does not recalculate earlier requests. Spend and conservative token reservations are checked before dispatch. One chat request runs at a time, with a configured output cap and no automatic retries.
 
-Paid API requests with unknown usage retain a reservation and block further chat until their billed amount is verified in **Usage & limits** (open it from the header or **Open usage** in Settings). Known access/quota rejections release the reservation. Local Ollama failures release their zero-cost reservation. Restart preserves accounting and marks interrupted paid requests uncertain.
+Paid API requests with unknown usage retain a reservation and block further chat until their billed amount is verified in **Usage & limits** (open it from the header or **Open usage** in Settings). Known access/quota rejections release the reservation. Confirmed local Ollama failures release their zero-cost reservation. A generation timeout, interrupted local call, or response without confirmed completion keeps the generation slot until the worker observes no loaded models on the original Ollama connection. This prevents chat and reflection from overlapping inference after a lost response. Another application's resident model or chat's keep-loaded interval can prolong the wait. Restart preserves accounting and marks interrupted paid requests uncertain.
+
+An older interrupted local call may lack a saved server address. In that case Maestro asks you to restore its original **Local Ollama** URL in Settings and click **Connect and load models** before it can verify unloading. It never guesses the original server from a changed connection.
 
 ## Private credentials and data
 

@@ -176,6 +176,71 @@ class TaskReflectionTests(unittest.TestCase):
         self.assertEqual(self.tasks(), [])
         self.assertNotIn("assessment_basis", self.store.status()["journal"][0])
 
+    def check_working_note_change(self, operation):
+        self.workspace["chats"] = []
+        self.save()
+        stamp = self.store.stamp()
+        original = {"id": "original", "content": "Evaluate ambiguity before asking for clarification.",
+                    "kind": "lesson", "origin": "reflective", "scope": "workspace", "chat_id": None,
+                    "source_message_id": None, "source_hash": None, "evidence": None, "provenance": [],
+                    "created_at": stamp, "updated_at": stamp}
+        with self.memory.transaction() as db:
+            MemoryStore.insert(db, original)
+            original = MemoryStore.record(db.execute("SELECT * FROM private_memories WHERE id=?", (original["id"],)).fetchone())
+        self.drafts = [{"operation": "add", "memory_id": "", "kind": "lesson", "scope": "workspace",
+                        "content": "Inspect ambiguity before asking about missing information.", "source_message_id": "", "evidence": ""}]
+        self.worker.step()
+        derived = next(record for record in self.memory.list() if record["id"] != original["id"])
+        dependency = {"memory_id": original["id"], "hash": revision(original)}
+        self.assertIn(dependency, derived["provenance"])
+        self.assertEqual(len(self.tasks()), 2)
+        self.assertTrue(all(dependency in task["provenance"] for task in self.tasks()))
+        if operation == "forget":
+            self.memory.forget(original["id"])
+            expected = []
+        else:
+            expected = [self.memory.update(original["id"], "Use supplied information before asking a question.")]
+        self.assertEqual(self.memory.list(), expected)
+        self.assertEqual(self.tasks(), [])
+        self.now += 360 * 60
+        self.worker.step()
+        self.assertEqual(self.memory.list(), expected)
+        self.assertEqual(self.tasks(), [])
+
+    def test_forgetting_unchanged_working_note_removes_derived_notes_and_tasks(self):
+        self.check_working_note_change("forget")
+
+    def test_correcting_unchanged_working_note_removes_derived_notes_and_tasks(self):
+        self.check_working_note_change("update")
+
+    def test_tasks_retain_deep_ancestors_after_selected_source_is_removed(self):
+        self.workspace["chats"] = []
+        self.workspace["work_config"]["reflection_context_characters"] = 1000
+        self.save()
+        root = self.memory.remember("Independent synthetic decision. " * 100)
+        dependency = {"memory_id": root["id"], "hash": revision(root)}
+        stamp = self.store.stamp()
+        identity = {"id": "identity", "content": "Keep working practices revisable.", "kind": "identity",
+                    "origin": "reflective", "scope": "workspace", "chat_id": None, "source_message_id": None,
+                    "source_hash": None, "evidence": None, "provenance": [], "created_at": stamp, "updated_at": stamp}
+        intermediate = {**identity, "id": "intermediate", "kind": "lesson", "content": "An earlier detailed working practice. " * 45,
+                        "provenance": [{"memory_id": identity["id"], "hash": revision(identity)}, dependency]}
+        selected = {**identity, "id": "selected", "kind": "lesson", "content": "Inspect a specific synthetic outcome.",
+                    "provenance": [{"memory_id": intermediate["id"], "hash": revision(intermediate)}]}
+        with self.memory.transaction() as db:
+            for record in (identity, intermediate, selected):
+                MemoryStore.insert(db, record)
+        self.drafts = [{"operation": "remove", "memory_id": identity["id"], "kind": "identity", "scope": "workspace",
+                        "content": "", "source_message_id": "", "evidence": ""}]
+        self.worker.step()
+        self.assertEqual({record["id"] for record in self.jobs()[-1][1]["memory_versions"]}, {identity["id"], selected["id"]})
+        self.assertEqual(self.memory.list(), [root])
+        self.assertEqual(len(self.tasks()), 2)
+        self.assertTrue(all(dependency in task["provenance"] for task in self.tasks()))
+        self.memory.forget(root["id"])
+        self.assertEqual(self.memory.list(), [])
+        self.assertEqual(self.tasks(), [])
+
     def test_no_chat_self_review_cannot_invent_user_facts_or_permissions(self):
         self.workspace["chats"] = []
         self.save()

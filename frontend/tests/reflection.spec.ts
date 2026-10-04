@@ -334,6 +334,56 @@ test("reflection suggestions require acceptance, preserve scope, and stay accept
   ).toHaveCount(0);
 });
 
+test("memory actions stay disabled until the post-save workspace refresh finishes", async ({
+  page,
+}) => {
+  await page.clock.install();
+  await page.clock.pauseAt(new Date());
+  const fixture = await reflectionFixture(page);
+  let refresh: Route | undefined;
+  let accepts = 0;
+  page.on("request", (request) => {
+    if (
+      new URL(request.url()).pathname ===
+      "/api/reflection/candidates/conversation/accept"
+    )
+      accepts += 1;
+  });
+  await page.route("**/api/workspace*", (route) => {
+    refresh = route;
+  });
+  const memory = page.locator(".memory-setup");
+  const candidate = memory
+    .locator(".memory-entry")
+    .filter({ hasText: "Synthetic conversation preference" });
+  const accept = candidate.getByRole("button", {
+    name: "Accept memory",
+    exact: true,
+  });
+  await accept.click();
+  await expect.poll(() => !!refresh).toBe(true);
+  await expect(accept).toBeDisabled();
+  await expect(
+    memory.getByLabel("What should Maestro remember?"),
+  ).toBeDisabled();
+  await expect(
+    candidate.getByRole("button", { name: "Reject", exact: true }),
+  ).toBeDisabled();
+  await accept.evaluate((button: HTMLButtonElement) => button.click());
+  expect(accepts).toBe(1);
+  await refresh!.fulfill({ json: fixture.state });
+  await expect(accept).toHaveCount(0);
+  await expect(
+    memory.getByText("Synthetic conversation preference", { exact: true }),
+  ).toBeVisible();
+  await expect(
+    memory.getByLabel("What should Maestro remember?"),
+  ).toBeEnabled();
+  await expect(
+    memory.getByText("Proposed memory saved.", { exact: true }),
+  ).toBeVisible();
+});
+
 test("automatic memory, periodic reflection and the private journal stay inspectable and editable", async ({
   page,
 }) => {

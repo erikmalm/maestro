@@ -120,6 +120,61 @@ class EvolutionTests(unittest.TestCase):
         self.assertEqual(selected, managed)
         self.assertEqual(len(self.memory.list()), 101)
 
+    def test_repeated_identity_updates_expand_dependent_lessons_without_losing_unchanged_roots(self):
+        root = self.memory.remember("Keep the synthetic project decisions verifiable.")
+        source = {"memory_id": root["id"], "hash": revision(root)}
+        identity = self.record("identity", "Evaluate clarification before asking a question.", kind="identity", provenance=[source])
+        self.drafts = [{"operation": "add", "memory_id": "", "kind": "lesson", "scope": "workspace",
+                        "content": "Inspect ambiguity before asking about missing information.", "source_message_id": "", "evidence": ""}]
+        self.worker.step()
+        lesson = next(record for record in self.memory.list() if record["kind"] == "lesson")
+        self.assertIn({"memory_id": identity["id"], "hash": revision(identity)}, lesson["provenance"])
+        for content in ("Check whether clarification helps before asking a question.",
+                        "Check whether clarification adds value before asking a question."):
+            self.now += 360 * 60
+            self.drafts = [self.change(identity, "update", content)]
+            self.worker.step()
+            identity = next(record for record in self.memory.list() if record["id"] == identity["id"])
+            self.assertEqual(identity["content"], content)
+            self.assertEqual(identity["provenance"], [source])
+            self.assertEqual(self.jobs()[-1][0], "done")
+            self.assertEqual({record["id"] for record in self.memory.list()}, {identity["id"], root["id"]})
+
+    def test_unselected_identity_is_retained_as_ancestor_when_implicit_update_is_skipped(self):
+        identity = self.record("identity", "A specific working practice. " * 60, kind="identity")
+        lesson = self.record("lesson", "Evaluate the working practice with a concrete synthetic comparison.",
+                             provenance=[{"memory_id": identity["id"], "hash": revision(identity)}])
+        self.workspace["work_config"]["reflection_context_characters"] = 1000
+        self.save()
+        self.drafts = [{"operation": "add", "memory_id": "", "kind": kind, "scope": "workspace", "content": content,
+                        "source_message_id": "", "evidence": ""} for kind, content in (
+            ("identity", "A new working identity that cannot replace an unselected source."),
+            ("lesson", "Compare working practices against an explicit outcome."))]
+        self.worker.step()
+        self.assertEqual([record["id"] for record in self.jobs()[-1][1]["memory_versions"]], [lesson["id"]])
+        records = {record["id"]: record for record in self.memory.list()}
+        self.assertEqual(records[identity["id"]], identity)
+        derived = next(record for record in records.values() if record["id"] not in (identity["id"], lesson["id"]))
+        self.assertIn({"memory_id": lesson["id"], "hash": revision(lesson)}, derived["provenance"])
+        self.memory.forget(identity["id"])
+        self.assertEqual(self.memory.list(), [])
+
+    def test_unapplied_approved_mutation_cannot_detach_new_notes_from_retained_sources(self):
+        duplicate = self.memory.remember("Keep a concrete verification checklist for synthetic experiments.")
+        identity = self.record("identity", "Evaluate clarification before asking a question.", kind="identity")
+        lesson = self.record("lesson", "Inspect ambiguity before requesting more information.",
+                             provenance=[{"memory_id": identity["id"], "hash": revision(identity)}])
+        before = {record["id"]: record for record in self.memory.list()}
+        self.drafts = [self.change(identity, "update", duplicate["content"]),
+                       {"operation": "add", "memory_id": "", "kind": "lesson", "scope": "workspace",
+                        "content": "Compare clarification behavior against an explicit outcome.", "source_message_id": "", "evidence": ""}]
+        self.worker.step()
+        self.assertEqual({record["id"]: record for record in self.memory.list()}, before)
+        self.assertEqual(self.jobs()[-1][0], "failed")
+        self.assertIn("approved memory change could not be applied", self.store.status()["last_stop_reason"])
+        self.assertEqual(self.store.status()["journal"], [])
+        self.assertEqual(self.store.status()["today_tokens"], 300)
+
     def test_expanded_review_and_recall_preserve_context_limits_and_room_for_facts(self):
         self.workspace["work_config"].update(background_context_tokens=65536, max_output_tokens=8192)
         with self.provider.transaction() as state:

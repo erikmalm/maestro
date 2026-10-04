@@ -31,8 +31,12 @@ class ProviderFailure(ValueError):
         self.may_be_billed = may_be_billed
 
 
-class BackgroundUncertain(ProviderFailure):
+class LocalUncertain(ProviderFailure):
     """A local request may still be running after its connection was closed."""
+
+
+class BackgroundUncertain(LocalUncertain):
+    """A claimed background request has no confirmed completion."""
 
 
 def validate_url(url, http_hosts=("127.0.0.1", "localhost", "::1")):
@@ -71,6 +75,7 @@ def is_local_model(model):
 def network(config, key, method, path, payload=None):
     # No retries or redirects: never forward a credential to another endpoint.
     local = config["protocol"] == "ollama"
+    generation = local and method == "POST" and path == "/api/chat"
     if local:
         validate_ollama_url(config["base_url"])
     elif not key.isascii() or not key.isprintable():
@@ -82,8 +87,10 @@ def network(config, key, method, path, payload=None):
                                       headers={} if local else {"Authorization": "Bearer " + key}, json=payload)
     except httpx.InvalidURL:
         raise ProviderFailure("Enter a valid API base URL.", False) from None
-    except httpx.HTTPError:
+    except httpx.HTTPError as error:
         if local:
+            if generation and not isinstance(error, (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout)):
+                raise LocalUncertain("Ollama did not confirm completion. Waiting for its model to unload before another request.", False) from None
             raise ProviderFailure("Ollama is unavailable or timed out. Start Ollama and check its local server URL.", False) from None
         raise ValueError("Provider connection failed or timed out. Check the endpoint and your connection.") from None
     if response.status_code in (401, 403):
@@ -113,6 +120,8 @@ def network(config, key, method, path, payload=None):
             message = messages["rate_limit_exceeded"]
         raise ProviderFailure(message or "Provider limit reached. Check quota, billing and rate limits.", False)
     if response.status_code >= 300:
+        if generation and response.status_code >= 500:
+            raise LocalUncertain("Ollama did not confirm completion. Waiting for its model to unload before another request.", False)
         raise ProviderFailure(f"Provider returned HTTP {response.status_code}. Check the model, endpoint and API format.", response.status_code >= 500)
     try:
         data = response.json()
@@ -120,12 +129,14 @@ def network(config, key, method, path, payload=None):
             raise ValueError()
         return data
     except (ValueError, TypeError):
+        if generation:
+            raise LocalUncertain("Ollama did not return a confirmed result. Waiting for its model to unload before another request.", False) from None
         raise ValueError("Provider returned an invalid response.") from None
 
 
 def local_usage(data):
     if data.get("done") is not True:
-        raise ValueError("Ollama did not complete the response. Try a shorter reply or check the model.")
+        raise LocalUncertain("Ollama did not confirm completion. Waiting for its model to unload before another request.", False)
     fields = ("prompt_eval_count", "eval_count")
     if any(type(data.get(field)) is not int or data[field] < 0 for field in fields):
         raise ValueError("Ollama did not return valid token usage. Check the local model before retrying.")
@@ -265,6 +276,13 @@ class Provider:
             if state["config"] != config or (not local and credentials.read(config["base_url"])[0] != key):
                 raise ValueError("Connection settings changed. Test the new connection again.")
             state.update({"models": models, "tested_at": self.stamp()})
+            if local:
+                # A legacy orphan has no reliable endpoint. Only an explicit local
+                # reconnect may supply the server the user restored for recovery.
+                for entry in state["ledger"]:
+                    if (entry["status"] == "reserved" and entry.get("protocol") == "ollama"
+                            and entry.get("local_unknown") and not entry.get("connection_config")):
+                        entry["connection_config"] = config.copy()
         return self.status()
 
     def usage(self, state=None):
@@ -283,13 +301,16 @@ class Provider:
                 if entry["status"] == "reserved":
                     if entry.get("job_id"):
                         entry["background_unknown"] = True
+                    elif entry.get("protocol") == "ollama":
+                        entry["local_unknown"] = True
                     else:
-                        entry["status"] = "failed" if entry.get("protocol") == "ollama" else "uncertain"
+                        entry["status"] = "uncertain"
 
     def recover_background(self):
         """Between worker steps, release orphan slots only after confirmed unloading."""
         entries = [item for item in self.read_state()["ledger"]
-                   if item["status"] == "reserved" and item.get("job_id")]
+                   if item["status"] == "reserved" and (item.get("job_id") or item.get("local_unknown"))
+                   and item.get("connection_config")]
         for entry in entries:
             try:
                 data = background_network(entry["connection_config"], "/api/ps", None, time.monotonic() + 5)
@@ -299,8 +320,8 @@ class Provider:
                 continue
             with self.transaction() as state:
                 current = next(item for item in state["ledger"] if item["id"] == entry["id"])
-                if current["status"] == "reserved" and current.get("job_id"):
-                    current.update(status="failed", cost=0, background_unknown=False)
+                if current["status"] == "reserved" and (current.get("job_id") or current.get("local_unknown")):
+                    current.update(status="failed", cost=0, background_unknown=False, local_unknown=False)
 
     def reconcile(self, entry_id, cost):
         with self.transaction() as state:
@@ -393,6 +414,12 @@ class Provider:
                 instructions += " Help plan and break down tasks. Task execution and delegation are unavailable; provide a plan without claiming to execute it."
             if auto_search and config["ollama_context_tokens"] < 8192:
                 raise ValueError("Automatic web search needs at least 8192 context tokens. Update Local worker settings or disable search.")
+            pending_local = [entry for entry in state["ledger"] if entry["status"] == "reserved"
+                             and (entry.get("protocol") == "ollama" or entry.get("job_id"))]
+            if any(entry.get("local_unknown") and not entry.get("connection_config") for entry in pending_local):
+                raise ValueError("An interrupted local request has no saved endpoint. Restore its original Local Ollama server URL in Settings, then use Connect and load models to verify model unloading.")
+            if pending_local:
+                raise ValueError("A local request is running or its completion is unknown. Wait for completion or confirmed model unloading before sending again.")
             if not config["model"]:
                 raise ValueError("Choose a chat model in Settings before chatting.")
             if not local and not key:
@@ -459,8 +486,9 @@ class Provider:
             state["ledger"].append({"id": request_id, "at": self.stamp(), "model": config["model"], "protocol": config["protocol"],
                                     "thread_id": chat_id, "kind": "title" if title else role,
                                     "parent_id": title_for["request_id"] if title else None, "cost": reserve, "status": "reserved",
+                                    **({"connection_config": connection_config} if local else {}),
                                     **({"job_id": job["id"], "attempt": job["attempt"], "stage": job.get("stage", 0),
-                                        "mode": job.get("mode", "legacy"), "connection_config": connection_config}
+                                        "mode": job.get("mode", "legacy")}
                                        if job is not None else {})})
         payload = {"model": config["model"], "store": False}
         search_result = None
@@ -589,8 +617,8 @@ class Provider:
             with self.transaction() as state:
                 entry = next(x for x in state["ledger"] if x["id"] == request_id)
                 if entry["status"] == "reserved":
-                    if job is not None and isinstance(error, BackgroundUncertain) and dispatched:
-                        entry.update(background_unknown=True, cost=0)
+                    if local and isinstance(error, LocalUncertain) and dispatched:
+                        entry.update(cost=0, **({"background_unknown": True} if job is not None else {"local_unknown": True}))
                     elif local or (isinstance(error, ProviderFailure) and not error.may_be_billed):
                         entry.update({"status": "failed", "cost": 0})
                     else:

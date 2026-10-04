@@ -423,23 +423,31 @@ class OllamaTests(unittest.TestCase):
         self.assertTrue(all(request.url.host == "127.0.0.1" for request in self.requests))
         self.assertEqual(self.client.get("/api/workspace").json()["messages"], [])
 
-    def test_local_errors_release_reservations_redact_details_and_allow_retry(self):
+    def test_local_errors_retain_unknown_completion_and_redact_details(self):
         self.configure()
         secret = "synthetic-private-provider-error"
-        for failure in ("http", "timeout", "malformed", "missing_usage", "refusal"):
+        for failure in ("http", "timeout", "malformed", "incomplete", "connect", "rejected", "metadata_timeout", "missing_usage", "refusal"):
             calls = []
 
             def handler(request):
                 calls.append(request)
                 if request.url.path == "/api/show":
+                    if failure == "metadata_timeout":
+                        raise httpx.ReadTimeout(secret, request=request)
                     return httpx.Response(200, json={"details": {"format": "gguf"}, "capabilities": ["completion"]})
                 self.assertEqual(request.url.path, "/api/chat")
                 if failure == "http":
                     return httpx.Response(500, json={"error": secret})
                 if failure == "timeout":
                     raise httpx.ReadTimeout(secret, request=request)
+                if failure == "connect":
+                    raise httpx.ConnectError(secret, request=request)
+                if failure == "rejected":
+                    return httpx.Response(400, json={"error": secret})
                 if failure == "malformed":
                     return httpx.Response(200, text=secret)
+                if failure == "incomplete":
+                    return httpx.Response(200, json={"done": False})
                 if failure == "refusal":
                     return httpx.Response(200, json={"done": True, "message": {"content": None, "refusal": secret},
                                                      "prompt_eval_count": 100, "eval_count": 5})
@@ -451,7 +459,9 @@ class OllamaTests(unittest.TestCase):
             self.assertNotIn(secret, result.text)
             if failure == "missing_usage":
                 self.assertNotIn("reconcil", result.text.lower())
-            self.assertEqual([request.url.path for request in calls], ["/api/show", "/api/chat"])
+            self.assertEqual([request.url.path for request in calls], ["/api/show"] if failure == "metadata_timeout" else ["/api/show", "/api/chat"])
+            if failure == "metadata_timeout":
+                self.assertNotIn("unload", result.text)
             restored = self.client.get("/api/workspace").json()
             self.assertEqual(restored["messages"], [])
             self.assertNotIn(secret, json.dumps(restored))
@@ -459,11 +469,22 @@ class OllamaTests(unittest.TestCase):
             self.assertEqual(restored["usage"]["reserved_usd"], 0)
             self.assertEqual(restored["usage"]["uncertain"], [])
             self.assertEqual(restored["usage"]["today_usd"], 0)
+            service = Provider(backend.DATABASE, backend.TIMEZONE)
+            entry = service.read_state()["ledger"][-1]
+            unknown = failure in ("http", "timeout", "malformed", "incomplete")
+            self.assertEqual(entry["status"] == "reserved", unknown)
+            if unknown:
+                self.assertTrue(entry["local_unknown"])
+                with self.mock_http():
+                    retry = self.client.post("/api/chat", headers=self.headers, json={"text": "Blocked retry"})
+                self.assertEqual(retry.status_code, 409, retry.text)
+                with patch("backend.provider.background_network", return_value={"models": []}):
+                    service.recover_background()
         with self.mock_http():
             retried = self.client.post("/api/chat", headers=self.headers, json={"text": "A valid local retry"})
         self.assertEqual(retried.status_code, 200, retried.text)
 
-    def test_recovery_releases_local_reservation_instead_of_creating_uncertain_charge(self):
+    def test_recovery_retains_local_reservation_until_confirmed_model_unloading(self):
         self.configure()
         service = Provider(backend.DATABASE, backend.TIMEZONE)
         with service.transaction() as state:
@@ -478,6 +499,16 @@ class OllamaTests(unittest.TestCase):
         service.recover()
         self.assertEqual(service.usage()["uncertain"], [])
         self.assertEqual(service.usage()["reserved_usd"], 0)
+        self.assertEqual(service.read_state()["ledger"][-1]["status"], "reserved")
+        self.assertTrue(service.read_state()["ledger"][-1]["local_unknown"])
+        with self.mock_http():
+            blocked = self.client.post("/api/chat", headers=self.headers, json={"text": "Before confirmed unloading"})
+        self.assertEqual(blocked.status_code, 409, blocked.text)
+        with self.mock_http():
+            reconnected = self.client.post("/api/provider/test", headers=self.headers)
+        self.assertEqual(reconnected.status_code, 200, reconnected.text)
+        with patch("backend.provider.background_network", return_value={"models": []}):
+            service.recover_background()
         with self.mock_http():
             response = self.client.post("/api/chat", headers=self.headers, json={"text": "After local restart"})
         self.assertEqual(response.status_code, 200, response.text)

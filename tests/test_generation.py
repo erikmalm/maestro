@@ -10,7 +10,7 @@ import unittest
 from unittest.mock import patch
 
 from backend.memory import MemoryStore
-from backend.provider import DEFAULT, Provider, ProviderFailure
+from backend.provider import DEFAULT, LocalUncertain, Provider, ProviderFailure
 
 
 class GenerationTests(unittest.TestCase):
@@ -176,7 +176,121 @@ class GenerationTests(unittest.TestCase):
         with self.provider.transaction() as state:
             state["ledger"][0]["status"] = "reserved"
         self.provider.recover()
+        self.assertEqual(self.provider.read_state()["ledger"][0]["status"], "reserved")
+        self.assertTrue(self.provider.read_state()["ledger"][0]["local_unknown"])
+        with patch("backend.provider.background_network", return_value={"models": []}):
+            self.provider.recover_background()
         self.assertEqual(self.provider.read_state()["ledger"][0]["status"], "failed")
+
+    def test_unknown_chat_completion_blocks_chat_and_context_until_confirmed_unloaded(self):
+        def disconnect(config, key, method, path, payload=None):
+            if path == "/api/chat":
+                raise LocalUncertain("Synthetic disconnect", False)
+            return self.network(config, key, method, path, payload)
+        with patch("backend.provider.network", side_effect=disconnect), self.assertRaises(LocalUncertain):
+            self.provider.generate("Synthetic interrupted chat", "synthetic-chat")
+        entry = self.provider.read_state()["ledger"][-1]
+        self.assertEqual(entry["status"], "reserved")
+        self.assertTrue(entry["local_unknown"])
+        self.assertEqual(entry["connection_config"], self.provider.read_state()["config"])
+        self.assertNotIn("job_id", entry)
+        with patch("backend.provider.network") as dispatch:
+            for generate in (lambda: self.provider.generate("Retry", "synthetic-chat"),
+                             lambda: self.provider.generate_context(self.instructions, self.messages)):
+                with self.assertRaisesRegex(ValueError, "request is running"):
+                    generate()
+            dispatch.assert_not_called()
+        with patch("backend.provider.background_network", return_value={"models": [{"name": self.config["model"]}]}):
+            self.provider.recover_background()
+        self.assertEqual(self.provider.read_state()["ledger"][-1]["status"], "reserved")
+        with patch("backend.provider.background_network", return_value={"models": []}):
+            self.provider.recover_background()
+        self.assertEqual(self.provider.read_state()["ledger"][-1]["status"], "failed")
+        with patch("backend.provider.network", side_effect=self.network):
+            self.provider.generate_context(self.instructions, self.messages)
+        self.assertEqual(self.provider.read_state()["ledger"][-1]["status"], "settled")
+
+    def test_poll_never_releases_a_live_foreground_reservation(self):
+        def during_dispatch(config, key, method, path, payload=None):
+            if path == "/api/chat":
+                with patch("backend.provider.background_network", return_value={"models": []}) as poll:
+                    self.provider.recover_background()
+                poll.assert_not_called()
+                self.assertEqual(self.provider.read_state()["ledger"][-1]["status"], "reserved")
+            return self.network(config, key, method, path, payload)
+        with patch("backend.provider.network", side_effect=during_dispatch):
+            self.provider.generate("Synthetic active chat", "synthetic-chat")
+        self.assertEqual(self.provider.read_state()["ledger"][-1]["status"], "settled")
+
+    def test_unknown_title_completion_retains_gate_and_completed_chat(self):
+        workspace = json.loads(self.workspace_value())
+        workspace["chats"][0].update(title_source="fallback", messages=[])
+        with closing(sqlite3.connect(self.database)) as db, db:
+            db.execute("UPDATE workspace SET value=?", (json.dumps(workspace),))
+        with patch("backend.provider.network", side_effect=self.network):
+            result = self.provider.generate("Synthetic first request", "synthetic-chat")
+        self.assertTrue(result["title_ready"])
+        with patch("backend.provider.network", side_effect=LocalUncertain("Synthetic title timeout", False)), self.assertRaises(LocalUncertain):
+            self.provider.generate("", "synthetic-chat", title_for=result)
+        ledger = self.provider.read_state()["ledger"]
+        self.assertEqual([entry["status"] for entry in ledger], ["settled", "reserved"])
+        self.assertEqual(ledger[-1]["kind"], "title")
+        self.assertTrue(ledger[-1]["local_unknown"])
+        self.assertEqual(ledger[-1]["parent_id"], result["request_id"])
+        self.assertEqual(json.loads(self.workspace_value())["chats"][0]["messages"][-1]["text"], "Synthetic result")
+
+    def test_restart_recovery_uses_captured_local_connection_after_settings_change(self):
+        original = self.config.copy()
+        with self.provider.transaction() as state:
+            state["ledger"].append({"id": "synthetic-interrupted", "at": self.provider.stamp(),
+                                    "protocol": "ollama", "status": "reserved", "cost": 0,
+                                    "connection_config": original})
+            state["config"] = DEFAULT.copy()
+        self.provider.recover()
+        entry = self.provider.read_state()["ledger"][-1]
+        self.assertEqual(entry["status"], "reserved")
+        self.assertTrue(entry["local_unknown"])
+        with patch("backend.provider.background_network", return_value={"models": []}) as poll:
+            self.provider.recover_background()
+        self.assertEqual(poll.call_args.args[:3], (original, "/api/ps", None))
+        self.assertEqual(self.provider.read_state()["ledger"][-1]["status"], "failed")
+
+    def test_legacy_orphan_never_guesses_changed_local_endpoint_and_requires_reconnect(self):
+        original = self.provider.read_state()["config"].copy()
+        changed = {**original, "base_url": "http://127.0.0.1:11435"}
+        with self.provider.transaction() as state:
+            state["ledger"].append({"id": "synthetic-legacy-interrupted", "at": self.provider.stamp(),
+                                    "protocol": "ollama", "status": "reserved", "cost": 0})
+            state["config"] = changed
+        self.provider.recover()
+        with patch("backend.provider.background_network") as poll:
+            self.provider.recover_background()
+        poll.assert_not_called()
+        self.assertEqual(self.provider.read_state()["ledger"][-1]["status"], "reserved")
+        with patch("backend.provider.network") as dispatch, self.assertRaisesRegex(ValueError, "original Local Ollama server URL.*Connect and load models"):
+            self.provider.generate("Synthetic blocked retry", "synthetic-chat")
+        dispatch.assert_not_called()
+        self.provider.configure(original, "", False)
+        self.provider.recover()
+        self.assertNotIn("connection_config", self.provider.read_state()["ledger"][-1])
+        with patch("backend.provider.network", side_effect=ProviderFailure("Synthetic reconnect failure", False)), self.assertRaises(ProviderFailure):
+            self.provider.test()
+        self.assertNotIn("connection_config", self.provider.read_state()["ledger"][-1])
+        def stale_reconnect(config, key, method, path, payload=None):
+            self.provider.configure(changed, "", False)
+            return {"models": []}
+        with patch("backend.provider.network", side_effect=stale_reconnect), self.assertRaisesRegex(ValueError, "Connection settings changed"):
+            self.provider.test()
+        self.assertNotIn("connection_config", self.provider.read_state()["ledger"][-1])
+        self.provider.configure(original, "", False)
+        with patch("backend.provider.network", return_value={"models": []}) as reconnect:
+            self.provider.test()
+        self.assertEqual(reconnect.call_args.args[:4], (original, None, "GET", "/api/tags"))
+        self.assertEqual(self.provider.read_state()["ledger"][-1]["status"], "reserved")
+        with patch("backend.provider.background_network", return_value={"models": []}) as poll:
+            self.provider.recover_background()
+        self.assertEqual(poll.call_args.args[:3], (original, "/api/ps", None))
+        self.assertEqual(self.provider.read_state()["ledger"][-1]["status"], "failed")
 
     def test_explicit_memory_in_normal_local_chat_is_quoted_and_traceable(self):
         store = MemoryStore(self.database, timezone.utc)

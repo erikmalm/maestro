@@ -179,6 +179,38 @@ class ReflectionTests(unittest.TestCase):
         self.assertEqual(self.calls, [])
         self.assertEqual(self.store.status()["queued"], 1)
 
+    def test_unknown_foreground_dispatch_reports_wait_and_worker_recovers_only_after_unloading(self):
+        self.queue()
+        with self.provider.transaction() as state:
+            state["ledger"].append({"id": "foreground-unknown", "at": self.store.stamp(), "protocol": "ollama", "kind": "chat", "cost": 0,
+                                    "status": "reserved", "local_unknown": True, "connection_config": state["config"].copy()})
+        self.assertTrue(self.store.status()["waiting_for_ollama"])
+        self.assertTrue(self.store.status()["running"])
+        with patch("backend.provider.background_network", return_value={"models": [{"name": "qwen2.5:7b"}]}):
+            self.worker.step()
+        self.assertEqual(self.calls, [])
+        self.assertEqual(self.store.status()["queued"], 1)
+        self.assertTrue(self.store.status()["waiting_for_ollama"])
+        self.worker.step()
+        self.assertEqual([path for _, path, _ in self.calls], ["/api/ps", "/api/show", "/api/chat"])
+        self.assertFalse(self.store.status()["waiting_for_ollama"])
+        self.assertEqual(len(self.store.status()["candidates"]), 1)
+        orphan = self.provider.read_state()["ledger"][0]
+        self.assertEqual(orphan["status"], "failed")
+        self.assertFalse(orphan["local_unknown"])
+
+    def test_missing_endpoint_for_interrupted_foreground_dispatch_has_an_actionable_stop_reason(self):
+        with self.provider.transaction() as state:
+            state["ledger"].append({"id": "legacy-local", "protocol": "ollama", "cost": 0,
+                                    "status": "reserved", "local_unknown": True})
+        status = self.store.status()
+        self.assertTrue(status["waiting_for_ollama"])
+        self.assertIn("Restore its original Local Ollama server URL in Settings", status["last_stop_reason"])
+        self.assertIn("Connect and load models", status["last_stop_reason"])
+        self.worker.step()
+        self.assertEqual(self.calls, [])
+        self.assertEqual(self.provider.read_state()["ledger"][0]["status"], "reserved")
+
     def test_debounced_chat_does_not_block_another_chat_that_is_ready(self):
         self.workspace["work_config"]["debounce_seconds"] = 60
         self.queue()

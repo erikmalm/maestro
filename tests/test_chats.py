@@ -411,11 +411,30 @@ class ChatTests(unittest.TestCase):
             return self.handler(request)
         with self.mock_http(handler):
             result = self.send(chat_id)
-        self.assertEqual(result.status_code, 200)
-        self.assertEqual(self.workspace()["usage"]["uncertain"], [])
-        Provider(backend.DATABASE, backend.TIMEZONE).recover()
+        self.assertEqual(result.status_code, 200, result.text)
+        completed = self.workspace(chat_id)
+        self.assertEqual(completed["messages"][-1]["text"], "Synthetic useful reply")
+        self.assertEqual(completed["chats"][0]["title"], "Plan a quiet weekend")
+        self.assertEqual(completed["usage"]["uncertain"], [])
+        service = Provider(backend.DATABASE, backend.TIMEZONE)
+        service.recover()
+        with patch("backend.provider.background_network", return_value={"models": [{"name": self.config["model"]}]}):
+            service.recover_background()
+        request_count = len(self.requests)
         with self.mock_http():
-            self.assertEqual(self.send(chat_id, "Continue").status_code, 200)
+            blocked = self.send(chat_id, "Continue")
+        self.assertEqual(blocked.status_code, 409, blocked.text)
+        self.assertEqual(len(self.requests), request_count)
+        self.assertEqual(self.workspace(chat_id)["messages"], completed["messages"])
+        self.assertEqual([(entry["kind"], entry["status"]) for entry in service.read_state()["ledger"]],
+                         [("chat", "settled"), ("title", "reserved")])
+        with patch("backend.provider.background_network", return_value={"models": []}):
+            service.recover_background()
+        with self.mock_http():
+            continued = self.send(chat_id, "Continue")
+        self.assertEqual(continued.status_code, 200, continued.text)
+        self.assertEqual(continued.json()["chats"][0]["title"], "Plan a quiet weekend")
+        self.assertEqual(len(continued.json()["messages"]), 4)
         self.assertEqual(sum(self.is_title(payload) for _, payload in self.requests), 1)
 
     def test_output_token_and_spend_bounds_skip_optional_title(self):

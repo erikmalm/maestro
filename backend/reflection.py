@@ -134,6 +134,33 @@ def unchanged_memory(draft, target):
     return target and (draft["content"].strip(), draft["kind"], draft["scope"]) == (target["content"], target["kind"], target["scope"])
 
 
+def memory_dependencies(selected, inventory, changing):
+    """Retain source revisions, expanding inputs invalidated by approved changes."""
+    dependents = {}
+    for record in inventory.values():
+        if not record["pinned"]:
+            for source in record["provenance"]:
+                if "memory_id" in source:
+                    dependents.setdefault(source["memory_id"], set()).add(record["id"])
+    affected, pending = set(changing), list(changing)
+    while pending:
+        for memory_id in dependents.get(pending.pop(), set()) - affected:
+            affected.add(memory_id)
+            pending.append(memory_id)
+    provenance, expanded = [], set()
+    pending = [{"memory_id": record["id"], "hash": revision(record)} for record in reversed(list(selected))]
+    while pending:
+        source = pending.pop()
+        memory_id = source.get("memory_id")
+        if memory_id in affected:
+            if memory_id not in expanded:
+                expanded.add(memory_id)
+                pending.extend(reversed(inventory[memory_id]["provenance"]))
+        else:
+            provenance.append(source)
+    return provenance
+
+
 def fact_wording(text):
     """Normalize grammatical person without losing order, negation or stop words."""
     text = " ".join(text.casefold().split()).rstrip(".")
@@ -166,6 +193,7 @@ def failure_reason(error):
         "A proposal was not a supported durable user fact.": "Reflection proposed an unsupported durable user fact; no memory was saved.",
         "Source instructions cannot become memory.": "Reflection proposed source instructions as memory; no memory was saved.",
         "Reflection cannot change one memory twice in a batch.": "Reflection tried to change one memory twice; no memory was saved.",
+        "Reflection cannot apply an approved memory change.": "An approved memory change could not be applied; no memory or task was saved.",
         "Reflection cannot change a pinned or unavailable memory.": "Reflection tried to change a pinned or unavailable memory; no memory was saved.",
         "Reflection cannot change a memory's scope.": "Reflection tried to change a memory's scope; no memory was saved.",
         "Reflection cannot change a memory's kind.": "Reflection tried to change a memory's kind; no memory was saved.",
@@ -782,15 +810,17 @@ class ReflectionStore:
             safe_proposal(body["summary"], validator)
             changes = []
             store = MemoryStore(self.database, self.timezone)
-            snapshots = {memory["id"]: MemoryStore.record(db.execute("SELECT * FROM private_memories WHERE id=?", (memory["id"],)).fetchone()) for memory in job["memory_versions"]}
+            inventory = {record["id"]: record for row in db.execute("SELECT * FROM private_memories") for record in [MemoryStore.record(row)]}
+            snapshots = {memory["id"]: inventory[memory["id"]] for memory in job["memory_versions"]}
             row = db.execute("SELECT * FROM private_memories WHERE json_extract(metadata,'$.kind')='identity' ORDER BY origin='explicit' DESC LIMIT 1").fetchone()
             identity = MemoryStore.record(row) if row else None
             mutating_ids = set()
             for index in body["approved"]:
                 draft = drafts[index]
                 target = identity if draft["operation"] == "add" and draft["kind"] == "identity" else snapshots.get(draft["memory_id"])
-                if target and not target["pinned"] and (draft["operation"] == "remove" or not unchanged_memory(draft, target)):
+                if target and target["id"] in snapshots and not target["pinned"] and (draft["operation"] == "remove" or not unchanged_memory(draft, target)):
                     mutating_ids.add(target["id"])
+            dependencies = memory_dependencies(snapshots.values(), inventory, mutating_ids) if job["mode"] == "periodic" else []
             for index in body["approved"]:
                 draft = drafts[index]
                 target = db.execute("SELECT * FROM private_memories WHERE id=?", (draft["memory_id"],)).fetchone() if draft["memory_id"] else None
@@ -808,23 +838,23 @@ class ReflectionStore:
                 if operation == "update" and unchanged_memory(draft, target):
                     continue
                 if operation == "remove":
-                    store.remove_dependents(db, target["id"])
                     db.execute("DELETE FROM private_memories WHERE id=?", (target["id"],))
+                    store.remove_stale(db, store.chats(db))
                     changes.append({"operation": operation, "memory_id": target["id"], "kind": target["kind"], "scope": target["scope"], "content": ""})
                     continue
                 provenance = [source for source in self.provenance(job) if source["message_id"] == draft["source_message_id"]]
                 if job["mode"] == "periodic":
-                    provenance = self.provenance(job)
-                    for memory in job["memory_versions"]:
-                        dependency = snapshots[memory["id"]]
-                        provenance.extend(dependency["provenance"] if dependency["origin"] == "reflective" or memory["id"] in mutating_ids else [{"memory_id": memory["id"], "hash": memory["hash"]}])
+                    provenance = self.provenance(job) + dependencies
                     provenance = list({json.dumps(source, sort_keys=True): source for source in provenance}.values())
-                    provenance = [source for source in provenance if source.get("memory_id") not in mutating_ids]
                 if MemoryStore.blocked(db, draft["content"] if job["mode"] == "periodic" else None, provenance):
+                    if target and target["id"] in mutating_ids and target["id"] not in {change["memory_id"] for change in changes}:
+                        raise ValueError("Reflection cannot apply an approved memory change.")
                     continue
                 if job["mode"] == "periodic" and any((row := db.execute("SELECT scope FROM private_memories WHERE id=?", (source["memory_id"],)).fetchone()) and row[0] != "workspace" for source in provenance if "memory_id" in source):
                     raise ValueError("Conversation memory cannot become workspace identity.")
                 if db.execute("SELECT 1 FROM private_memories WHERE content=? AND (scope='workspace' OR chat_id=?) AND id!=?", (draft["content"], job["chat_id"], target["id"] if target else "")).fetchone():
+                    if target and target["id"] in mutating_ids and target["id"] not in {change["memory_id"] for change in changes}:
+                        raise ValueError("Reflection cannot apply an approved memory change.")
                     continue
                 if not target and db.execute("SELECT COUNT(*) FROM private_memories").fetchone()[0] >= MAX_MEMORIES:
                     continue
@@ -835,8 +865,8 @@ class ReflectionStore:
                           "source_message_id": source["message_id"] if source else None, "source_hash": source["hash"] if source else None,
                           "evidence": draft["evidence"] or None, "provenance": provenance, "created_at": target["created_at"] if target else stamp, "updated_at": stamp}
                 if target:
-                    store.remove_dependents(db, target["id"])
                     db.execute("DELETE FROM private_memories WHERE id=?", (target["id"],))
+                    store.remove_stale(db, store.chats(db))
                 inventory = {memory["id"]: memory for row in db.execute("SELECT * FROM private_memories") for memory in [MemoryStore.record(row)]}
                 if not store.valid_source(record, store.chats(db), inventory):
                     raise ValueError("Reflection paused because a memory source changed.")
@@ -847,9 +877,8 @@ class ReflectionStore:
             created = []
             if job.get("tasks_enabled"):
                 inventory = {memory["id"]: memory for row in db.execute("SELECT * FROM private_memories") for memory in [MemoryStore.record(row)]}
-                provenance = self.provenance(job)
+                provenance = self.provenance(job) + dependencies
                 for memory in snapshots.values():
-                    provenance.extend(memory["provenance"])
                     if memory["id"] in inventory:
                         provenance.append({"memory_id": memory["id"], "hash": revision(inventory[memory["id"]])})
                 provenance = list({json.dumps(source, sort_keys=True): source for source in provenance
@@ -921,16 +950,24 @@ class ReflectionStore:
             jobs = db.execute("SELECT state,data FROM reflection_jobs ORDER BY rowid DESC").fetchall()
             budget = db.execute("SELECT jobs,tokens FROM reflection_budget WHERE day=?", (self.day(),)).fetchone() or (0, 0)
             active_jobs = {json.loads(raw)["id"] for state, raw in jobs if state in ("claimed", "reviewing", "dispatched")}
-            unknown = any(entry.get("job_id") and entry["status"] == "reserved"
-                          and (entry.get("background_unknown") or entry["job_id"] not in active_jobs)
-                          for entry in self.read_provider(db).get("ledger", []))
+            ledger = self.read_provider(db).get("ledger", [])
+            missing_endpoint = any(entry["status"] == "reserved" and entry.get("local_unknown") and not entry.get("connection_config")
+                                   for entry in ledger)
+            unknown = any(entry["status"] == "reserved" and (entry.get("local_unknown") or
+                          (entry.get("job_id") and (entry.get("background_unknown") or entry["job_id"] not in active_jobs)))
+                          for entry in ledger)
+            stop_reason = json.loads(jobs[0][1]).get("stop_reason") if jobs else None
+            if missing_endpoint:
+                stop_reason = "An interrupted local request has no saved endpoint. Restore its original Local Ollama server URL in Settings, then use Connect and load models to verify model unloading."
+            elif unknown:
+                stop_reason = "Ollama may still be running; waiting for confirmed model unloading."
             workspace = self.workspace(db)
             candidates = [json.loads(row[0]) for row in db.execute("SELECT data FROM reflection_candidates WHERE state='pending' ORDER BY rowid DESC")]
             candidates = [candidate for candidate in candidates if (source := self.source_map(workspace, candidate["chat_id"]).get(candidate["source_message_id"])) is not None and digest(source) == candidate["source_hash"]]
             journal = [json.loads(row[0]) for row in db.execute("SELECT data FROM reflection_journal ORDER BY rowid DESC LIMIT 100")] if db.execute("SELECT 1 FROM sqlite_master WHERE name='reflection_journal'").fetchone() else []
             schedule = db.execute("SELECT next_due FROM reflection_schedule WHERE id=1").fetchone() if db.execute("SELECT 1 FROM sqlite_master WHERE name='reflection_schedule'").fetchone() else None
             return {"queued": sum(state == "queued" for state, _ in jobs), "running": unknown or bool(active_jobs),
-                    "last_stop_reason": "Ollama may still be running; waiting for confirmed model unloading." if unknown else json.loads(jobs[0][1]).get("stop_reason") if jobs else None,
+                    "last_stop_reason": stop_reason,
                     "waiting_for_ollama": unknown, "candidates": candidates, "today_jobs": budget[0], "today_tokens": budget[1], "journal": journal,
                     "next_reflection_at": datetime.fromtimestamp(schedule[0], self.timezone).isoformat() if schedule and schedule[0] and (policy := config_value(workspace))["enabled"] and policy["auto_curate"] and policy["periodic_reflection"] else None}
 
@@ -946,7 +983,8 @@ class ReflectionWorker:
             if self.pending_failure is not None:
                 self.store.finish_failure(*self.pending_failure)
                 self.pending_failure = None
-            if any(entry.get("job_id") and entry["status"] == "reserved" for entry in self.provider.read_state().get("ledger", [])):
+            if any(entry["status"] == "reserved" and (entry.get("job_id") or entry.get("local_unknown"))
+                   for entry in self.provider.read_state().get("ledger", [])):
                 self.provider.recover_background()
             prepared = self.store.prepare()
             if prepared is None:

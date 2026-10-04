@@ -453,7 +453,7 @@ export default function App() {
   }
   function refreshWorkspace() {
     const revision = ++workspaceRevision.current;
-    void api
+    return api
       .loadWorkspace()
       .then((next) => {
         if (workspaceRevision.current === revision) applyWorkspace(next);
