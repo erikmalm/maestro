@@ -1070,7 +1070,9 @@ test("a delayed limits save keeps newer provider settings", async ({
   await page
     .getByRole("button", { name: "View usage and manage budgets" })
     .click();
-  await expect(page.getByLabel("Per day", { exact: true })).toHaveValue("9");
+  await expect(
+    page.getByRole("dialog").getByLabel("Per day", { exact: true }),
+  ).toHaveValue("9");
 });
 
 test("settings refreshes preserve an explicitly selected new chat", async ({

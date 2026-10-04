@@ -468,17 +468,13 @@ function ContextArchiveSetup({
   const [pauseRequested, setPauseRequested] = useState(false);
   const rebuildContinue = useRef(false);
   const rebuildActive = useRef(active);
-  const mounted = useRef(true);
-  useEffect(() => {
-    mounted.current = true;
-    return () => {
-      mounted.current = false;
-      rebuildContinue.current = false;
-    };
-  }, []);
   useEffect(() => {
     rebuildActive.current = active;
-    if (!active) rebuildContinue.current = false;
+    setRebuildProgress(undefined);
+    return () => {
+      rebuildActive.current = false;
+      rebuildContinue.current = false;
+    };
   }, [active]);
   const progress =
     rebuildProgress === undefined ? status.rebuild_progress : rebuildProgress;
@@ -491,7 +487,7 @@ function ContextArchiveSetup({
       () =>
         onAction(() =>
           api.rebuildContextArchive((next) => {
-            if (!mounted.current || !rebuildActive.current) return false;
+            if (!rebuildActive.current) return false;
             setRebuildProgress(next.rebuild_progress);
             return rebuildContinue.current;
           }),
@@ -499,7 +495,7 @@ function ContextArchiveSetup({
       "",
       () => onAction(api.loadContextArchive),
     );
-    if (mounted.current) setRebuildProgress(undefined);
+    if (rebuildActive.current) setRebuildProgress(undefined);
   }
   return (
     <section className="card reflection-box context-archive-setup">
@@ -2380,66 +2376,64 @@ export default function App() {
           </main>
         )}
 
-        {reflectionVisible && (
-          <main className="page-content" hidden={page !== "settings"}>
-            <div className="page-heading">
-              <div>
-                <h1>Settings</h1>
-                <p>Configure your model, optional search and usage limits.</p>
-              </div>
+        <main className="page-content" hidden={page !== "settings"}>
+          <div className="page-heading">
+            <div>
+              <h1>Settings</h1>
+              <p>Configure your model, optional search and usage limits.</p>
+            </div>
+            <button
+              className="button secondary"
+              onClick={() => navigate("memory")}
+            >
+              <Network size={16} />
+              Open memory
+            </button>
+          </div>
+          <div className="settings-layout">
+            <div className="card settings-card">
+              <h2>Spending limits</h2>
+              <LimitsForm
+                limits={workspace.limits}
+                onSave={(limits) => void saveLimits(limits)}
+                busy={!!busy}
+              />
               <button
                 className="button secondary"
-                onClick={() => navigate("memory")}
+                onClick={() => setPanel("usage")}
               >
-                <Network size={16} />
-                Open memory
+                Open usage
               </button>
             </div>
-            <div className="settings-layout">
-              <div className="card settings-card">
-                <h2>Spending limits</h2>
-                <LimitsForm
-                  limits={workspace.limits}
-                  onSave={(limits) => void saveLimits(limits)}
-                  busy={!!busy}
-                />
-                <button
-                  className="button secondary"
-                  onClick={() => setPanel("usage")}
-                >
-                  Open usage
-                </button>
-              </div>
-              <div className="settings-side">
-                {workspace.work && (
-                  <WorkSetup
-                    initialStatus={workspace.work}
-                    provider={workspace.provider}
-                    onSave={saveWorkConfig}
-                  />
-                )}
-                <ProviderSetup
-                  initialStatus={workspace.provider}
-                  onChange={refreshWorkspace}
-                />
-                <OllamaSearchSetup
-                  initialStatus={workspace.web_search}
+            <div className="settings-side">
+              {workspace.work && (
+                <WorkSetup
+                  initialStatus={workspace.work}
                   provider={workspace.provider}
-                  onChange={refreshWorkspace}
+                  onSave={saveWorkConfig}
                 />
-                {workspace.context_archive && (
-                  <ContextArchiveSetup
-                    initialStatus={workspace.context_archive}
-                    onAction={archiveAction}
-                    active={page === "settings"}
-                    onOpenSource={setSourceView}
-                    removedCaptureIds={removedCaptureIds}
-                  />
-                )}
-              </div>
+              )}
+              <ProviderSetup
+                initialStatus={workspace.provider}
+                onChange={refreshWorkspace}
+              />
+              <OllamaSearchSetup
+                initialStatus={workspace.web_search}
+                provider={workspace.provider}
+                onChange={refreshWorkspace}
+              />
+              {workspace.context_archive && (
+                <ContextArchiveSetup
+                  initialStatus={workspace.context_archive}
+                  onAction={archiveAction}
+                  active={page === "settings"}
+                  onOpenSource={setSourceView}
+                  removedCaptureIds={removedCaptureIds}
+                />
+              )}
             </div>
-          </main>
-        )}
+          </div>
+        </main>
         {reflectionVisible && (
           <main className="page-content" hidden={page !== "memory"}>
             <div className="page-heading">

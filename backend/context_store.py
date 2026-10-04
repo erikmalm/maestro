@@ -237,7 +237,7 @@ def timestamp(value):
         if parsed.tzinfo is None:
             raise ValueError()
         return parsed.astimezone(timezone.utc).isoformat()
-    except (ValueError, TypeError, AttributeError):
+    except (ValueError, TypeError, AttributeError, OverflowError):
         raise ValueError("Source retrieval time must include its timezone.") from None
 
 
@@ -479,7 +479,7 @@ class ContextStore:
                 if config != self._state()["config"]:
                     self._invalidate_rebuild()
                 # Saving a lower cap remains possible for an already larger archive.
-                total, items, _ = self._inventory(MAX_ARCHIVE_ITEMS)
+                total, items, _ = self._inventory()
                 with self._transaction() as (state, db):
                     state.update(config=config, last_error=None, write_unavailable=False,
                                  archive_bytes=total, archive_items=items)
@@ -493,7 +493,9 @@ class ContextStore:
                     db.execute("DELETE FROM context_queries")
         return self.status()
 
-    def _inventory(self, max_items):
+    def _inventory(self, max_items=None):
+        """Recovery allows one tombstone per capture; acquisition passes its cap."""
+        max_items = MAX_ARCHIVE_ITEMS * 2 if max_items is None else max_items
         count = total = 0
         captures = []
         started = time.monotonic()
@@ -873,7 +875,7 @@ class ContextStore:
             if not self._deleted(capture_id):
                 self.get_capture(capture_id)
                 self._publish(relative, json.dumps({"schema_version": SCHEMA, "capture_id": capture_id}).encode())
-            total, items, _ = self._inventory(MAX_ARCHIVE_ITEMS)
+            total, items, _ = self._inventory()
             with self._transaction() as (state, db):
                 state.update(archive_bytes=total, archive_items=items)
                 for key, raw in db.execute("SELECT key,captures FROM context_queries").fetchall():
@@ -933,7 +935,7 @@ class ContextStore:
             if continuation is not None and (job is None or job["id"] != continuation):
                 raise ValueError("The archive changed during index rebuild. Start or resume a new rebuild.")
             if job is None:
-                total, items, paths = self._inventory(config["max_items"])
+                total, items, paths = self._inventory()
                 job = {"id": uuid.uuid4().hex, "config": config, "processed": 0, "total": len(paths),
                        "missing": 0, "corrupt": 0, "inventory_hash": self._capture_inventory_hash(paths)}
                 with closing(self._index_connection(stage)) as db, db:
@@ -965,7 +967,7 @@ class ContextStore:
             progress = {field: job[field] for field in ("id", "processed", "total")}
             progress["complete"] = complete
             if complete:
-                total, items, paths = self._inventory(config["max_items"])
+                total, items, paths = self._inventory()
                 if self._capture_inventory_hash(paths) != job["inventory_hash"]:
                     self._invalidate_rebuild()
                     raise ValueError("The archive changed during index rebuild. Start or resume a new rebuild.")

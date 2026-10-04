@@ -537,6 +537,31 @@ class ContextStoreTests(unittest.TestCase):
         self.store.configure(changed)
         self.assertEqual(self.store.get_capture(saved["capture_id"]), saved)
 
+    def test_out_of_range_utc_manifest_times_do_not_block_healthy_sources(self):
+        self.enable()
+        broken = []
+        for offset in ("0001-01-01T00:00:00+01:00", "9999-12-31T23:59:59-01:00"):
+            query = "Invalid retrieval time " + offset
+            saved = self.capture(query=query)["sources"][0]
+            path = next(path for path in self.manifests() if path.stem == saved["capture_id"])
+            manifest = json.loads(path.read_text(encoding="utf-8"))
+            manifest["retrieved_at"] = offset
+            path.write_text(json.dumps(manifest), encoding="utf-8")
+            broken.append((query, saved))
+        healthy = self.capture(query="Healthy source", sources=[{
+            **self.source, "url": self.source["url"] + "/healthy", "content": "Healthy historical evidence."}])["sources"][0]
+        for query, source in broken:
+            with self.subTest(query=query):
+                with self.assertRaises(KeyError):
+                    self.store.get_capture(source["capture_id"], source["content_hash"], source["manifest_hash"])
+                self.assertIsNone(self.store.lookup(query, 3))
+        self.assertEqual(self.store.search("historical evidence")["sources"], [{**healthy, "stale": False}])
+        rebuilt = self.store.rebuild()
+        self.assertTrue(rebuilt["rebuild_progress"]["complete"])
+        self.assertEqual((rebuilt["indexed_count"], rebuilt["corrupt_count"]), (1, 2))
+        self.assertEqual(self.store.get_capture(healthy["capture_id"], healthy["content_hash"], healthy["manifest_hash"]), healthy)
+        self.assertEqual(self.store.search("historical evidence")["sources"], [{**healthy, "stale": False}])
+
     def test_interrupted_publication_leaves_no_reusable_partial_capture(self):
         self.enable()
         original = self.store._publish
@@ -580,6 +605,88 @@ class ContextStoreTests(unittest.TestCase):
         self.assertIsNone(self.store.lookup(self.query, 3))
         with closing(sqlite3.connect(self.store.index)) as db:
             self.assertEqual(db.execute("SELECT COUNT(*) FROM captures_fts WHERE id=?", (first["capture_id"],)).fetchone()[0], 0)
+
+    def test_full_item_cap_keeps_all_deletion_and_recovery_operations_available(self):
+        self.config["max_items"] = 100
+        # Scale the global hard bound down, then fill it using legitimate captures.
+        with patch("backend.context_store.MAX_ARCHIVE_ITEMS", 100), self.store.archive_owner():
+            self.enable()
+            first = self.capture()["sources"][0]
+            healthy = self.capture(query="Healthy source", sources=[{
+                **self.source, "url": self.source["url"] + "/healthy", "content": "Healthy historical evidence."}])["sources"][0]
+            saved = [first, healthy]
+            for number in range(100 - self.store._inventory()[1]):
+                source = self.capture(query="Repeated capture " + str(number))["sources"][0]
+                self.assertEqual(source["archive_status"], "saved")
+                saved.append(source)
+            self.assertEqual(self.store._inventory()[1], 100)
+            self.store.delete_capture(first["capture_id"])
+            measured = self.store._inventory()[:2]
+            status = self.store.status()
+            self.assertEqual((status["archive_bytes"], status["archive_items"]), measured)
+            self.assertEqual(measured[1], 102)  # One deletion directory and tombstone.
+            self.assertIsNone(self.store.lookup(self.query, 3))
+            with closing(sqlite3.connect(self.database)) as db:
+                self.assertEqual(db.execute("SELECT COUNT(*) FROM context_queries WHERE query=?", (self.query,)).fetchone()[0], 0)
+            with closing(sqlite3.connect(self.store.index)) as db:
+                for table in ("captures", "captures_fts"):
+                    self.assertEqual(db.execute("SELECT COUNT(*) FROM " + table + " WHERE id=?", (first["capture_id"],)).fetchone()[0], 0)
+            self.store.delete_capture(first["capture_id"])
+            self.assertEqual(self.store._inventory()[:2], measured)
+            self.assertEqual(self.store.rebuild()["indexed_count"], len(saved) - 1)
+            self.store.configure({**self.config, "enabled": False})
+            self.store.configure(self.config)
+            self.assertEqual(self.store.get_capture(healthy["capture_id"], healthy["content_hash"], healthy["manifest_hash"]), healthy)
+            for source in saved[1:]:
+                self.store.delete_capture(source["capture_id"])
+            measured = self.store._inventory()[:2]
+            self.assertLessEqual(measured[1], 200)
+            self.assertEqual(len(list(self.archive.glob("records/deletions/*.json"))), len(saved))
+            for source in saved:
+                self.store.delete_capture(source["capture_id"])
+                with self.assertRaises(KeyError):
+                    self.store.get_capture(source["capture_id"])
+            self.assertEqual(self.store._inventory()[:2], measured)
+            with closing(sqlite3.connect(self.database)) as db:
+                self.assertEqual(db.execute("SELECT COUNT(*) FROM context_queries").fetchone()[0], 0)
+            with closing(sqlite3.connect(self.store.index)) as db:
+                self.assertEqual(db.execute("SELECT COUNT(*) FROM captures_fts").fetchone()[0], 0)
+            self.store.configure({**self.config, "enabled": False})
+            self.store.configure(self.config)
+            self.assertEqual(self.store.rebuild()["indexed_count"], 0)
+            self.assertIn("archive_warning", self.capture(query="New acquisition"))
+            self.assertEqual(self.store._inventory()[:2], measured)
+            # Recovery is still bounded when unrelated external residue overfills it.
+            for number in range(201 - measured[1]):
+                (self.archive / ("external-" + str(number) + ".tmp")).write_bytes(b"residue")
+            old_index = self.store.index.read_bytes()
+            with self.assertRaisesRegex(ValueError, "scan allowance"):
+                self.store.rebuild()
+            with self.assertRaisesRegex(ValueError, "scan allowance"):
+                self.store.configure(self.config)
+            self.assertEqual(self.store.index.read_bytes(), old_index)
+            self.assertEqual(self.store.search("historical evidence")["sources"], [])
+
+    def test_lowered_acquisition_cap_does_not_prevent_existing_archive_rebuild(self):
+        self.config["max_items"] = 200
+        with patch("backend.context_store.MAX_ARCHIVE_ITEMS", 200), self.store.archive_owner():
+            self.enable()
+            saved = self.capture()["sources"][0]
+            path = self.manifests()[0]
+            template = json.loads(path.read_text(encoding="utf-8"))
+            for number in range(100):
+                capture_id = format(number, "032x")
+                (path.parent / (capture_id + ".json")).write_text(json.dumps({**template, "capture_id": capture_id}), encoding="utf-8")
+            measured = self.store._inventory()[:2]
+            self.assertGreater(measured[1], 100)
+            self.config["max_items"] = 100
+            self.store.configure(self.config)
+            status = self.store.rebuild()
+            self.assertEqual(status["indexed_count"], 101)
+            self.assertEqual((status["archive_bytes"], status["archive_items"]), measured)
+            self.assertEqual(self.store.get_capture(saved["capture_id"], saved["content_hash"], saved["manifest_hash"]), saved)
+            self.assertIn("archive_warning", self.capture(query="Over the lowered cap"))
+            self.assertEqual(self.store._inventory()[:2], measured)
 
     def test_disabling_or_changing_approved_scope_suppresses_retrieval(self):
         self.enable()

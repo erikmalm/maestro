@@ -49,14 +49,15 @@ test("empty workspace, manual tasks and budgets persist without model calls", as
   await page
     .getByRole("button", { name: "View usage and manage budgets" })
     .click();
-  await page.getByLabel("Per day", { exact: true }).fill("6");
-  await page.getByRole("button", { name: "Save limits" }).click();
+  const dialog = page.getByRole("dialog");
+  await dialog.getByLabel("Per day", { exact: true }).fill("6");
+  await dialog.getByRole("button", { name: "Save limits" }).click();
   await page.reload();
   await page
     .getByRole("button", { name: "View usage and manage budgets" })
     .click();
-  await expect(page.getByLabel("Per day", { exact: true })).toHaveValue("6");
-  await page.getByRole("button", { name: "Close dialog" }).click();
+  await expect(dialog.getByLabel("Per day", { exact: true })).toHaveValue("6");
+  await dialog.getByRole("button", { name: "Close dialog" }).click();
   await page.getByRole("button", { name: "Settings", exact: true }).click();
   await page.getByLabel("Per day", { exact: true }).fill("6.00");
   await page.getByRole("button", { name: "Save limits" }).click();
@@ -65,7 +66,6 @@ test("empty workspace, manual tasks and budgets persist without model calls", as
   await page
     .getByRole("button", { name: "View usage and manage budgets" })
     .click();
-  const dialog = page.getByRole("dialog");
   await dialog.getByLabel("Per chat request", { exact: true }).fill("3");
   await dialog.getByLabel("Per day", { exact: true }).fill("9");
   await dialog.getByLabel("Tokens per chat request").fill("110000");
@@ -668,13 +668,12 @@ test("local Ollama chat needs no key or USD budget and records native tokens", a
     name: "View usage and manage budgets",
   });
   await usageButton.click();
+  const dialog = page.getByRole("dialog");
   for (const label of ["Per chat request", "Per day", "Per month"]) {
-    await page.getByLabel(label, { exact: true }).fill("0");
+    await dialog.getByLabel(label, { exact: true }).fill("0");
   }
-  await page.getByRole("button", { name: "Save limits" }).click();
-  await expect(
-    page.getByRole("button", { name: "Close dialog" }),
-  ).not.toBeVisible();
+  await dialog.getByRole("button", { name: "Save limits" }).click();
+  await expect(dialog).not.toBeVisible();
   const before = (await (await page.request.get("/api/workspace")).json())
     .usage;
   const previousCostLabel = (await usageButton.innerText()).match(
