@@ -432,6 +432,13 @@ class ContextStore:
             raise ValueError("An archived source exceeds its supported size.")
         return data
 
+    def _read_json(self, relative, limit):
+        data = self._read(relative, limit)
+        try:
+            return json.loads(data)
+        except RecursionError:
+            raise ValueError("An archived JSON document is too deeply nested.") from None
+
     def _publish(self, relative, data):
         path = self._path(relative)
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -458,7 +465,7 @@ class ContextStore:
         expected = {"format": "maestro-public-context", "schema_version": SCHEMA}
         path = self._path("format.json")
         if path.exists():
-            if json.loads(self._read("format.json", 4096)) != expected:
+            if self._read_json("format.json", 4096) != expected:
                 raise ValueError("The archive uses an unsupported format.")
         else:
             self._publish("format.json", json.dumps(expected).encode())
@@ -535,7 +542,7 @@ class ContextStore:
         return self._path("records/deletions/" + capture_id + ".json").exists()
 
     def _manifest(self, relative, config):
-        data = json.loads(self._read(relative, MANIFEST_BYTES))
+        data = self._read_json(relative, MANIFEST_BYTES)
         required = {"schema_version", "capture_id", "source_id", "source_url", "title", "object", "retrieved_at", "content_kind", "completeness", "published_at", "modified_at"}
         if (not isinstance(data, dict) or set(data) != required or type(data["schema_version"]) is not int or data["schema_version"] != SCHEMA
                 or not isinstance(data["capture_id"], str) or not ID.fullmatch(data["capture_id"])

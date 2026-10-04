@@ -503,14 +503,12 @@ test("source index rebuild pauses after the current batch, refreshes invalidatio
   });
   await expect.poll(() => requests().length).toBe(4);
   api.state.context_archive!.rebuild_progress = null;
-  await api.held
-    .get(key)!
-    .fulfill({
-      status: 409,
-      json: {
-        detail: "The archive changed during rebuilding. Restart the rebuild.",
-      },
-    });
+  await api.held.get(key)!.fulfill({
+    status: 409,
+    json: {
+      detail: "The archive changed during rebuilding. Restart the rebuild.",
+    },
+  });
   await expect(card.getByRole("alert")).toHaveText(
     "The archive changed during rebuilding. Restart the rebuild.",
   );
@@ -585,14 +583,12 @@ for (const invalid of ["stalled", "changed_id", "over_limit"] as const) {
               complete: false,
             }
           : { id, processed: 2000, total: 200001, complete: false };
-    await api.held
-      .get(key)!
-      .fulfill({
-        json: {
-          ...api.state.context_archive,
-          rebuild_progress: invalidProgress,
-        },
-      });
+    await api.held.get(key)!.fulfill({
+      json: {
+        ...api.state.context_archive,
+        rebuild_progress: invalidProgress,
+      },
+    });
     await expect(card.getByRole("alert")).toHaveText(
       "Source index rebuild did not make valid progress. Refresh the archive status and retry.",
     );
@@ -1552,9 +1548,218 @@ test("saved citations expose original dates and text-only snapshots, with explic
     page.getByText("Sourced answer [1]", { exact: true }),
   ).toBeVisible();
   await page.getByRole("button", { name: "View saved source 1" }).click();
-  await expect(page.getByRole("alert")).toHaveText(
-    "This saved source is unavailable.",
+  await expect(viewer.getByText(/Saved source removed/)).toBeVisible();
+  expect(
+    api.requests.filter(
+      (request) =>
+        request.method === "GET" &&
+        request.path === "/api/context/sources/capture-one",
+    ),
+  ).toHaveLength(1);
+});
+
+for (const read of ["loaded", "pending"] as const) {
+  test(`a reopened ${read} viewer cannot retain evidence after its earlier deletion completes`, async ({
+    page,
+  }) => {
+    const state = workspace();
+    state.messages = [
+      {
+        id: "answer",
+        role: "assistant",
+        text: "Sourced answer",
+        web_search: {
+          query: "public reference",
+          at: retrieved,
+          sources: [source],
+        },
+      },
+    ];
+    const api = await fixture(page, state);
+    const path = `/api/context/sources/${source.capture_id}`;
+    const open = page.getByRole("button", { name: "View saved source 1" });
+    const viewer = page.getByRole("dialog", {
+      name: "Saved source",
+      exact: true,
+    });
+    await open.click();
+    await expect(viewer.getByLabel("Saved source text")).toHaveText(
+      source.content,
+    );
+    api.hold.add(`DELETE ${path}`);
+    await viewer
+      .getByRole("button", { name: "Remove saved source", exact: true })
+      .click();
+    await viewer.getByRole("button", { name: "Confirm removal" }).click();
+    await expect.poll(() => api.held.has(`DELETE ${path}`)).toBe(true);
+    await viewer.getByRole("button", { name: "Close dialog" }).click();
+    if (read === "pending") api.hold.add(`GET ${path}`);
+    await open.click();
+    if (read === "pending")
+      await expect.poll(() => api.held.has(`GET ${path}`)).toBe(true);
+    else
+      await expect(viewer.getByLabel("Saved source text")).toHaveText(
+        source.content,
+      );
+    api.missing.add(source.capture_id);
+    state.context_archive!.indexed_count -= 1;
+    await api.held
+      .get(`DELETE ${path}`)!
+      .fulfill({ json: state.context_archive });
+    await expect(viewer.getByText(/Saved source removed/)).toBeVisible();
+    await expect(viewer.getByLabel("Saved source text")).toHaveCount(0);
+    if (read === "pending") {
+      await api.held.get(`GET ${path}`)!.fulfill({ json: source });
+      await expect(viewer.getByLabel("Saved source text")).toHaveCount(0);
+    }
+    await viewer.getByRole("button", { name: "Close dialog" }).click();
+    await open.click();
+    await expect(viewer.getByText(/Saved source removed/)).toBeVisible();
+    expect(
+      api.requests.filter(
+        (request) => request.path === path && request.method === "GET",
+      ),
+    ).toHaveLength(2);
+  });
+}
+
+for (const refresh of ["failed", "stale"] as const) {
+  test(`confirmed archive revocation survives an unrelated ${refresh} workspace refresh`, async ({
+    page,
+  }) => {
+    const api = await fixture(page);
+    const olderWorkspace = structuredClone(api.state);
+    let workspaceRead: Route | undefined;
+    let refreshes = 0;
+    await page.route("**/api/provider/test", (route) =>
+      route.fulfill({ json: api.state.provider }),
+    );
+    await page.route("**/api/workspace*", (route) => {
+      refreshes += 1;
+      if (refresh === "failed")
+        return route.fulfill({
+          status: 503,
+          json: { detail: "Synthetic workspace refresh failed." },
+        });
+      workspaceRead = route;
+    });
+    await page.getByRole("button", { name: "Settings", exact: true }).click();
+    const card = page.locator(".context-archive-setup");
+    const keywords = card.getByLabel("Keywords", { exact: true });
+    await keywords.fill("Keep this saved search draft");
+    await card
+      .getByRole("button", { name: "Search saved sources", exact: true })
+      .click();
+    await expect(
+      card.getByRole("button", { name: "View saved result 1" }),
+    ).toBeVisible();
+    await card.getByLabel("Save and reuse public search results").uncheck();
+    api.hold.add("PUT /api/context");
+    await card.getByRole("button", { name: "Save source settings" }).click();
+    await expect.poll(() => api.held.has("PUT /api/context")).toBe(true);
+    await card.getByLabel("Reuse saved searches for (hours)").fill("72");
+    await page.getByRole("button", { name: "Connect and load models" }).click();
+    await expect.poll(() => refreshes).toBe(1);
+    await card.getByRole("button", { name: "View saved result 1" }).click();
+    const viewer = page.getByRole("dialog", {
+      name: "Saved source",
+      exact: true,
+    });
+    await expect(viewer.getByLabel("Saved source text")).toHaveText(
+      source.content,
+    );
+    const save = api.held.get("PUT /api/context")!;
+    api.state.context_archive!.config = save.request().postDataJSON();
+    api.missing.add(source.capture_id);
+    await save.fulfill({ json: api.state.context_archive });
+    await expect(viewer.getByRole("alert")).toHaveText(
+      "This saved source is unavailable.",
+    );
+    if (workspaceRead) await workspaceRead.fulfill({ json: olderWorkspace });
+    await expect(viewer.getByLabel("Saved source text")).toHaveCount(0);
+    await viewer.getByRole("button", { name: "Close dialog" }).click();
+    await expect(
+      card.getByLabel("Save and reuse public search results"),
+    ).not.toBeChecked();
+    await expect(
+      card.getByLabel("Reuse saved searches for (hours)"),
+    ).toHaveValue("72");
+    await expect(keywords).toHaveValue("Keep this saved search draft");
+    await page.getByRole("button", { name: "Workspace", exact: true }).click();
+    await expect(
+      (await openSearchOptions(page)).getByRole("status", {
+        name: "Source saving status",
+        exact: true,
+      }),
+    ).toContainText("Source saving is off.");
+    expect(refreshes).toBe(1);
+  });
+}
+
+test("archive actions serialize older status reads and continue after a rejected mutation", async ({
+  page,
+}) => {
+  const api = await fixture(page);
+  await page.getByRole("button", { name: "Settings", exact: true }).click();
+  const card = page.locator(".context-archive-setup");
+  await card.getByLabel("Keywords", { exact: true }).fill("public reference");
+  await card
+    .getByRole("button", { name: "Search saved sources", exact: true })
+    .click();
+  await expect(
+    card.getByRole("button", { name: "View saved result 1" }),
+  ).toBeVisible();
+  api.hold.add("GET /api/context");
+  await card.getByRole("button", { name: "Refresh archive status" }).click();
+  await expect.poll(() => api.held.has("GET /api/context")).toBe(true);
+  await card.getByRole("button", { name: "View saved result 1" }).click();
+  const viewer = page.getByRole("dialog", {
+    name: "Saved source",
+    exact: true,
+  });
+  await expect(viewer.getByLabel("Saved source text")).toHaveText(
+    source.content,
   );
+  const path = `/api/context/sources/${source.capture_id}`;
+  api.hold.add(`DELETE ${path}`);
+  await viewer
+    .getByRole("button", { name: "Remove saved source", exact: true })
+    .click();
+  await viewer.getByRole("button", { name: "Confirm removal" }).click();
+  await expect(
+    viewer.getByRole("button", { name: "Confirm removal" }),
+  ).toBeDisabled();
+  expect(
+    api.requests.filter((request) => request.method === "DELETE"),
+  ).toHaveLength(0);
+  await api.held
+    .get("GET /api/context")!
+    .fulfill({ json: api.state.context_archive });
+  await expect.poll(() => api.held.has(`DELETE ${path}`)).toBe(true);
+  await viewer.getByRole("button", { name: "Close dialog" }).click();
+  api.held.delete("GET /api/context");
+  api.hold.add("GET /api/context");
+  await card.getByRole("button", { name: "Refresh archive status" }).click();
+  await expect(
+    card.getByRole("button", { name: "Refresh archive status" }),
+  ).toBeDisabled();
+  expect(api.held.has("GET /api/context")).toBe(false);
+  await api.held
+    .get(`DELETE ${path}`)!
+    .fulfill({ status: 409, json: { detail: "Synthetic removal failed." } });
+  await expect.poll(() => api.held.has("GET /api/context")).toBe(true);
+  await api.held
+    .get("GET /api/context")!
+    .fulfill({ json: api.state.context_archive });
+  await expect(card.getByText("Archive status refreshed.")).toBeVisible();
+  await card.getByRole("button", { name: "View saved result 1" }).click();
+  await viewer
+    .getByRole("button", { name: "Remove saved source", exact: true })
+    .click();
+  await viewer.getByRole("button", { name: "Confirm removal" }).click();
+  await expect(viewer.getByText(/Saved source removed/)).toBeVisible();
+  await viewer.getByRole("button", { name: "Close dialog" }).click();
+  await expect(card.getByText(/1 saved source snapshots/)).toBeVisible();
 });
 
 test("unsaved evidence keeps live provenance and late snapshot reads cannot replace another source", async ({

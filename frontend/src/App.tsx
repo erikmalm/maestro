@@ -991,25 +991,18 @@ function SavedSource({
 }) {
   const [capture, setCapture] = useState<ContextCapture | null>(null);
   const [error, setError] = useState("");
-  const [loading, setLoading] = useState(true);
   const [removing, setRemoving] = useState(false);
   const [confirmRemove, setConfirmRemove] = useState(false);
-  const [removed, setRemoved] = useState(false);
   useEffect(() => {
     let active = true;
-    void api
-      .loadContextCapture(id, expectedHash, expectedManifestHash)
-      .then(
-        (next) => {
-          if (active) setCapture(next);
-        },
-        (reason: Error) => {
-          if (active) setError(reason.message);
-        },
-      )
-      .finally(() => {
-        if (active) setLoading(false);
-      });
+    void api.loadContextCapture(id, expectedHash, expectedManifestHash).then(
+      (next) => {
+        if (active) setCapture(next);
+      },
+      (reason: Error) => {
+        if (active) setError(reason.message);
+      },
+    );
     return () => {
       active = false;
     };
@@ -1021,7 +1014,6 @@ function SavedSource({
     try {
       await onAction(() => api.deleteContextCapture(id));
       onRemoved(id);
-      setRemoved(true);
     } catch (reason) {
       setError(
         reason instanceof Error
@@ -1032,14 +1024,7 @@ function SavedSource({
       setRemoving(false);
     }
   }
-  if (loading) return <p role="status">Loading saved source…</p>;
-  if (removed)
-    return (
-      <p role="status">
-        Saved source removed. Earlier answers keep their text; this saved source
-        is now unavailable.
-      </p>
-    );
+  if (!capture && !error) return <p role="status">Loading saved source…</p>;
   const url = capture && sourceURL(capture.url);
   return (
     <div className="saved-source-view">
@@ -1421,6 +1406,7 @@ export default function App() {
   const navigationMenu = useRef<HTMLButtonElement>(null);
   const chatEnd = useRef<HTMLDivElement>(null);
   const workspaceRevision = useRef(0);
+  const archiveQueue = useRef(Promise.resolve());
   const reflectionPolling = useRef(false);
   const [reflectionActions, setReflectionActions] = useState(0);
   const reflectionVisible = page === "settings" || page === "memory";
@@ -1635,17 +1621,21 @@ export default function App() {
         if (workspaceRevision.current === revision) setError(reason.message);
       });
   }
-  async function archiveAction(action: () => Promise<ContextArchiveStatus>) {
-    const revision = ++workspaceRevision.current;
-    const status = await action();
-    if (workspaceRevision.current === revision) {
+  function archiveAction(action: () => Promise<ContextArchiveStatus>) {
+    // Serialize archive requests so reads cannot overtake a pending mutation.
+    const result = archiveQueue.current.then(async () => {
+      const status = await action();
+      workspaceRevision.current += 1;
       setWorkspace((current) =>
         current ? { ...current, context_archive: status } : current,
       );
-    } else {
-      await refreshWorkspace();
-    }
-    return status;
+      return status;
+    });
+    archiveQueue.current = result.then(
+      () => {},
+      () => {},
+    );
+    return result;
   }
   function applyReflection(work: WorkStatus, revision: number) {
     setWorkspace((current) =>
@@ -2491,16 +2481,23 @@ export default function App() {
 
       {sourceView && (
         <Modal title="Saved source" onClose={() => setSourceView(null)}>
-          <SavedSource
-            key={`${sourceView.id}:${sourceView.expectedHash ?? ""}:${sourceView.expectedManifestHash ?? ""}:${sourceViewEligibility}`}
-            id={sourceView.id}
-            expectedHash={sourceView.expectedHash}
-            expectedManifestHash={sourceView.expectedManifestHash}
-            onAction={archiveAction}
-            onRemoved={(id) =>
-              setRemovedCaptureIds((current) => new Set(current).add(id))
-            }
-          />
+          {removedCaptureIds.has(sourceView.id) ? (
+            <p role="status">
+              Saved source removed. Earlier answers keep their text; this saved
+              source is now unavailable.
+            </p>
+          ) : (
+            <SavedSource
+              key={`${sourceView.id}:${sourceView.expectedHash ?? ""}:${sourceView.expectedManifestHash ?? ""}:${sourceViewEligibility}`}
+              id={sourceView.id}
+              expectedHash={sourceView.expectedHash}
+              expectedManifestHash={sourceView.expectedManifestHash}
+              onAction={archiveAction}
+              onRemoved={(id) =>
+                setRemovedCaptureIds((current) => new Set(current).add(id))
+              }
+            />
+          )}
         </Modal>
       )}
 

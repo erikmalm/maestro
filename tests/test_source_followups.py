@@ -82,6 +82,37 @@ class SourceFollowupTests(unittest.TestCase):
         self.assertEqual(records[0]["role"], "user")
         return json.loads(records[0]["content"][len(SOURCE_RECORD_PREFIX):])
 
+    def combine_saved_sources(self, on_final=None):
+        first = self.prime([{"title": "First guide", "url": "https://docs.example.org/first-guide",
+                             "content": "First guide: alpha is enabled."}])[0]
+        second = self.store.capture("second guide", self.store.now().isoformat(), [
+            {"title": "Second guide", "url": "https://docs.example.org/second-guide",
+             "content": "Second guide: beta is disabled."}], 3)["sources"][0]
+        state = self.workspace()
+        state["work_config"] = {"enabled": True, "auto_curate": True}
+        self.save_workspace(state)
+        original = self.network
+
+        def combined(config, key, method, path, payload=None):
+            response = original(config, key, method, path, payload)
+            if path == "/api/chat":
+                if "tools" in payload:
+                    response["message"] = {"role": "assistant", "content": "", "tool_calls": [{"function": {
+                        "name": "search_context", "arguments": {"query": "second guide", "freshness": "stable"}}}]}
+                else:
+                    response["message"] = {"role": "assistant", "content": "Alpha is enabled; beta is disabled."}
+                    if on_final:
+                        on_final(first, second)
+            return response
+
+        self.network = combined
+        try:
+            with patch("backend.provider.WebSearch.search", side_effect=AssertionError("Combined reply searched online")):
+                self.send("Rewrite that answer and include details from the saved second guide")
+        finally:
+            self.network = original
+        return first, second
+
     def test_followup_receives_exact_excerpts_and_honest_mixed_archive_status_without_hosted_calls(self):
         sources = self.prime([{"title": "Forecast", "url": "https://docs.example.org/forecast", "content": self.content},
                               {"title": "Other", "url": "https://other.example.org/forecast", "content": "Unarchived dated forecast: rain 2.0 mm."}])
@@ -524,6 +555,90 @@ class SourceFollowupTests(unittest.TestCase):
                 self.assertEqual(report["sources"][1]["evidence_status"], "not_replayed_this_turn")
                 self.assertEqual(self.workspace()["chats"][0]["messages"][-1]["source_context"]["references"], references)
                 self.assertEqual(len([call for call in self.calls if call[1] == "/api/chat"]), 1)
+
+    def test_combined_source_lookup_and_chained_rewrites_keep_both_origins(self):
+        first, second = self.combine_saved_sources()
+        latest = self.workspace()["chats"][0]["messages"][-1]
+        self.assertEqual(latest["web_search"]["sources"][0]["capture_id"], second["capture_id"])
+        self.assertEqual(latest["source_context"]["references"][0]["capture_id"], first["capture_id"])
+        for source in (first, second):
+            self.assertIn(source["content"], json.dumps(self.calls[-1][2]))
+        origins = {"original-answer", latest["id"]}
+        hashes = {source["capture_id"]: (source["content_hash"], source["manifest_hash"],
+                                       hashlib.sha256(source["content"].encode()).hexdigest())
+                  for source in (first, second)}
+        with patch("backend.provider.WebSearch.search", side_effect=AssertionError("Chained rewrite searched online")):
+            for text in ("Make it shorter", "Translate it in English"):
+                self.calls.clear()
+                self.send(text)
+                reports = self.packet()["previous_searches"]
+                self.assertEqual({report["message_id"] for report in reports}, origins)
+                self.assertEqual({entry["content"] for report in reports for entry in report["sources"]},
+                                 {first["content"], second["content"]})
+                answer = self.workspace()["chats"][0]["messages"][-1]
+                references = answer["source_context"]["references"]
+                self.assertEqual({reference["message_id"] for reference in references}, origins)
+                self.assertEqual({reference["capture_id"]: (reference["content_hash"], reference["manifest_hash"], reference["sha256"])
+                                  for reference in references}, hashes)
+                self.assertFalse(self.workspace()["chats"][0]["messages"][-2]["reflection_eligible"])
+                self.assertEqual(len([call for call in self.calls if call[1] == "/api/chat"]), 1)
+        with closing(sqlite3.connect(self.database)) as db:
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM reflection_jobs WHERE chat_id='chat'").fetchone()[0], 0)
+
+    def test_combined_replay_prioritizes_referenced_origin_over_unrelated_report(self):
+        first, second = self.combine_saved_sources()
+        state = self.workspace()
+        latest_id = state["chats"][0]["messages"][-1]["id"]
+        unrelated = self.store.capture("unrelated guide", self.store.now().isoformat(), [
+            {"title": "Unrelated guide", "url": "https://docs.example.org/unrelated", "content": "Unrelated gamma details."}], 3)
+        source = unrelated["sources"][0]
+        report = {"query": unrelated["query"], "at": unrelated["at"],
+                  "sources": [{field: value for field, value in source.items() if field != "content"}],
+                  "evidence": [{"capture_id": source["capture_id"], "content": source["content"],
+                                "sha256": hashlib.sha256(source["content"].encode()).hexdigest()}]}
+        state["chats"][0]["messages"][2:2] = [
+            {"id": "unrelated-user", "role": "user", "text": "Explain gamma."},
+            {"id": "unrelated-answer", "role": "assistant", "text": "Gamma details.", "web_search": report}]
+        self.save_workspace(state)
+        with patch("backend.provider.WebSearch.search", side_effect=AssertionError("Chained rewrite searched online")):
+            self.send("Make it shorter")
+        reports = self.packet()["previous_searches"]
+        self.assertEqual([report["message_id"] for report in reports], [latest_id, "original-answer"])
+        self.assertEqual({entry["content"] for report in reports for entry in report["sources"]},
+                         {first["content"], second["content"]})
+        for field in ("title", "url", "content"):
+            self.assertNotIn(source[field], json.dumps(self.calls[-1][2]))
+
+    def test_combined_reply_source_deletion_rejects_commit_and_retains_usage(self):
+        for removed in (0, 1):
+            with self.subTest(source=removed):
+                with self.assertRaisesRegex(ValueError, "Saved source evidence changed"):
+                    self.combine_saved_sources(lambda *sources: self.store.delete_capture(sources[removed]["capture_id"]))
+                self.assertEqual(len(self.workspace()["chats"][0]["messages"]), 2)
+                entry = self.provider.read_state()["ledger"][-1]
+                self.assertEqual((entry["status"], entry["model_calls"], entry["input_tokens"], entry["output_tokens"]),
+                                 ("failed", 2, 74, 22))
+
+    def test_combined_chain_source_deletion_rejects_commit_and_retains_usage(self):
+        original = self.network
+        for removed in (0, 1):
+            with self.subTest(source=removed):
+                sources = self.combine_saved_sources()
+                before = self.workspace()["chats"][0]["messages"]
+                def deleted(config, key, method, path, payload=None):
+                    response = original(config, key, method, path, payload)
+                    if path == "/api/chat":
+                        self.store.delete_capture(sources[removed]["capture_id"])
+                    return response
+                self.network = deleted
+                try:
+                    with self.assertRaisesRegex(ValueError, "Saved source evidence changed"):
+                        self.send("Make it shorter")
+                finally:
+                    self.network = original
+                self.assertEqual(self.workspace()["chats"][0]["messages"], before)
+                entry = self.provider.read_state()["ledger"][-1]
+                self.assertEqual((entry["status"], entry["input_tokens"], entry["output_tokens"]), ("failed", 37, 11))
 
     def test_deleted_latest_source_cannot_replay_an_older_unrelated_report_or_go_online(self):
         self.prime()

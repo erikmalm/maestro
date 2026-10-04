@@ -95,25 +95,21 @@ def reuse_prior_source_bodies(text):
 def source_replay_target(messages):
     """A rewrite follows the latest answer's own evidence, including chained refs."""
     latest = next((item for item in reversed(messages) if isinstance(item, dict)
-                   and item.get("role") == "assistant" and not item.get("demo")), None)
-    if latest is None:
-        return False, {}
-    if isinstance(latest.get("web_search"), dict):
-        return True, {str(latest.get("id", "")): None}
+                   and item.get("role") == "assistant" and not item.get("demo")), {})
     provenance = latest.get("source_context")
-    if not isinstance(provenance, dict):
-        return False, {}
     targets = {}
-    references = provenance.get("references")
+    references = provenance.get("references") if isinstance(provenance, dict) else None
     for reference in references[:6] if isinstance(references, list) else []:
         if (not isinstance(reference, dict) or not isinstance(reference.get("message_id"), str)
                 or not 1 <= len(reference["message_id"]) <= 64 or type(reference.get("source")) is not int
                 or not 1 <= reference["source"] <= 3):
             continue
         targets.setdefault(reference["message_id"], {})[reference["source"]] = reference
+    if isinstance(latest.get("web_search"), dict):
+        targets[str(latest.get("id", ""))] = None
     # Broken provenance still identifies a sourced rewrite; it cannot be
     # repaired by guessing from a different earlier search or going online.
-    return True, targets
+    return bool(targets) or isinstance(provenance, dict), targets
 
 
 class ProviderFailure(ValueError):
@@ -524,8 +520,7 @@ class Provider:
         _, replay_targets = source_replay_target(messages)
         searches = [item for item in reversed(messages) if isinstance(item, dict) and item.get("role") == "assistant"
                     and not item.get("demo") and isinstance(item.get("web_search"), dict)]
-        previous = ([item for item in searches if item.get("id") in replay_targets]
-                    + [item for item in searches if item.get("id") not in replay_targets])[:2]
+        previous = sorted(searches, key=lambda item: item.get("id") not in replay_targets)[:2]
         for item in previous:
             report = item["web_search"]
             sources = report.get("sources")

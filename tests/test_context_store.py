@@ -10,7 +10,7 @@ import threading
 import unittest
 from unittest.mock import patch
 
-from backend.context_store import ContextStore, DEFAULT, ROOT, approved, decoded_url_variants, public_url, validate_search
+from backend.context_store import ContextStore, DEFAULT, MANIFEST_BYTES, ROOT, approved, decoded_url_variants, public_url, validate_search
 
 
 class ContextStoreTests(unittest.TestCase):
@@ -492,6 +492,50 @@ class ContextStoreTests(unittest.TestCase):
             with self.subTest(mutation=mutation), self.assertRaises(KeyError):
                 self.store.get_capture(saved["capture_id"])
         self.assertEqual(self.store.rebuild()["corrupt_count"], 1)
+
+    def test_deeply_nested_manifest_is_unavailable_without_blocking_healthy_sources(self):
+        self.enable()
+        broken = self.capture()["sources"][0]
+        manifest = self.manifests()[0]
+        healthy = self.capture(query="Healthy source", sources=[{
+            **self.source, "url": self.source["url"] + "/healthy", "content": "Healthy historical evidence."}])["sources"][0]
+        nested = "[" * 3000 + "0" + "]" * 3000
+        self.assertLess(len(nested.encode()), MANIFEST_BYTES)
+        manifest.write_text(nested, encoding="utf-8")
+        with self.assertRaises(KeyError):
+            self.store.get_capture(broken["capture_id"])
+        self.assertIsNone(self.store.lookup(self.query, 3))
+        self.assertEqual(self.store.search("historical evidence")["sources"], [{**healthy, "stale": False}])
+        rebuilt = self.store.rebuild()
+        self.assertTrue(rebuilt["rebuild_progress"]["complete"])
+        self.assertEqual((rebuilt["indexed_count"], rebuilt["corrupt_count"]), (1, 1))
+        self.assertEqual(self.store.get_capture(healthy["capture_id"]), healthy)
+        self.assertEqual(self.store.search("historical evidence")["sources"], [{**healthy, "stale": False}])
+        with self.assertRaises(KeyError):
+            self.store.delete_capture(broken["capture_id"])
+        self.store.delete_capture(healthy["capture_id"])
+        self.store.delete_capture(healthy["capture_id"])
+        self.assertEqual(self.store.search("historical evidence")["sources"], [])
+        self.assertEqual(self.store.rebuild()["indexed_count"], 0)
+        with self.assertRaises(KeyError):
+            self.store.get_capture(healthy["capture_id"])
+
+    def test_deeply_nested_format_is_a_managed_error_and_preserves_existing_captures(self):
+        self.enable()
+        saved = self.capture()["sources"][0]
+        path = self.archive / "format.json"
+        original = path.read_bytes()
+        nested = ("[" * 2000 + "0" + "]" * 2000).encode()
+        self.assertLess(len(nested), 4096)
+        path.write_bytes(nested)
+        changed = {**self.config, "reuse_hours": 48}
+        with self.assertRaises(ValueError):
+            self.store.configure(changed)
+        self.assertEqual(self.store.status()["config"], self.config)
+        self.assertEqual(self.store.get_capture(saved["capture_id"]), saved)
+        path.write_bytes(original)
+        self.store.configure(changed)
+        self.assertEqual(self.store.get_capture(saved["capture_id"]), saved)
 
     def test_interrupted_publication_leaves_no_reusable_partial_capture(self):
         self.enable()
