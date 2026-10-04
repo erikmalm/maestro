@@ -26,6 +26,8 @@ Chat history stays separate while usage and limits are shared. A first successfu
 
 The current generation path supports one request at a time. API restart recovery assumes that the API process owns all generation. These are useful foundations for a task runtime, but neither establishes delegation.
 
+The proposed [chat assessment and delegation workflow](docs/CHAT_ORCHESTRATION.md) makes assessment the first model step for each message, followed by a direct answer, a necessary clarification, or a bounded specialist assignment. Recorded runtime events keep the user informed. Deliver observable chat runs and the direct/clarification routes first; enable a local specialist after durable attempt ownership works. These behaviors are planned, not part of the current chat.
+
 ## Podman deployment
 
 The application container, lifecycle launcher, trusted host endpoint, mounted secrets and private snapshots are implemented; the [runbook](docs/CONTAINERS.md) describes setup and verification. Isolated Podman checks verify model choices, access controls, resource limits, recreation, backup/restore and mounted secrets. The acceptance tasks below remain the checklist when migrating a real workspace or changing deployment configuration. Maestro serves FastAPI and the built frontend from one container, with a private data volume and the existing Windows Ollama service. Moving inference into a container follows a measured need and verified GPU access.
@@ -93,6 +95,8 @@ Acceptance: synthetic tasks dispatch to distinct configured profiles, retain sep
 ## 4. Delegate and review within one allowance
 
 Give the coordinator a typed handoff to one specialist, including assignment, profile, selected context, criteria and limits. Persist parent/child ownership, result, usage and stop reason. Start with a coordinator and one specialist; use a reviewer only when a concrete task needs a check against its criteria.
+
+For chat, follow [CHAT-01 through CHAT-04](docs/CHAT_ORCHESTRATION.md#implementation-increments): assess the message before selecting a route, preserve one parent allowance, report actual runtime progress, and bring the specialist result back to the original conversation. The first local specialist can reuse validated saved model choices; named profiles extend the available endpoints and permissions. Internal child attempts do not automatically become task-list to-dos.
 
 All descendants share the parent's call/token/time/spend allowance and tool scope. Bounded revision can address unmet criteria, stopping on completion, cancellation, no progress or exhausted limits. Model agreement alone is not proof that work succeeded.
 

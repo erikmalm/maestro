@@ -2,6 +2,8 @@
 
 Maestro's current runtime is a local chat application with persistent user-created and reviewed AI-created tasks, private memory and opt-in background reflection. It has one active provider connection and bounded local recall. Task execution, coordination and delegation remain planned.
 
+The proposed [chat assessment and delegation design](CHAT_ORCHESTRATION.md) adds a coordinator assessment before each response and durable status events for direct answers, necessary clarifications, and specialist assignments. It is a future workflow; the current chat endpoint still waits for a direct provider reply.
+
 ## Implemented boundaries
 
 ```mermaid
@@ -52,7 +54,7 @@ With `auto_create_tasks` enabled, periodic reflection may propose at most two fo
 2. Check context/output token limits and configured spend allowances. Reserve conservative estimated usage in an immediate transaction.
 3. Dispatch one generation, or the bounded Ollama search flow described below. The reservation permits one request at a time across chat and explicit-context calls.
 4. Persist the reply and settle provider-reported token usage with the configured price snapshot. After a chat's first successful exchange, optionally generate its title once with the original model and remaining request allowance. The title call uses a bounded first message and no tools, and is skipped if model settings change. Failure keeps the first-message fallback and the successful reply; a manual rename wins over a delayed generated title. Unknown paid title usage still requires reconciliation.
-5. Keep unresolved paid usage reserved until the user verifies and reconciles its amount. Known access/quota rejections and zero-cost local failures release their reservations.
+5. Keep unresolved paid usage reserved until the user verifies and reconciles its amount. Known access/quota rejections and confirmed local failures release their reservations. Local chat, titles, and background calls with unknown completion retain a zero-cost slot until the worker confirms no loaded models on their captured Ollama connection. A recovery poll cannot release a live foreground call.
 
 Local model API charges are zero; hardware and electricity costs are outside this accounting. Remote charges are estimates from saved prices, not invoices. Earlier entries keep their recorded prices. An API restart marks interrupted paid requests uncertain. This startup recovery assumes there is no independent live worker and must change before cross-process dispatch is enabled.
 
@@ -95,11 +97,13 @@ The memory map is a frontend view of those records: type groups, bounded selecta
 
 ## Next build sequence
 
-The [Podman deployment checklist](../DEVELOPMENT_PLAN.md#podman-deployment-backlog) runs alongside this functional sequence. The [container runbook](CONTAINERS.md) covers one application container, persistent private storage and host Ollama. Native and container runtimes acquire an exclusive workspace lock before recovery; keep one API owner per workspace until worker ownership and leases are implemented. Local chat and planning roles can choose distinct models through the same reservation ledger; named endpoint profiles and task routing remain separate work.
+The [Podman deployment checklist](../DEVELOPMENT_PLAN.md#podman-deployment) runs alongside this functional sequence. The [container runbook](CONTAINERS.md) covers one application container, persistent private storage and host Ollama. Native and container runtimes acquire an exclusive workspace lock before recovery; keep one API owner per workspace until worker ownership and leases are implemented. Local chat and planning roles can choose distinct models through the same reservation ledger; named endpoint profiles and task routing remain separate work.
 
 1. **Shared generation foundation — implemented.** `Provider.generate_context` accepts bounded selected context and an installed local model, using the same dispatch, captured settings and ledger as chat. It has no tools, search, title or chat persistence. Named profiles and durable attempt ownership remain future work.
 2. **One durable task worker.** Start a separate Maestro process that claims a manually queued text-only task, generates with local Ollama and saves a result. Persist claims, attempt ownership, leases, progress, pause/cancel and cumulative call/token/time limits. Keep one generation slot initially, allowing chat between task steps. Make reservation recovery ownership-aware: API restart must not release a live worker's reservation, and stale attempts cannot commit a result after a newer claim. Verify completion with the browser closed, pause, limits and restart recovery before adding more execution paths.
 3. **Multiple saved profiles.** Store named local/remote model connections with endpoint-scoped credential references and explicit context-sharing choices. Select a profile for a task and record it per call. Verify installed-model capabilities, switching and one-model residency, accounting and local-only restrictions before automatic selection. Measure memory and task quality to choose role defaults.
 4. **Bounded delegation and review.** Give a coordinator a typed way to assign one child task with selected context, profile, criteria and a share of the parent's allowance. Persist the handoff and result. Add reviewer-driven revision only with shared call/token/time limits and completion, cancellation and no-progress stops. Prove different profiles can serve distinct assignments before expanding the agent tree.
+
+Observable chat runs and assessment can precede specialist execution. The first local child can reuse validated local model selections once durable attempt ownership works; named profiles broaden routing afterward. [CHAT-01 through CHAT-04](CHAT_ORCHESTRATION.md#implementation-increments) describe the user experience, status delivery, shared generation slot, cancellation, and recovery requirements.
 
 Explicit memory and [durable background reflection](MEMORY_AND_REFLECTION.md) are usable before task execution. Automatic promotion, scheduled working notes and reviewed task creation are optional; broader quality evaluation remains. Scoped integrations and isolated coding need the execution path. The [development plan](../DEVELOPMENT_PLAN.md) records acceptance checks; [local model research](LOCAL_MODELS.md) records preliminary measurements.
