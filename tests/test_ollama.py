@@ -479,12 +479,12 @@ class OllamaTests(unittest.TestCase):
                     retry = self.client.post("/api/chat", headers=self.headers, json={"text": "Blocked retry"})
                 self.assertEqual(retry.status_code, 409, retry.text)
                 with patch("backend.provider.background_network", return_value={"models": []}):
-                    service.recover_background()
+                    service.recover_local(entry["id"], True, self.config["base_url"])
         with self.mock_http():
             retried = self.client.post("/api/chat", headers=self.headers, json={"text": "A valid local retry"})
         self.assertEqual(retried.status_code, 200, retried.text)
 
-    def test_recovery_retains_local_reservation_until_confirmed_model_unloading(self):
+    def test_recovery_retains_local_reservation_until_confirmed_restart(self):
         self.configure()
         service = Provider(backend.DATABASE, backend.TIMEZONE)
         with service.transaction() as state:
@@ -508,7 +508,7 @@ class OllamaTests(unittest.TestCase):
             reconnected = self.client.post("/api/provider/test", headers=self.headers)
         self.assertEqual(reconnected.status_code, 200, reconnected.text)
         with patch("backend.provider.background_network", return_value={"models": []}):
-            service.recover_background()
+            service.recover_local("synthetic-interrupted-local-call", True, self.config["base_url"])
         with self.mock_http():
             response = self.client.post("/api/chat", headers=self.headers, json={"text": "After local restart"})
         self.assertEqual(response.status_code, 200, response.text)

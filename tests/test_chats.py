@@ -418,8 +418,9 @@ class ChatTests(unittest.TestCase):
         self.assertEqual(completed["usage"]["uncertain"], [])
         service = Provider(backend.DATABASE, backend.TIMEZONE)
         service.recover()
-        with patch("backend.provider.background_network", return_value={"models": [{"name": self.config["model"]}]}):
-            service.recover_background()
+        title_entry = service.read_state()["ledger"][-1]
+        with patch("backend.provider.background_network", return_value={"models": [{"name": self.config["model"]}]}), self.assertRaises(ValueError):
+            service.recover_local(title_entry["id"], True, title_entry["connection_config"]["base_url"])
         request_count = len(self.requests)
         with self.mock_http():
             blocked = self.send(chat_id, "Continue")
@@ -429,7 +430,7 @@ class ChatTests(unittest.TestCase):
         self.assertEqual([(entry["kind"], entry["status"]) for entry in service.read_state()["ledger"]],
                          [("chat", "settled"), ("title", "reserved")])
         with patch("backend.provider.background_network", return_value={"models": []}):
-            service.recover_background()
+            service.recover_local(title_entry["id"], True, title_entry["connection_config"]["base_url"])
         with self.mock_http():
             continued = self.send(chat_id, "Continue")
         self.assertEqual(continued.status_code, 200, continued.text)

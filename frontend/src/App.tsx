@@ -26,6 +26,7 @@ import {
 import * as api from "./api";
 import type {
   Limits,
+  LocalRequest,
   MessageFeedback,
   Task,
   WorkConfig,
@@ -231,6 +232,91 @@ function UsageDetails({ workspace }: { workspace: Workspace }) {
         spend: {money(usage.reserved_usd)}.
       </p>
     </div>
+  );
+}
+
+function LocalRequestRecovery({
+  entry,
+  busy,
+  onRecover,
+}: {
+  entry: LocalRequest;
+  busy: boolean;
+  onRecover: (id: string, originalURL: string) => void;
+}) {
+  const [originalURL, setOriginalURL] = useState("");
+  const [confirmed, setConfirmed] = useState(false);
+  const endpoint = entry.base_url ?? originalURL.trim();
+  return (
+    <form
+      className="entry-form charge-form local-recovery-form"
+      onSubmit={(event) => {
+        event.preventDefault();
+        if (busy || !confirmed || !endpoint) return;
+        onRecover(entry.id, endpoint);
+      }}
+    >
+      <div>
+        <h3>Interrupted local request</h3>
+        <p>
+          Model: {entry.model || "Unknown model"}. Requested{" "}
+          <time dateTime={entry.at}>{new Date(entry.at).toLocaleString()}</time>
+          .
+        </p>
+        {entry.base_url ? (
+          <p>
+            Original Ollama server: <strong>{entry.base_url}</strong>
+          </p>
+        ) : (
+          <p>
+            This older request has no saved server URL. Enter its original
+            Ollama server URL; Maestro cannot determine it from your current
+            connection settings.
+          </p>
+        )}
+        <p>
+          The request may still be running and holds the generation slot. Stop
+          this same original Ollama server completely and restart it before
+          confirming below. Keep other clients idle during recovery. Restarting
+          interrupts other work on this server. Maestro cannot verify that
+          restart automatically. After your confirmation, it checks that the
+          server has no loaded models before releasing the slot.
+        </p>
+      </div>
+      {!entry.base_url && (
+        <label>
+          Original Ollama server URL
+          <input
+            type="url"
+            required
+            maxLength={2048}
+            value={originalURL}
+            disabled={busy}
+            onChange={(event) => {
+              setOriginalURL(event.target.value);
+              setConfirmed(false);
+            }}
+          />
+        </label>
+      )}
+      <label className="reflection-check">
+        <input
+          type="checkbox"
+          checked={confirmed}
+          disabled={busy || !endpoint}
+          onChange={(event) => setConfirmed(event.target.checked)}
+        />
+        I stopped this original Ollama server completely and restarted it.
+      </label>
+      <button
+        className="button secondary"
+        type="submit"
+        disabled={busy || !confirmed || !endpoint}
+      >
+        {busy && <LoaderCircle size={16} className="spin" />}
+        Verify and release slot
+      </button>
+    </form>
   );
 }
 
@@ -778,6 +864,14 @@ export default function App() {
         {error && (
           <div className="error-banner" role="alert">
             <span>{error}</span>
+            {!!workspace.usage.local_requests?.length && (
+              <button
+                className="button secondary"
+                onClick={() => setPanel("usage")}
+              >
+                Open local recovery
+              </button>
+            )}
             <button
               className="icon-button"
               onClick={() => setError("")}
@@ -1227,6 +1321,30 @@ export default function App() {
       {panel === "usage" && (
         <Modal title="Usage & limits" onClose={() => setPanel(null)}>
           <UsageDetails workspace={workspace} />
+          {!!workspace.usage.local_requests?.length && error && (
+            <p className="error-banner" role="alert">
+              {error}
+            </p>
+          )}
+          {(workspace.usage.local_requests ?? []).map((entry) => (
+            <LocalRequestRecovery
+              key={JSON.stringify([
+                entry.id,
+                entry.at,
+                entry.model,
+                entry.base_url,
+              ])}
+              entry={entry}
+              busy={!!busy}
+              onRecover={(id, originalURL) =>
+                void perform(
+                  "recover-local",
+                  () => api.recoverLocalRequest(id, originalURL),
+                  "Local request released.",
+                )
+              }
+            />
+          ))}
           <LimitsForm
             limits={workspace.limits}
             onSave={(limits) => void saveLimits(limits)}

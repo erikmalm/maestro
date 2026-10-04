@@ -50,6 +50,14 @@ class GenerationTests(unittest.TestCase):
         with closing(sqlite3.connect(self.database)) as db, db:
             db.execute("UPDATE workspace SET value=?", (json.dumps(workspace),))
 
+    def unknown_entry(self, **changes):
+        entry = {"id": "synthetic-unknown", "at": self.provider.stamp(), "model": self.config["model"],
+                 "protocol": "ollama", "status": "reserved", "cost": 0,
+                 "connection_config": self.config.copy(), "local_unknown": True, **changes}
+        with self.provider.transaction() as state:
+            state["ledger"].append(entry)
+        return entry
+
     def test_context_shares_adapter_and_usage_without_chats_titles_or_tools(self):
         before = self.workspace_value()
         with patch("backend.provider.network", side_effect=self.network), \
@@ -179,10 +187,10 @@ class GenerationTests(unittest.TestCase):
         self.assertEqual(self.provider.read_state()["ledger"][0]["status"], "reserved")
         self.assertTrue(self.provider.read_state()["ledger"][0]["local_unknown"])
         with patch("backend.provider.background_network", return_value={"models": []}):
-            self.provider.recover_background()
+            self.provider.recover_local(self.provider.read_state()["ledger"][0]["id"], True, self.config["base_url"])
         self.assertEqual(self.provider.read_state()["ledger"][0]["status"], "failed")
 
-    def test_unknown_chat_completion_blocks_chat_and_context_until_confirmed_unloaded(self):
+    def test_unknown_chat_completion_blocks_chat_and_context_until_confirmed_restart(self):
         def disconnect(config, key, method, path, payload=None):
             if path == "/api/chat":
                 raise LocalUncertain("Synthetic disconnect", False)
@@ -201,20 +209,23 @@ class GenerationTests(unittest.TestCase):
                     generate()
             dispatch.assert_not_called()
         with patch("backend.provider.background_network", return_value={"models": [{"name": self.config["model"]}]}):
-            self.provider.recover_background()
+            with self.assertRaisesRegex(ValueError, "empty model list"):
+                self.provider.recover_local(entry["id"], True, self.config["base_url"])
         self.assertEqual(self.provider.read_state()["ledger"][-1]["status"], "reserved")
         with patch("backend.provider.background_network", return_value={"models": []}):
-            self.provider.recover_background()
+            self.provider.recover_local(entry["id"], True, self.config["base_url"])
         self.assertEqual(self.provider.read_state()["ledger"][-1]["status"], "failed")
         with patch("backend.provider.network", side_effect=self.network):
             self.provider.generate_context(self.instructions, self.messages)
         self.assertEqual(self.provider.read_state()["ledger"][-1]["status"], "settled")
 
-    def test_poll_never_releases_a_live_foreground_reservation(self):
+    def test_explicit_recovery_never_releases_a_live_foreground_reservation(self):
         def during_dispatch(config, key, method, path, payload=None):
             if path == "/api/chat":
                 with patch("backend.provider.background_network", return_value={"models": []}) as poll:
-                    self.provider.recover_background()
+                    entry = self.provider.read_state()["ledger"][-1]
+                    with self.assertRaisesRegex(ValueError, "not waiting for local recovery"):
+                        self.provider.recover_local(entry["id"], True, self.config["base_url"])
                 poll.assert_not_called()
                 self.assertEqual(self.provider.read_state()["ledger"][-1]["status"], "reserved")
             return self.network(config, key, method, path, payload)
@@ -251,11 +262,11 @@ class GenerationTests(unittest.TestCase):
         self.assertEqual(entry["status"], "reserved")
         self.assertTrue(entry["local_unknown"])
         with patch("backend.provider.background_network", return_value={"models": []}) as poll:
-            self.provider.recover_background()
+            self.provider.recover_local(entry["id"], True, original["base_url"])
         self.assertEqual(poll.call_args.args[:3], (original, "/api/ps", None))
         self.assertEqual(self.provider.read_state()["ledger"][-1]["status"], "failed")
 
-    def test_legacy_orphan_never_guesses_changed_local_endpoint_and_requires_reconnect(self):
+    def test_legacy_orphan_never_guesses_endpoint_from_restart_save_or_reconnect(self):
         original = self.provider.read_state()["config"].copy()
         changed = {**original, "base_url": "http://127.0.0.1:11435"}
         with self.provider.transaction() as state:
@@ -264,10 +275,11 @@ class GenerationTests(unittest.TestCase):
             state["config"] = changed
         self.provider.recover()
         with patch("backend.provider.background_network") as poll:
-            self.provider.recover_background()
+            with self.assertRaisesRegex(ValueError, "confirm"):
+                self.provider.recover_local("synthetic-legacy-interrupted", False, original["base_url"])
         poll.assert_not_called()
         self.assertEqual(self.provider.read_state()["ledger"][-1]["status"], "reserved")
-        with patch("backend.provider.network") as dispatch, self.assertRaisesRegex(ValueError, "original Local Ollama server URL.*Connect and load models"):
+        with patch("backend.provider.network") as dispatch, self.assertRaisesRegex(ValueError, "original Ollama server.*Usage & limits"):
             self.provider.generate("Synthetic blocked retry", "synthetic-chat")
         dispatch.assert_not_called()
         self.provider.configure(original, "", False)
@@ -287,10 +299,131 @@ class GenerationTests(unittest.TestCase):
             self.provider.test()
         self.assertEqual(reconnect.call_args.args[:4], (original, None, "GET", "/api/tags"))
         self.assertEqual(self.provider.read_state()["ledger"][-1]["status"], "reserved")
+        self.assertNotIn("connection_config", self.provider.read_state()["ledger"][-1])
+        self.provider.configure(changed, "", False)
         with patch("backend.provider.background_network", return_value={"models": []}) as poll:
-            self.provider.recover_background()
-        self.assertEqual(poll.call_args.args[:3], (original, "/api/ps", None))
+            self.provider.recover_local("synthetic-legacy-interrupted", True, original["base_url"])
+        self.assertEqual(poll.call_args.args[0]["base_url"], original["base_url"])
+        self.assertEqual(poll.call_args.args[0]["protocol"], "ollama")
+        self.assertEqual(poll.call_args.args[1:3], ("/api/ps", None))
         self.assertEqual(self.provider.read_state()["ledger"][-1]["status"], "failed")
+        self.assertEqual(self.provider.read_state()["ledger"][-1]["connection_config"]["base_url"], original["base_url"])
+
+    def test_empty_ps_cannot_release_a_live_unlisted_loader_without_restart_confirmation(self):
+        loader = {"alive": False}
+        def disconnected_load(config, key, method, path, payload=None):
+            if path == "/api/chat":
+                loader["alive"] = True  # Ollama excludes activeLoading from /api/ps.
+                raise LocalUncertain("Synthetic disconnect during cold loading", False)
+            return self.network(config, key, method, path, payload)
+        with patch("backend.provider.network", side_effect=disconnected_load), self.assertRaises(LocalUncertain):
+            self.provider.generate_context(self.instructions, self.messages)
+        entry = self.provider.read_state()["ledger"][-1]
+        with patch("backend.provider.background_network", return_value={"models": []}) as poll:
+            for confirmation in (False, None, 1, "true"):
+                with self.subTest(confirmation=confirmation), self.assertRaisesRegex(ValueError, "confirm"):
+                    self.provider.recover_local(entry["id"], confirmation, self.config["base_url"])
+        poll.assert_not_called()
+        self.assertTrue(loader["alive"])
+        self.assertEqual(self.provider.read_state()["ledger"][-1]["status"], "reserved")
+        with patch("backend.provider.network") as dispatch, self.assertRaisesRegex(ValueError, "request is running"):
+            self.provider.generate_context(self.instructions, self.messages)
+        dispatch.assert_not_called()
+        loader["alive"] = False  # External daemon restart ends its unlisted work.
+        with patch("backend.provider.background_network", return_value={"models": []}):
+            self.provider.recover_local(entry["id"], True, self.config["base_url"])
+        with patch("backend.provider.network", side_effect=self.network):
+            self.provider.generate_context(self.instructions, self.messages)
+        self.assertEqual(self.provider.read_state()["ledger"][-1]["status"], "settled")
+
+    def test_recovery_preserves_known_tokens_and_stale_repeat_cannot_release_new_work(self):
+        entry = self.unknown_entry(input_tokens=37, output_tokens=11, model_calls=2)
+        expected = [{"id": entry["id"], "at": entry["at"], "model": entry["model"], "base_url": self.config["base_url"]}]
+        self.assertEqual(self.provider.usage()["local_requests"], expected)
+        with patch("backend.provider.background_network", return_value={"models": []}):
+            self.provider.recover_local(entry["id"], True, self.config["base_url"])
+        recovered = self.provider.read_state()["ledger"][0]
+        self.assertEqual((recovered["input_tokens"], recovered["output_tokens"], recovered["model_calls"], recovered["cost"]), (37, 11, 2, 0))
+        self.assertTrue(recovered["local_recovered"])
+        active = self.unknown_entry(id="synthetic-new-running", local_unknown=False)
+        with patch("backend.provider.background_network") as poll:
+            self.provider.recover_local(entry["id"], True, self.config["base_url"])
+        poll.assert_not_called()
+        self.assertEqual(self.provider.read_state()["ledger"][0], recovered)
+        self.assertEqual(self.provider.read_state()["ledger"][1], active)
+        self.assertEqual(self.provider.usage()["local_requests"], [])
+        self.assertEqual((self.provider.usage()["input_tokens"], self.provider.usage()["output_tokens"]), (37, 11))
+
+    def test_recovery_rejects_wrong_original_endpoint_and_paid_or_known_requests(self):
+        entry = self.unknown_entry()
+        with patch("backend.provider.background_network") as poll:
+            with self.assertRaisesRegex(ValueError, "endpoint changed"):
+                self.provider.recover_local(entry["id"], True, "http://127.0.0.1:11435")
+            for changes in ({"protocol": "responses", "status": "uncertain"}, {"local_unknown": False}, {"status": "settled"}):
+                with self.provider.transaction() as state:
+                    state["ledger"] = [{**entry, **changes}]
+                with self.subTest(changes=changes), self.assertRaisesRegex(ValueError, "not waiting for local recovery"):
+                    self.provider.recover_local(entry["id"], True, self.config["base_url"])
+                self.assertEqual(self.provider.usage()["local_requests"], [])
+        poll.assert_not_called()
+
+    def test_recovery_rechecks_active_reservations_and_full_snapshot_after_poll(self):
+        entry = self.unknown_entry()
+        for mutation in ("active", "config", "known"):
+            with self.provider.transaction() as state:
+                state["ledger"] = [entry.copy()]
+            def change_during_poll(config, path, payload, deadline):
+                with self.provider.transaction() as state:
+                    if mutation == "active":
+                        state["ledger"].append({**entry, "id": "synthetic-live", "local_unknown": False})
+                    elif mutation == "config":
+                        state["ledger"][0]["connection_config"]["model"] = "changed:7b"
+                    else:
+                        state["ledger"][0]["local_unknown"] = False
+                return {"models": []}
+            with self.subTest(mutation=mutation), patch("backend.provider.background_network", side_effect=change_during_poll), self.assertRaises(ValueError):
+                self.provider.recover_local(entry["id"], True, self.config["base_url"])
+            self.assertEqual(self.provider.read_state()["ledger"][0]["status"], "reserved")
+            self.assertNotIn("local_recovered", self.provider.read_state()["ledger"][0])
+        with self.provider.transaction() as state:
+            state["ledger"] = [entry.copy(), {**entry, "id": "synthetic-paid-live", "protocol": "responses", "local_unknown": False}]
+        with patch("backend.provider.background_network") as poll, self.assertRaisesRegex(ValueError, "still running"):
+            self.provider.recover_local(entry["id"], True, self.config["base_url"])
+        poll.assert_not_called()
+
+    def test_legacy_recovery_validates_url_and_duplicate_slash_confirmation_is_idempotent(self):
+        entry = self.unknown_entry(connection_config=None)
+        with patch("backend.provider.background_network") as poll:
+            for endpoint in (None, "", "https://remote.invalid", "http://127.0.0.1:11434/api", "http://127.0.0.1:11434/?secret=x"):
+                with self.subTest(endpoint=endpoint), self.assertRaises(ValueError):
+                    self.provider.recover_local(entry["id"], True, endpoint)
+        poll.assert_not_called()
+        self.assertIsNone(self.provider.usage()["local_requests"][0]["base_url"])
+        original = self.config["base_url"] + "/"
+        with patch("backend.provider.background_network", return_value={"models": []}) as poll:
+            self.provider.recover_local(entry["id"], True, original)
+            self.provider.recover_local(entry["id"], True, original)
+        self.assertEqual(poll.call_count, 1)
+        self.assertEqual(self.provider.read_state()["ledger"][0]["connection_config"]["base_url"], self.config["base_url"])
+
+    def test_concurrent_legacy_confirmation_is_idempotent_and_snapshot_attachment_race_is_rejected(self):
+        entry = self.unknown_entry(connection_config=None)
+        def another_confirmation(config, path, payload, deadline):
+            with patch("backend.provider.background_network", return_value={"models": []}):
+                self.provider.recover_local(entry["id"], True, self.config["base_url"])
+            return {"models": []}
+        with patch("backend.provider.background_network", side_effect=another_confirmation):
+            self.provider.recover_local(entry["id"], True, self.config["base_url"])
+        self.assertTrue(self.provider.read_state()["ledger"][0]["local_recovered"])
+        with self.provider.transaction() as state:
+            state["ledger"] = [entry]
+        def attach_during_poll(config, path, payload, deadline):
+            with self.provider.transaction() as state:
+                state["ledger"][0]["connection_config"] = self.config.copy()
+            return {"models": []}
+        with patch("backend.provider.background_network", side_effect=attach_during_poll), self.assertRaisesRegex(ValueError, "endpoint changed"):
+            self.provider.recover_local(entry["id"], True, self.config["base_url"])
+        self.assertEqual(self.provider.read_state()["ledger"][0]["status"], "reserved")
 
     def test_explicit_memory_in_normal_local_chat_is_quoted_and_traceable(self):
         store = MemoryStore(self.database, timezone.utc)

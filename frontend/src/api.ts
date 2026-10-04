@@ -43,6 +43,12 @@ export type Chat = {
   created_at: string;
   updated_at: string;
 };
+export type LocalRequest = {
+  id: string;
+  at: string;
+  model: string;
+  base_url: string | null;
+};
 export type Workspace = {
   tasks: Task[];
   chats: Chat[];
@@ -59,6 +65,7 @@ export type Workspace = {
     calls: number;
     reserved_usd: number;
     uncertain: { id: string; at: string; reserved_usd: number }[];
+    local_requests?: LocalRequest[];
   };
   provider: ProviderStatus;
   web_search: WebSearchStatus;
@@ -224,6 +231,12 @@ export const reconcileProviderCharge = (id: string, billed_usd: number) =>
   request<Workspace>(`/provider/charges/${id}/reconcile`, "POST", {
     billed_usd,
   });
+export const recoverLocalRequest = (id: string, expected_base_url: string) =>
+  request<Workspace>(
+    `/provider/local-requests/${encodeURIComponent(id)}/recover`,
+    "POST",
+    { restart_confirmed: true, expected_base_url },
+  );
 
 export type WebSearchConfig = {
   enabled: boolean;

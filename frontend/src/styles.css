@@ -802,7 +802,7 @@ textarea {
   line-height: 1.5;
 }
 .limits-form input,
-.entry-form input,
+.entry-form input:not([type="checkbox"]),
 .entry-form textarea,
 .entry-form select,
 .reflection-box input:not([type="checkbox"]),
@@ -1091,7 +1091,8 @@ textarea {
   align-items: start;
   gap: 12px;
 }
-.reflection-box .reflection-check {
+.reflection-box .reflection-check,
+.local-recovery-form .reflection-check {
   display: flex;
   align-items: flex-start;
   gap: 8px;

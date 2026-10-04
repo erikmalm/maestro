@@ -1,4 +1,4 @@
-"""Background deadlines close connections and retain the gate until verified idle."""
+"""Background deadlines retain the gate until an explicit server restart acknowledgement."""
 import asyncio
 from contextlib import closing, contextmanager
 from datetime import timezone
@@ -73,8 +73,10 @@ class BackgroundRecoveryTests(unittest.TestCase):
         self.provider.recover()
         self.assertEqual(self.entry()["status"], "reserved")
         self.assertTrue(self.entry()["background_unknown"])
-        with patch("backend.provider.background_network", side_effect=BackgroundUncertain("Synthetic disconnect")):
-            self.provider.recover_background()
+        with patch("backend.provider.background_network", return_value={"models": []}) as request:
+            with self.assertRaisesRegex(ValueError, "confirm"):
+                self.provider.recover_local("synthetic-request", False, LOCAL["base_url"])
+        request.assert_not_called()
         self.assertEqual(self.entry()["status"], "reserved")
 
     def test_recovery_requires_an_empty_valid_model_list(self):
@@ -83,23 +85,28 @@ class BackgroundRecoveryTests(unittest.TestCase):
                          {"models": [{"name": "another:7b", "model": "synthetic:7b"}]},
                          {"models": [{"name": "unrelated:7b"}]}):
             with self.subTest(response=response), patch("backend.provider.background_network", return_value=response):
-                self.provider.recover_background()
+                with self.assertRaisesRegex(ValueError, "empty model list"):
+                    self.provider.recover_local("synthetic-request", True, LOCAL["base_url"])
                 self.assertEqual(self.entry()["status"], "reserved")
         with patch("backend.provider.background_network", return_value={"models": []}) as request:
-            self.provider.recover_background()
+            self.provider.recover_local("synthetic-request", True, LOCAL["base_url"])
         self.assertEqual(request.call_args.args[:3], (LOCAL, "/api/ps", None))
         self.assertEqual(self.entry()["status"], "failed")
         self.assertFalse(self.entry()["background_unknown"])
+        self.assertTrue(self.entry()["local_recovered"])
+        recovered_at = self.entry()["local_recovered_at"]
         with patch("backend.provider.background_network") as request:
-            self.provider.recover_background()
+            self.provider.recover_local("synthetic-request", True, LOCAL["base_url"])
         request.assert_not_called()
+        self.assertEqual(self.entry()["local_recovered_at"], recovered_at)
 
     def test_default_model_alias_does_not_falsely_release_the_gate(self):
         with self.provider.transaction() as state:
             state["ledger"][0]["model"] = "synthetic"
         self.provider.recover()
         with patch("backend.provider.background_network", return_value={"models": [{"name": "synthetic:latest"}]}):
-            self.provider.recover_background()
+            with self.assertRaisesRegex(ValueError, "empty model list"):
+                self.provider.recover_local("synthetic-request", True, LOCAL["base_url"])
         self.assertEqual(self.entry()["status"], "reserved")
 
     def test_registry_alias_does_not_falsely_release_the_gate(self):
@@ -107,17 +114,47 @@ class BackgroundRecoveryTests(unittest.TestCase):
             state["ledger"][0]["model"] = "registry.ollama.ai/library/synthetic:7b"
         self.provider.recover()
         with patch("backend.provider.background_network", return_value={"models": [{"name": "synthetic:7b"}]}):
-            self.provider.recover_background()
+            with self.assertRaisesRegex(ValueError, "empty model list"):
+                self.provider.recover_local("synthetic-request", True, LOCAL["base_url"])
         self.assertEqual(self.entry()["status"], "reserved")
 
-    def test_failed_settlement_without_an_unknown_flag_still_requires_verified_idle(self):
+    def test_live_background_reservation_cannot_be_recovered_despite_empty_ps(self):
         self.assertNotIn("background_unknown", self.entry())
-        with patch("backend.provider.background_network", return_value={"models": [{"name": "synthetic:7b"}]}):
-            self.provider.recover_background()
+        self.assertEqual(self.provider.usage()["local_requests"], [])
+        with patch("backend.provider.background_network", return_value={"models": []}) as request:
+            with self.assertRaisesRegex(ValueError, "not waiting for local recovery"):
+                self.provider.recover_local("synthetic-request", True, LOCAL["base_url"])
+        request.assert_not_called()
         self.assertEqual(self.entry()["status"], "reserved")
-        with patch("backend.provider.background_network", return_value={"models": []}):
-            self.provider.recover_background()
-        self.assertEqual(self.entry()["status"], "failed")
+
+    def test_explicit_recovery_keeps_gate_when_original_server_is_unreachable(self):
+        self.provider.recover()
+        with patch("backend.provider.background_network", side_effect=BackgroundUncertain("Synthetic disconnect")), \
+                self.assertRaises(BackgroundUncertain):
+            self.provider.recover_local("synthetic-request", True, LOCAL["base_url"])
+        self.assertEqual(self.entry()["status"], "reserved")
+
+    def test_unknown_flag_cannot_release_an_active_durable_job_or_a_job_that_becomes_active(self):
+        self.provider.recover()
+        with self.provider.transaction(with_db=True) as (state, db):
+            db.execute("CREATE TABLE reflection_jobs (id TEXT PRIMARY KEY, chat_id TEXT NOT NULL, state TEXT NOT NULL, data TEXT NOT NULL)")
+            db.execute("INSERT INTO reflection_jobs VALUES ('synthetic-job','synthetic-chat','claimed','{}')")
+        for phase in ("claimed", "reviewing", "dispatched"):
+            with self.provider.transaction(with_db=True) as (state, db):
+                db.execute("UPDATE reflection_jobs SET state=?", (phase,))
+            with self.subTest(phase=phase), patch("backend.provider.background_network") as poll, self.assertRaisesRegex(ValueError, "still running"):
+                self.provider.recover_local("synthetic-request", True, LOCAL["base_url"])
+            poll.assert_not_called()
+            self.assertEqual(self.entry()["status"], "reserved")
+        with self.provider.transaction(with_db=True) as (state, db):
+            db.execute("UPDATE reflection_jobs SET state='failed'")
+        def reactivated_job(config, path, payload, deadline):
+            with self.provider.transaction(with_db=True) as (state, db):
+                db.execute("UPDATE reflection_jobs SET state='dispatched'")
+            return {"models": []}
+        with patch("backend.provider.background_network", side_effect=reactivated_job), self.assertRaisesRegex(ValueError, "still running"):
+            self.provider.recover_local("synthetic-request", True, LOCAL["base_url"])
+        self.assertEqual(self.entry()["status"], "reserved")
 
 
 class ClaimedProviderTests(unittest.TestCase):
@@ -266,7 +303,7 @@ class ClaimedProviderTests(unittest.TestCase):
         self.store.complete(self.prepared["job"], result, lambda content: content)
         self.assertEqual(self.store.status()["today_tokens"], 40)
 
-    def test_failed_settlement_orphan_is_reported_until_ollama_is_confirmed_idle(self):
+    def test_failed_settlement_orphan_is_reported_until_explicit_recovery(self):
         self.store.recover()
         original = self.provider.transaction
         failures = 0
@@ -292,15 +329,16 @@ class ClaimedProviderTests(unittest.TestCase):
             worker.step()
         entry = self.provider.read_state()["ledger"][-1]
         self.assertEqual(entry["status"], "reserved")
-        self.assertNotIn("background_unknown", entry)
+        self.assertTrue(entry["background_unknown"])
         self.assertEqual(self.store.status()["queued"], 0)
         self.assertTrue(self.store.status()["running"])
         self.assertTrue(self.store.status()["waiting_for_ollama"])
-        with patch("backend.provider.background_network", return_value={"models": [{"name": "synthetic:7b"}]}):
+        with patch("backend.provider.background_network", return_value={"models": []}) as poll:
             worker.step()
+        poll.assert_not_called()
         self.assertTrue(self.store.status()["waiting_for_ollama"])
         with patch("backend.provider.background_network", return_value={"models": []}):
-            worker.step()
+            self.provider.recover_local(entry["id"], True, entry["connection_config"]["base_url"])
         self.assertFalse(self.store.status()["running"])
         self.assertFalse(self.store.status()["waiting_for_ollama"])
 
@@ -327,21 +365,27 @@ class ClaimedProviderTests(unittest.TestCase):
             self.generate()
         self.assertEqual([call[1] for call in self.calls], ["/api/show"])
 
-    def test_ambiguous_dispatch_blocks_foreground_generation_until_verified_unloaded(self):
+    def test_ambiguous_dispatch_blocks_foreground_generation_until_confirmed_restart(self):
         def disconnect(config, path, payload, deadline):
             if path == "/api/chat":
                 raise BackgroundUncertain("Synthetic disconnect", False)
             return self.network(config, path, payload, deadline)
         with patch("backend.provider.background_network", side_effect=disconnect), self.assertRaises(BackgroundUncertain):
             self.generate()
+        self.store.finish_failure(self.prepared["job"], "Synthetic disconnected local inference")
         entry = self.provider.read_state()["ledger"][-1]
         self.assertEqual(entry["status"], "reserved")
         self.assertTrue(entry["background_unknown"])
         with patch("backend.provider.network") as request, self.assertRaisesRegex(ValueError, "request is running"):
             self.provider.generate_context("Synthetic request", [{"role": "user", "content": "Synthetic context"}])
         request.assert_not_called()
+        worker = ReflectionWorker(self.store, self.provider, lambda text: text)
+        with patch("backend.provider.background_network", return_value={"models": []}) as poll:
+            worker.step()
+        poll.assert_not_called()
+        self.assertEqual(self.provider.read_state()["ledger"][-1]["status"], "reserved")
         with patch("backend.provider.background_network", return_value={"models": []}):
-            self.provider.recover_background()
+            self.provider.recover_local(entry["id"], True, entry["connection_config"]["base_url"])
         self.assertEqual(self.provider.read_state()["ledger"][-1]["status"], "failed")
 
 

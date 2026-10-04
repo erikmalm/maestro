@@ -22,7 +22,7 @@ export default function ReflectionJournal({
           {!status.worker_available
             ? "Not running"
             : status.waiting_for_ollama
-              ? "Waiting for Ollama"
+              ? "Recovery required"
               : status.running
                 ? "Reflecting"
                 : status.config.enabled

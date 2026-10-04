@@ -276,6 +276,28 @@ def verify(image, tunnel=False):
         state = api("/api/workspace")
         assert (state["usage"]["input_tokens"], state["usage"]["output_tokens"], state["usage"]["calls"], state["usage"]["today_usd"]) == (800, 185, 13, 0)
         assert not state["work"]["config"]["enabled"] and state["memories"] == []
+        # A reachable empty /api/ps must not automatically clear interrupted work.
+        podman("exec", "-i", name, "python", "-", input="""
+from backend.app import provider
+service = provider()
+with service.transaction() as state:
+    state['ledger'].append({'id': 'synthetic-interrupted-local', 'at': service.stamp(),
+                           'protocol': 'ollama', 'model': state['config']['model'],
+                           'status': 'reserved', 'cost': 0, 'local_unknown': True,
+                           'connection_config': state['config'].copy()})
+""")
+        time.sleep(2.5)  # Let the server's reflection controller run another idle step.
+        waiting = api("/api/workspace")
+        interrupted = waiting["usage"]["local_requests"][0]
+        assert interrupted["id"] == "synthetic-interrupted-local" and interrupted["base_url"] == waiting["provider"]["config"]["base_url"]
+        api("/api/chat", {"text": "Do not overlap interrupted inference."}, headers=headers, expected=409)
+        recovery_path = "/api/provider/local-requests/synthetic-interrupted-local/recover"
+        api(recovery_path, {"restart_confirmed": False, "expected_base_url": interrupted["base_url"]}, headers=headers, expected=409)
+        state = api(recovery_path, {"restart_confirmed": True, "expected_base_url": interrupted["base_url"]}, headers=headers)
+        assert state["usage"]["local_requests"] == []
+        assert state["usage"]["input_tokens"] == waiting["usage"]["input_tokens"]
+        assert state["usage"]["output_tokens"] == waiting["usage"]["output_tokens"]
+        assert api(recovery_path, {"restart_confirmed": True, "expected_base_url": interrupted["base_url"]}, headers=headers)["usage"] == state["usage"]
         second = podman("exec", name, "python", "-c", "from backend.storage import workspace_owner; workspace_owner('/data').__enter__()", check=False)
         assert second.returncode != 0 and "already running" in second.stderr
         podman("exec", name, "python", "-m", "backend.storage", "/data/workspace.sqlite3", "/data/verify-backup.sqlite3")

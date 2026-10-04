@@ -203,6 +203,11 @@ class ChargeInput(StrictModel):
     billed_usd: float = Field(ge=0, le=100000, allow_inf_nan=False)
 
 
+class LocalRecoveryInput(StrictModel):
+    restart_confirmed: bool = Field(strict=True)
+    expected_base_url: str = Field(min_length=1, max_length=2048)
+
+
 class ProviderConfig(StrictModel):
     base_url: str = Field(default="https://api.openai.com/v1", min_length=1, max_length=2048)
     protocol: Literal["responses", "chat_completions", "ollama"] = "responses"
@@ -534,6 +539,13 @@ def remove_provider_key():
 def reconcile_provider_charge(entry_id: str, entry: ChargeInput):
     with conflict_errors():
         provider().reconcile(entry_id, entry.billed_usd)
+    return snapshot(read_workspace())
+
+
+@app.post("/api/provider/local-requests/{entry_id}/recover")
+def recover_local_request(entry_id: str, entry: LocalRecoveryInput):
+    with conflict_errors():
+        provider().recover_local(entry_id, entry.restart_confirmed, entry.expected_base_url)
     return snapshot(read_workspace())
 
 

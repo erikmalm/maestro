@@ -179,7 +179,7 @@ class ReflectionTests(unittest.TestCase):
         self.assertEqual(self.calls, [])
         self.assertEqual(self.store.status()["queued"], 1)
 
-    def test_unknown_foreground_dispatch_reports_wait_and_worker_recovers_only_after_unloading(self):
+    def test_unknown_foreground_dispatch_blocks_worker_until_explicit_restart_recovery(self):
         self.queue()
         with self.provider.transaction() as state:
             state["ledger"].append({"id": "foreground-unknown", "at": self.store.stamp(), "protocol": "ollama", "kind": "chat", "cost": 0,
@@ -192,7 +192,13 @@ class ReflectionTests(unittest.TestCase):
         self.assertEqual(self.store.status()["queued"], 1)
         self.assertTrue(self.store.status()["waiting_for_ollama"])
         self.worker.step()
-        self.assertEqual([path for _, path, _ in self.calls], ["/api/ps", "/api/show", "/api/chat"])
+        self.assertEqual(self.calls, [])
+        self.assertEqual(self.provider.read_state()["ledger"][0]["status"], "reserved")
+        original_url = self.provider.read_state()["ledger"][0]["connection_config"]["base_url"]
+        with patch("backend.provider.background_network", return_value={"models": []}):
+            self.provider.recover_local("foreground-unknown", True, original_url)
+        self.worker.step()
+        self.assertEqual([path for _, path, _ in self.calls], ["/api/show", "/api/chat"])
         self.assertFalse(self.store.status()["waiting_for_ollama"])
         self.assertEqual(len(self.store.status()["candidates"]), 1)
         orphan = self.provider.read_state()["ledger"][0]
@@ -205,8 +211,8 @@ class ReflectionTests(unittest.TestCase):
                                     "status": "reserved", "local_unknown": True})
         status = self.store.status()
         self.assertTrue(status["waiting_for_ollama"])
-        self.assertIn("Restore its original Local Ollama server URL in Settings", status["last_stop_reason"])
-        self.assertIn("Connect and load models", status["last_stop_reason"])
+        self.assertIn("Restart its original Ollama server", status["last_stop_reason"])
+        self.assertIn("Usage & limits", status["last_stop_reason"])
         self.worker.step()
         self.assertEqual(self.calls, [])
         self.assertEqual(self.provider.read_state()["ledger"][0]["status"], "reserved")

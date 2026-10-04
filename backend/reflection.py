@@ -14,6 +14,7 @@ import uuid
 
 from backend.memory import MAX_CONTENT, MAX_MEMORIES, MemoryStore, assistant_revision, content_value, revision, terms
 from backend.capabilities import CAPABILITIES
+from backend.provider import LocalUncertain
 from backend.tasks import TaskInput, add_reviewed_tasks, prune_ai_tasks
 from backend.work_config import config_value
 
@@ -178,6 +179,8 @@ def safe_proposal(text, validator):
 
 def failure_reason(error):
     # Exact static messages only; exceptions may contain private prompts or responses.
+    if isinstance(error, LocalUncertain):
+        return "Local completion is unknown. Restart the original Ollama server, then confirm the restart in Usage & limits."
     if isinstance(error, json.JSONDecodeError):
         return "Reflection returned invalid JSON; no memory was saved."
     return {
@@ -209,8 +212,6 @@ def failure_reason(error):
         "A proposal may contain credentials; no memory was saved.": "A proposal may contain credentials; no memory was saved.",
         "Remove credentials before saving.": "A proposal may contain credentials; no memory was saved.",
         "Choose an installed local chat model. Ollama cloud models are disabled in local mode.": "Choose an installed local completion model for reflection.",
-        "Ollama did not confirm completion. Waiting for its model to unload before another request.": "Ollama may still be running; waiting for confirmed model unloading.",
-        "Ollama did not confirm background completion. Waiting for its model to unload.": "Ollama may still be running; waiting for confirmed model unloading.",
     }.get(str(error), "Reflection failed; no memory was saved.")
 
 
@@ -626,6 +627,19 @@ class ReflectionStore:
 
     def finish_failure(self, job, reason="Reflection failed; no memory was saved."):
         with self.transaction() as db:
+            # The worker reaches this after its provider call has exited. If
+            # settlement and cleanup both failed, publish its orphan for explicit
+            # recovery without inferring termination from the job's state alone.
+            provider_state = self.read_provider(db)
+            marked = False
+            for entry in provider_state.get("ledger", []):
+                if (entry["status"] == "reserved" and entry.get("protocol") == "ollama"
+                        and entry.get("job_id") == job["id"] and entry.get("attempt") == job["attempt"]
+                        and not entry.get("background_unknown")):
+                    entry["background_unknown"] = True
+                    marked = True
+            if marked:
+                db.execute("UPDATE provider_state SET value=? WHERE id=1", (json.dumps(provider_state),))
             row = db.execute("SELECT state,data FROM reflection_jobs WHERE id=?", (job["id"],)).fetchone()
             if not row:
                 return
@@ -955,16 +969,16 @@ class ReflectionStore:
             budget = db.execute("SELECT jobs,tokens FROM reflection_budget WHERE day=?", (self.day(),)).fetchone() or (0, 0)
             active_jobs = {json.loads(raw)["id"] for state, raw in jobs if state in ("claimed", "reviewing", "dispatched")}
             ledger = self.read_provider(db).get("ledger", [])
-            missing_endpoint = any(entry["status"] == "reserved" and entry.get("local_unknown") and not entry.get("connection_config")
+            missing_endpoint = any(entry["status"] == "reserved" and (entry.get("local_unknown") or entry.get("background_unknown")) and not entry.get("connection_config")
                                    for entry in ledger)
             unknown = any(entry["status"] == "reserved" and (entry.get("local_unknown") or
                           (entry.get("job_id") and (entry.get("background_unknown") or entry["job_id"] not in active_jobs)))
                           for entry in ledger)
             stop_reason = json.loads(jobs[0][1]).get("stop_reason") if jobs else None
             if missing_endpoint:
-                stop_reason = "An interrupted local request has no saved endpoint. Restore its original Local Ollama server URL in Settings, then use Connect and load models to verify model unloading."
+                stop_reason = "An interrupted local request has no saved endpoint. Restart its original Ollama server, then enter that server URL and confirm the restart in Usage & limits."
             elif unknown:
-                stop_reason = "Ollama may still be running; waiting for confirmed model unloading."
+                stop_reason = "Local completion is unknown. Restart the original Ollama server, then confirm the restart in Usage & limits to release its slot."
             workspace = self.workspace(db)
             candidates = [json.loads(row[0]) for row in db.execute("SELECT data FROM reflection_candidates WHERE state='pending' ORDER BY rowid DESC")]
             candidates = [candidate for candidate in candidates if (source := self.source_map(workspace, candidate["chat_id"]).get(candidate["source_message_id"])) is not None and digest(source) == candidate["source_hash"]]
@@ -987,9 +1001,6 @@ class ReflectionWorker:
             if self.pending_failure is not None:
                 self.store.finish_failure(*self.pending_failure)
                 self.pending_failure = None
-            if any(entry["status"] == "reserved" and (entry.get("job_id") or entry.get("local_unknown"))
-                   for entry in self.provider.read_state().get("ledger", [])):
-                self.provider.recover_background()
             prepared = self.store.prepare()
             if prepared is None:
                 return
