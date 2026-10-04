@@ -116,7 +116,7 @@ class OllamaTests(unittest.TestCase):
     def test_setup_rejects_credentials_and_forces_zero_prices(self):
         synthetic_key = "synthetic-accidental-local-key"
         status = self.configure()
-        self.read_key.assert_called_once_with(DEFAULT["base_url"])
+        self.assertEqual([call.args for call in self.read_key.call_args_list], [(DEFAULT["base_url"],), (ENDPOINT,)])
         self.read_key.reset_mock()
         rejected = self.client.put(
             "/api/provider",
@@ -229,7 +229,7 @@ class OllamaTests(unittest.TestCase):
             state["models"] = [self.model]
             state["tested_at"] = "synthetic-previous-test"
         status = self.client.get("/api/provider").json()
-        self.assertEqual(status["config"]["ollama_context_tokens"], 4096)
+        self.assertEqual(status["config"]["ollama_context_tokens"], DEFAULT["ollama_context_tokens"])
         self.assertEqual(status["config"]["ollama_threads"], 0)
         self.assertEqual(status["config"]["ollama_keep_alive_minutes"], 5)
         self.assertEqual(status["config"]["orchestrator_model"], "")
@@ -241,12 +241,12 @@ class OllamaTests(unittest.TestCase):
                                      json={"text": "Check old settings still generate"})
         self.assertEqual(reply.status_code, 200, reply.text)
         payload = json.loads(self.reply_requests()[-1].content)
-        self.assertEqual(payload["options"], {"num_ctx": 4096, "num_thread": 0, "num_predict": 256})
+        self.assertEqual(payload["options"], {"num_ctx": DEFAULT["ollama_context_tokens"], "num_thread": 0, "num_predict": 256})
         self.assertEqual(payload["keep_alive"], "5m")
         self.assertEqual(service.read_state()["config"], status["config"])
 
     def test_local_context_guard_stops_before_dispatch_and_preserves_chat(self):
-        self.configure()
+        self.configure({**self.config, "ollama_context_tokens": 4096})
         before = self.client.get("/api/workspace").json()
         with self.mock_http():
             rejected = self.client.post("/api/chat", headers=self.headers,
@@ -262,6 +262,31 @@ class OllamaTests(unittest.TestCase):
             allowed = self.client.post("/api/chat", headers=self.headers,
                                        json={"text": "Synthetic oversized context " * 100})
         self.assertEqual(allowed.status_code, 200, allowed.text)
+
+    def test_output_and_context_capacity_rejects_invalid_saves_and_legacy_settings_can_be_fixed(self):
+        saved = self.configure()["config"]
+        service = Provider(backend.DATABASE, backend.TIMEZONE)
+        incompatible = {**saved, "ollama_context_tokens": 8192, "max_output_tokens": 8192}
+        with patch("backend.provider.network") as network:
+            for output in (8192, 6144):
+                response = self.client.put("/api/provider", headers=self.headers, json={
+                    "config": {**incompatible, "max_output_tokens": output}})
+                self.assertEqual(response.status_code, 409, response.text)
+                self.assertIn("output limit and chat prompt", response.json()["detail"])
+                self.assertEqual(service.read_state()["config"], saved)
+            network.assert_not_called()
+        with service.transaction() as state:
+            state["config"] = incompatible  # A previously saved configuration remains editable.
+        self.assertEqual(self.client.get("/api/provider").json()["config"], incompatible)
+        with self.mock_http():
+            rejected = self.client.post("/api/chat", headers=self.headers, json={"text": "Synthetic greeting"})
+        self.assertEqual(rejected.status_code, 409, rejected.text)
+        self.assertEqual(self.requests, [])
+        repaired = self.configure({**incompatible, "max_output_tokens": 256})
+        self.assertEqual(repaired["config"]["ollama_context_tokens"], 8192)
+        with self.mock_http():
+            reply = self.client.post("/api/chat", headers=self.headers, json={"text": "Synthetic greeting"})
+        self.assertEqual(reply.status_code, 200, reply.text)
 
     def test_worker_resource_values_reject_invalid_input_without_overwriting_settings(self):
         saved = self.configure()["config"]
@@ -398,23 +423,31 @@ class OllamaTests(unittest.TestCase):
         self.assertTrue(all(request.url.host == "127.0.0.1" for request in self.requests))
         self.assertEqual(self.client.get("/api/workspace").json()["messages"], [])
 
-    def test_local_errors_release_reservations_redact_details_and_allow_retry(self):
+    def test_local_errors_retain_unknown_completion_and_redact_details(self):
         self.configure()
         secret = "synthetic-private-provider-error"
-        for failure in ("http", "timeout", "malformed", "missing_usage", "refusal"):
+        for failure in ("http", "timeout", "malformed", "incomplete", "connect", "rejected", "metadata_timeout", "missing_usage", "refusal"):
             calls = []
 
             def handler(request):
                 calls.append(request)
                 if request.url.path == "/api/show":
+                    if failure == "metadata_timeout":
+                        raise httpx.ReadTimeout(secret, request=request)
                     return httpx.Response(200, json={"details": {"format": "gguf"}, "capabilities": ["completion"]})
                 self.assertEqual(request.url.path, "/api/chat")
                 if failure == "http":
                     return httpx.Response(500, json={"error": secret})
                 if failure == "timeout":
                     raise httpx.ReadTimeout(secret, request=request)
+                if failure == "connect":
+                    raise httpx.ConnectError(secret, request=request)
+                if failure == "rejected":
+                    return httpx.Response(400, json={"error": secret})
                 if failure == "malformed":
                     return httpx.Response(200, text=secret)
+                if failure == "incomplete":
+                    return httpx.Response(200, json={"done": False})
                 if failure == "refusal":
                     return httpx.Response(200, json={"done": True, "message": {"content": None, "refusal": secret},
                                                      "prompt_eval_count": 100, "eval_count": 5})
@@ -426,7 +459,9 @@ class OllamaTests(unittest.TestCase):
             self.assertNotIn(secret, result.text)
             if failure == "missing_usage":
                 self.assertNotIn("reconcil", result.text.lower())
-            self.assertEqual([request.url.path for request in calls], ["/api/show", "/api/chat"])
+            self.assertEqual([request.url.path for request in calls], ["/api/show"] if failure == "metadata_timeout" else ["/api/show", "/api/chat"])
+            if failure == "metadata_timeout":
+                self.assertNotIn("unload", result.text)
             restored = self.client.get("/api/workspace").json()
             self.assertEqual(restored["messages"], [])
             self.assertNotIn(secret, json.dumps(restored))
@@ -434,11 +469,22 @@ class OllamaTests(unittest.TestCase):
             self.assertEqual(restored["usage"]["reserved_usd"], 0)
             self.assertEqual(restored["usage"]["uncertain"], [])
             self.assertEqual(restored["usage"]["today_usd"], 0)
+            service = Provider(backend.DATABASE, backend.TIMEZONE)
+            entry = service.read_state()["ledger"][-1]
+            unknown = failure in ("http", "timeout", "malformed", "incomplete")
+            self.assertEqual(entry["status"] == "reserved", unknown)
+            if unknown:
+                self.assertTrue(entry["local_unknown"])
+                with self.mock_http():
+                    retry = self.client.post("/api/chat", headers=self.headers, json={"text": "Blocked retry"})
+                self.assertEqual(retry.status_code, 409, retry.text)
+                with patch("backend.provider.background_network", return_value={"models": []}):
+                    service.recover_local(entry["id"], True, self.config["base_url"])
         with self.mock_http():
             retried = self.client.post("/api/chat", headers=self.headers, json={"text": "A valid local retry"})
         self.assertEqual(retried.status_code, 200, retried.text)
 
-    def test_recovery_releases_local_reservation_instead_of_creating_uncertain_charge(self):
+    def test_recovery_retains_local_reservation_until_confirmed_restart(self):
         self.configure()
         service = Provider(backend.DATABASE, backend.TIMEZONE)
         with service.transaction() as state:
@@ -453,6 +499,16 @@ class OllamaTests(unittest.TestCase):
         service.recover()
         self.assertEqual(service.usage()["uncertain"], [])
         self.assertEqual(service.usage()["reserved_usd"], 0)
+        self.assertEqual(service.read_state()["ledger"][-1]["status"], "reserved")
+        self.assertTrue(service.read_state()["ledger"][-1]["local_unknown"])
+        with self.mock_http():
+            blocked = self.client.post("/api/chat", headers=self.headers, json={"text": "Before confirmed unloading"})
+        self.assertEqual(blocked.status_code, 409, blocked.text)
+        with self.mock_http():
+            reconnected = self.client.post("/api/provider/test", headers=self.headers)
+        self.assertEqual(reconnected.status_code, 200, reconnected.text)
+        with patch("backend.provider.background_network", return_value={"models": []}):
+            service.recover_local("synthetic-interrupted-local-call", True, self.config["base_url"])
         with self.mock_http():
             response = self.client.post("/api/chat", headers=self.headers, json={"text": "After local restart"})
         self.assertEqual(response.status_code, 200, response.text)

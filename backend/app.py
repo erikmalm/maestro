@@ -1,6 +1,7 @@
 """Local workspace with configurable live chat and persistent to-dos."""
 
 from contextlib import closing, contextmanager, asynccontextmanager
+import asyncio
 from datetime import datetime
 import hashlib
 import hmac
@@ -21,8 +22,13 @@ from pydantic import BaseModel, ConfigDict, Field
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 from backend.provider import Provider
 from backend import credentials
-from backend.web_search import WebSearch
+from backend.capabilities import CAPABILITIES
+from backend.web_search import WebSearch, ENDPOINT as SEARCH_ENDPOINT
 from backend.storage import workspace_owner
+from backend.memory import MAX_CONTENT, MemoryStore
+from backend.work_config import WorkConfig, config_value
+from backend.reflection import ReflectionStore, ReflectionWorker
+from backend.tasks import TaskInput, TaskUpdate, create_task as task_record, dismiss_task, present_task, prune_ai_tasks
 
 ROOT = Path(__file__).resolve().parent.parent
 DATA_DIR = Path(os.environ.get("MAESTRO_DATA_DIR") or Path(os.environ.get("LOCALAPPDATA", Path.home() / ".local" / "share")) / "Maestro" / "preview").expanduser().resolve()
@@ -50,7 +56,7 @@ def identifier() -> str:
 def seed_workspace() -> dict:
     return {
         "tasks": [], "chats": [],
-        "limits": {"run_usd": 1.0, "daily_usd": 5.0, "monthly_usd": 50.0, "max_tokens": 100000},
+        "limits": {"run_usd": 1.0, "daily_usd": 5.0, "monthly_usd": 50.0, "max_tokens": 500000},
         "working_core_migrated": True,
     }
 
@@ -102,7 +108,7 @@ def selected_chat(state: dict, chat_id: str | None = None) -> dict | None:
 
 
 @contextmanager
-def workspace_transaction():
+def workspace_transaction(with_db=False):
     with closing(sqlite3.connect(DATABASE, timeout=10)) as connection, connection:
         connection.execute("PRAGMA secure_delete=ON")
         connection.execute("CREATE TABLE IF NOT EXISTS workspace (id INTEGER PRIMARY KEY CHECK (id=1), value TEXT NOT NULL)")
@@ -110,7 +116,7 @@ def workspace_transaction():
         row = connection.execute("SELECT value FROM workspace WHERE id=1").fetchone()
         state = json.loads(row[0]) if row else seed_workspace()
         migrate_workspace(state)
-        yield state
+        yield (state, connection) if with_db else state
         connection.execute("INSERT INTO workspace VALUES (1, ?) ON CONFLICT(id) DO UPDATE SET value=excluded.value", (json.dumps(state),))
 
 
@@ -138,7 +144,7 @@ def snapshot(state: dict, chat_id: str | None = None) -> dict:
     service = provider()
     provider_state = service.read_state()
     return {
-        **{key: state[key] for key in ("tasks", "limits")},
+        "tasks": [present_task(task) for task in state["tasks"]], "limits": state["limits"],
         "chats": [{key: item[key] for key in ("id", "title", "created_at", "updated_at")}
                   for item in sorted(state["chats"], key=lambda item: item["updated_at"], reverse=True)],
         "active_chat_id": chat["id"] if chat else None,
@@ -146,7 +152,9 @@ def snapshot(state: dict, chat_id: str | None = None) -> dict:
         "usage": service.usage(provider_state),
         "provider": service.status(provider_state),
         "web_search": WebSearch(DATABASE, TIMEZONE).status(),
-        "capabilities": {"mode": "local", "live_ai": True, "task_execution": False, "delegation": False, "github_pr": False, "secure_credentials": os.name == "nt"},
+        "memories": MemoryStore(DATABASE, TIMEZONE).list(),
+        "work": work_status(state),
+        "capabilities": {"mode": "local", **CAPABILITIES, "secure_credentials": os.name == "nt"},
     }
 
 
@@ -154,18 +162,22 @@ class StrictModel(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
 
-class TaskInput(StrictModel):
-    title: str = Field(min_length=1, max_length=200)
-    details: str = Field(default="", max_length=3000)
-    priority: str = Field(default="normal", pattern="^(normal|high)$")
+class MemoryContent(StrictModel):
+    content: str = Field(min_length=1, max_length=MAX_CONTENT)
 
 
-class DoneInput(StrictModel):
-    done: bool
+class MemoryInput(MemoryContent):
+    scope: Literal["workspace", "conversation"] = "workspace"
+    chat_id: str | None = Field(default=None, min_length=1, max_length=100)
+    source_message_id: str | None = Field(default=None, min_length=1, max_length=100)
+
+
+class CandidateInput(StrictModel):
+    scope: Literal["workspace", "conversation"] = "conversation"
 
 
 class TextInput(StrictModel):
-    text: str = Field(min_length=1, max_length=4000)
+    text: str = Field(min_length=1, max_length=32000)
     chat_id: str | None = Field(default=None, min_length=1, max_length=100)
     model: str = Field(default="", max_length=200, pattern=r"^[A-Za-z0-9_./:-]*$")
     role: Literal["chat", "orchestrator"] = "chat"
@@ -173,6 +185,11 @@ class TextInput(StrictModel):
 
 class ChatTitleInput(StrictModel):
     title: str = Field(min_length=1, max_length=120)
+
+
+class FeedbackInput(StrictModel):
+    rating: Literal["positive", "negative"] | None
+    comment: str = Field(default="", max_length=4000)
 
 
 class LimitsInput(StrictModel):
@@ -186,6 +203,11 @@ class ChargeInput(StrictModel):
     billed_usd: float = Field(ge=0, le=100000, allow_inf_nan=False)
 
 
+class LocalRecoveryInput(StrictModel):
+    restart_confirmed: bool = Field(strict=True)
+    expected_base_url: str = Field(min_length=1, max_length=2048)
+
+
 class ProviderConfig(StrictModel):
     base_url: str = Field(default="https://api.openai.com/v1", min_length=1, max_length=2048)
     protocol: Literal["responses", "chat_completions", "ollama"] = "responses"
@@ -194,8 +216,8 @@ class ProviderConfig(StrictModel):
     input_usd_per_million: float = Field(default=0, ge=0, le=10000, allow_inf_nan=False)
     output_usd_per_million: float = Field(default=0, ge=0, le=10000, allow_inf_nan=False)
     pricing_verified: bool = False
-    max_output_tokens: int = Field(default=1024, ge=64, le=32768)
-    ollama_context_tokens: int = Field(default=4096, ge=1024, le=131072)
+    max_output_tokens: int = Field(default=8192, ge=64, le=32768)
+    ollama_context_tokens: int = Field(default=32768, ge=1024, le=131072)
     ollama_threads: int = Field(default=0, ge=0, le=256)
     ollama_keep_alive_minutes: int = Field(default=5, ge=0, le=120)
 
@@ -233,9 +255,20 @@ def conflict_errors():
 @asynccontextmanager
 async def lifespan(application):
     with workspace_owner(DATABASE.parent):
+        read_workspace()
         provider().recover()
         WebSearch(DATABASE, TIMEZONE).recover()
-        yield
+        MemoryStore(DATABASE, TIMEZONE).initialize()
+        reflection = ReflectionStore(DATABASE, TIMEZONE)
+        reflection.initialize()
+        reflection.recover()
+        stop = asyncio.Event()
+        worker = asyncio.create_task(ReflectionWorker(reflection, provider(), safe_private_content).run(stop))
+        try:
+            yield
+        finally:
+            stop.set()
+            await worker
 
 
 app = FastAPI(title="Maestro", docs_url=None, redoc_url=None, openapi_url=None, lifespan=lifespan)
@@ -269,7 +302,7 @@ async def protect_local_workspace(request: Request, call_next):
                 size = int(request.headers.get("content-length", "0"))
             except ValueError:
                 return JSONResponse({"detail": "Invalid request."}, status_code=400)
-            if size > 32768:
+            if size > 262144 or len(await request.body()) > 262144:
                 return JSONResponse({"detail": "This entry is too large."}, status_code=413)
     response = await call_next(request)
     response.headers["X-Content-Type-Options"] = "nosniff"
@@ -296,7 +329,7 @@ def create_chat():
     with workspace_transaction() as state:
         chat = create_chat_record()
         state["chats"].append(chat)
-        return snapshot(state, chat["id"])
+    return snapshot(state, chat["id"])
 
 
 @app.patch("/api/chats/{chat_id}")
@@ -304,19 +337,146 @@ def rename_chat(chat_id: str, entry: ChatTitleInput):
     with workspace_transaction() as state:
         chat = selected_chat(state, chat_id)
         chat.update(title=entry.title, title_source="manual", updated_at=now())
-        return snapshot(state, chat_id)
+    return snapshot(state, chat_id)
 
 
 @app.delete("/api/chats/{chat_id}")
 def delete_chat(chat_id: str):
     # The workspace and provider reservation share this immediate SQLite lock.
-    with workspace_transaction() as state:
+    with workspace_transaction(with_db=True) as (state, db):
         selected_chat(state, chat_id)
         if any(entry["status"] == "reserved" and entry.get("thread_id") == chat_id
                for entry in provider().read_state()["ledger"]):
             raise HTTPException(409, "Wait for this chat's current request to finish before deleting it.")
         state["chats"] = [chat for chat in state["chats"] if chat["id"] != chat_id]
-        return snapshot(state)
+        MemoryStore(DATABASE, TIMEZONE).delete_chat(chat_id, db=db)
+        ReflectionStore(DATABASE, TIMEZONE).delete_chat(chat_id, db)
+        prune_ai_tasks(state, db)
+    return snapshot(state)
+
+
+def safe_private_content(content):
+    # Memory and model choices must not turn configured credentials into context.
+    config = provider().read_state()["config"]
+    endpoints = (() if config["protocol"] == "ollama" else (config["base_url"],)) + (SEARCH_ENDPOINT,)
+    for endpoint in endpoints:
+        try:
+            key = credentials.read(endpoint)[0]
+        except ValueError:
+            continue
+        if key and key in content:
+            raise ValueError("Remove credentials before saving.")
+    return content
+
+
+@app.patch("/api/chats/{chat_id}/messages/{message_id}/feedback")
+def save_feedback(chat_id: str, message_id: str, entry: FeedbackInput):
+    with conflict_errors():
+        if "\x00" in entry.comment or (entry.rating is None and entry.comment):
+            raise ValueError("Choose a rating for your comment, or clear both fields.")
+        safe_private_content(entry.comment)
+        with workspace_transaction(with_db=True) as (state, db):
+            chat = selected_chat(state, chat_id)
+            message = next((item for item in chat["messages"] if item["id"] == message_id
+                            and item.get("role") == "assistant" and not item.get("demo")), None)
+            if message is None:
+                raise HTTPException(404, "That answer could not be found.")
+            previous = message.get("feedback")
+            changed = ((previous or {}).get("rating"), (previous or {}).get("comment", "")) != (entry.rating, entry.comment)
+            if changed:
+                if entry.rating is None:
+                    message.pop("feedback", None)
+                else:
+                    message["feedback"] = {"rating": entry.rating, "comment": entry.comment, "updated_at": now()}
+                memories = MemoryStore(DATABASE, TIMEZONE)
+                memories.initialize_db(db)
+                memories.remove_stale(db, state["chats"])
+                prune_ai_tasks(state, db)
+                reflection = ReflectionStore(DATABASE, TIMEZONE)
+                reflection.invalidate(db, clear_candidates=False)
+                reflection.touch(state, db)
+                if previous is not None:
+                    db.execute("DELETE FROM reflection_journal")
+    return {"message_id": message_id, "feedback": message.get("feedback"),
+            "work": {**work_status(state), "tasks": [present_task(task) for task in state["tasks"]]},
+            "memories": MemoryStore(DATABASE, TIMEZONE).list()}
+
+
+@app.get("/api/memory")
+def get_memories():
+    return MemoryStore(DATABASE, TIMEZONE).list()
+
+
+@app.post("/api/memory")
+def remember(entry: MemoryInput):
+    with conflict_errors():
+        return MemoryStore(DATABASE, TIMEZONE).remember(safe_private_content(entry.content), entry.scope, entry.chat_id, entry.source_message_id)
+
+
+@app.patch("/api/memory/{memory_id}")
+def correct_memory(memory_id: str, entry: MemoryContent):
+    with conflict_errors():
+        return MemoryStore(DATABASE, TIMEZONE).update(memory_id, safe_private_content(entry.content))
+
+
+@app.delete("/api/memory/{memory_id}")
+def forget_memory(memory_id: str):
+    with conflict_errors():
+        MemoryStore(DATABASE, TIMEZONE).forget(memory_id)
+    return {"deleted": True}
+
+
+def work_status(state):
+    return {"config": config_value(state), "worker_available": True,
+            **ReflectionStore(DATABASE, TIMEZONE).status()}
+
+
+@app.get("/api/work-config")
+def get_work_config():
+    return work_status(read_workspace())
+
+
+@app.put("/api/work-config")
+def put_work_config(entry: WorkConfig):
+    with conflict_errors():
+        connection = provider().read_state()["config"]
+        if entry.enabled and (connection["protocol"] != "ollama" or not connection["model"]):
+            raise ValueError("Select a local Ollama chat model before enabling reflection.")
+        if entry.enabled and entry.auto_curate and connection["ollama_context_tokens"] < 8192:
+            raise ValueError("Automatic memory curation needs at least 8192 context tokens. Update Local worker settings first.")
+        for model in (entry.reflection_model, entry.memory_model, entry.coding_model):
+            safe_private_content(model)
+        with workspace_transaction(with_db=True) as (state, db):
+            previous = config_value(state)
+            if previous != entry.model_dump():
+                ReflectionStore(DATABASE, TIMEZONE).invalidate(db, clear_candidates=False)
+                if entry.enabled and entry.auto_curate and entry.periodic_reflection and (
+                        not all(previous[field] for field in ("enabled", "auto_curate", "periodic_reflection"))
+                        or previous["reflection_interval_minutes"] != entry.reflection_interval_minutes):
+                    db.execute("UPDATE reflection_schedule SET next_due=0 WHERE id=1")
+            state["work_config"] = entry.model_dump()
+    return work_status(state)
+
+
+@app.get("/api/reflection")
+def get_reflection():
+    state = read_workspace()
+    return {**work_status(state), "memories": MemoryStore(DATABASE, TIMEZONE).list(),
+            "tasks": [present_task(task) for task in state["tasks"]], "usage": provider().usage()}
+
+
+@app.post("/api/reflection/candidates/{candidate_id}/accept")
+def accept_candidate(candidate_id: str, entry: CandidateInput):
+    with conflict_errors():
+        return ReflectionStore(DATABASE, TIMEZONE).accept(
+            candidate_id, MemoryStore(DATABASE, TIMEZONE), safe_private_content, entry.scope)
+
+
+@app.delete("/api/reflection/candidates/{candidate_id}")
+def reject_candidate(candidate_id: str):
+    with conflict_errors():
+        ReflectionStore(DATABASE, TIMEZONE).reject(candidate_id)
+    return {"deleted": True}
 
 
 @app.get("/api/provider")
@@ -382,32 +542,45 @@ def reconcile_provider_charge(entry_id: str, entry: ChargeInput):
     return snapshot(read_workspace())
 
 
+@app.post("/api/provider/local-requests/{entry_id}/recover")
+def recover_local_request(entry_id: str, entry: LocalRecoveryInput):
+    with conflict_errors():
+        provider().recover_local(entry_id, entry.restart_confirmed, entry.expected_base_url)
+    return snapshot(read_workspace())
+
+
 @app.post("/api/tasks")
 def create_task(entry: TaskInput):
     with workspace_transaction() as state:
-        state["tasks"].insert(0, {"id": identifier(), **entry.model_dump(), "done": False, "created_at": now()})
-        return snapshot(state)
+        state["tasks"].insert(0, task_record(entry, "user", now()))
+    return snapshot(state)
 
 
 @app.patch("/api/tasks/{task_id}")
-def update_task(task_id: str, entry: DoneInput):
+def update_task(task_id: str, entry: TaskUpdate):
     with workspace_transaction() as state:
         task = next((task for task in state["tasks"] if task["id"] == task_id), None)
         if task is None:
             raise HTTPException(404, "That task could not be found.")
-        task["done"] = entry.done
-        return snapshot(state)
+        task.update(entry.model_dump(exclude_unset=True))
+    return snapshot(state)
 
 
 @app.delete("/api/tasks/{task_id}")
 def remove_task(task_id: str):
     with workspace_transaction() as state:
+        task = next((task for task in state["tasks"] if task["id"] == task_id), None)
+        if task:
+            dismiss_task(state, task)
         state["tasks"] = [task for task in state["tasks"] if task["id"] != task_id]
-        return snapshot(state)
+    return snapshot(state)
 
 
 @app.post("/api/chat")
 def chat(entry: TextInput):
+    with conflict_errors():
+        if entry.model:
+            safe_private_content(entry.model)
     with workspace_transaction() as state:
         target = selected_chat(state, entry.chat_id)
         if target is None:
@@ -424,7 +597,7 @@ def chat(entry: TextInput):
 def put_limits(entry: LimitsInput):
     with workspace_transaction() as state:
         state["limits"] = entry.model_dump()
-        return snapshot(state)
+    return snapshot(state)
 
 
 if (ROOT / "frontend" / "dist").is_dir():

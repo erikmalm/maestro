@@ -69,10 +69,12 @@ export function useSetupForm<
       if (recover) {
         try {
           update(await recover(), false);
+          return;
         } catch {
           // Keep the original error if refreshing the local status also fails.
         }
       }
+      onChange(status);
     } finally {
       submitted.current = null;
       setBusy("");
@@ -143,7 +145,7 @@ export function KeyStorage({
 }
 
 type NumericKey<T> = {
-  [K in keyof T]: T[K] extends number ? K : never;
+  [K in keyof T]-?: T[K] extends number ? K : never;
 }[keyof T];
 
 export function NumberFields<T extends object>({

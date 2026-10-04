@@ -1,8 +1,8 @@
 # Maestro
 
-A local web interface for persistent chats with your chosen model, usage tracking and to-dos. Workspace, Tasks and Settings expose the working core: live conversation, manual task management and provider configuration.
+A local web interface for persistent chats with your chosen model, usage tracking and to-dos. Workspace, Tasks, Memory and Settings expose live conversation, user-created and reviewed AI-created tasks, private memory and configuration.
 
-Maestro saves one provider connection with a chat model and a separate orchestrator preference. The chat window supports per-message model choices and formatted Markdown replies. Autonomous orchestration, task execution and delegation remain future work. Optional Ollama web search is the only model-selected tool. The [development plan](DEVELOPMENT_PLAN.md) describes the next functional increments.
+Maestro saves one provider connection with a chat model and a separate orchestrator preference. Chat supports per-message model choices, Markdown and private memory. Opt-in background reflection curates reviewed memories automatically, maintains working notes and provides a private journal. It can also create independently reviewed task suggestions. Task execution and delegation remain future work. Optional Ollama web search is the only model-selected tool. The [development plan](DEVELOPMENT_PLAN.md) and [memory/reflection architecture](docs/MEMORY_AND_REFLECTION.md) describe working behavior and the next increments.
 
 ## Run locally
 
@@ -31,7 +31,7 @@ New replies reveal progressively after generation finishes; saved history appear
 
 Ollama mode uses the native local API without a key or price entry. Only loopback endpoints, the exact trusted container host endpoint and installed local chat models are accepted; cloud models are excluded and there is no cloud fallback. Output and conversation token limits still apply, including when dollar budgets are zero. Models and Ollama's own configuration stay outside this repository. See [Ollama's local API](https://docs.ollama.com/api/authentication).
 
-Expand **Local worker settings** to control context size (default 4,096 tokens), CPU threads (0 lets Ollama choose), and idle keep-loaded time (default 5 minutes; 0 unloads after each reply). Save changes before the next message. Larger contexts use more memory; these settings do not limit GPU utilization. Maestro conservatively checks conversation size plus the reply allowance before dispatch and asks for a new chat or a larger context when it would not fit. Ollama runs inference on demand; these settings do not start a background task runner. See [Ollama's context and keep-alive settings](https://docs.ollama.com/faq).
+Expand **Local worker settings** to control context size (default 32,768 tokens), CPU threads (0 lets Ollama choose), and idle keep-loaded time (default 5 minutes; 0 unloads after each reply). Save changes before the next message. Larger contexts use more memory; these settings do not limit GPU utilization. Maestro conservatively checks conversation size plus the reply allowance before dispatch and asks for a new chat or a larger context when it would not fit. Ollama runs inference on demand; these settings do not start a background task runner. See [Ollama's context and keep-alive settings](https://docs.ollama.com/faq).
 
 For OpenAI or another API provider:
 
@@ -47,24 +47,38 @@ Each chat keeps its own history, and only that chat's messages are sent with lat
 
 After the first successful reply, Maestro tries once to name the chat using the same model, a bounded first message and the remaining request allowance, without tools. If naming fails, model settings change or the allowance is insufficient, a short title from the first message remains. A manual rename always takes precedence. Usage totals include title calls. Project grouping is a later increment.
 
-To-dos can be added, completed/reopened and deleted without model calls; saving a task does not execute it.
+To-dos can be added, completed/reopened and deleted without model calls. Each task identifies its initiator and suggests either you or Maestro as its worker; you can change that suggestion without changing the initiator. Optional periodic reflection can add up to two independently reviewed tasks per pass to the same list. Matching open/completed task titles and dismissed AI titles suppress repeats. Saving or suggesting a worker does not execute a task.
 
-The next increment is a shared generation service, followed by one durable task worker using the same Ollama server and usage ledger. Its first acceptance check is one queued text-only task completing with the browser closed, with pause and restart recovery. Multiple saved model profiles and bounded delegation follow that working path. See the [build sequence](docs/ARCHITECTURE.md#next-build-sequence).
+Shared local generation and opt-in background reflection now reuse the chat usage ledger. The next execution increment is one durable text-only task, completing with the browser closed and supporting pause/restart recovery. Multiple saved model profiles and bounded delegation follow that working path. See the [build sequence](docs/ARCHITECTURE.md#next-build-sequence).
 
 ## Optional automatic web search
 
 Ollama web search is a hosted tool, separate from local model inference. Creating an Ollama API key does not automatically add it to chat. Maestro explicitly offers one search tool to a compatible local model; when the model requests it, the backend calls the fixed hosted search API and supplies bounded excerpts for one final local reply. Result websites are not crawled or fetched by Maestro. See [Ollama's web search API](https://docs.ollama.com/capabilities/web-search).
 
-1. In **Settings**, select your local Ollama model, expand **Local worker settings**, set context size to at least **8192**, and save the model connection.
+1. In **Settings**, select your local Ollama model, expand **Local worker settings**, start with **32768** context tokens, and save the model connection. Smaller contexts need a smaller output allowance to leave room for prompts.
 2. In **Optional web search**, enter the Ollama search API key. Leave **Save search key in Windows Credential Manager** checked for persistence outside Git, or uncheck it for server-memory storage.
 3. Set a **Daily search cap** (default 20; 0 stops search) and **Results per search** (1-3). Click **Test search connection**. It saves the key if necessary and sends one fixed public query, which counts against the cap. Testing keeps automatic search disabled.
 4. After a successful test, check **Let Maestro decide when to search** and **Save search settings**. Chat will show the actual query and numbered source links when search is used. The key remains separate from the local model connection.
 
 Automatic search sends the model's chosen query to Ollama.com; queries can contain terms from the conversation. The key is sent only to the hosted search endpoint and never to the local model. Local models must report tool support. Maestro permits at most one search and two local model calls for an answer, sharing the reply token allowance and recording both calls' actual usage. The optional first-chat title call uses only the remaining allowance. Ordinary replies can complete without search. Failed searches show explicit errors and preserve known model usage; they do not silently generate a purported search answer.
 
-Search attempts, including tests, failures and interrupted requests, count toward the daily cap. Requests are at least five seconds apart, have a 30-second search timeout and no automatic retry. Rate-limit responses pause further searches and respect `Retry-After` (60 seconds if absent). These controls use the hosted service normally and do not evade site or service restrictions. Search counts and cooldowns are visible in Settings/usage; the search API supplies no billing feed, so search fees are not included in the local model's $0 inference figure. [Ollama's announcement](https://ollama.com/blog/web-search) describes free searches and subscription rate limits without a numerical quota or per-search price.
+Search attempts, including tests, failures and interrupted requests, count toward the daily cap. Requests are at least five seconds apart, have a 30-second search timeout and no automatic retry. Rate-limit responses pause further searches and respect `Retry-After` (60 seconds if absent). These controls use the hosted service normally and do not evade site or service restrictions. Search counts are visible in usage, and cooldowns appear beside the search controls in Settings; the search API supplies no billing feed, so search fees are not included in the local model's $0 inference figure. [Ollama's announcement](https://ollama.com/blog/web-search) describes free searches and subscription rate limits without a numerical quota or per-search price.
 
 Rejected key/account access disables automatic search until the key is successfully retested and search is explicitly enabled again. Ordinary local chat remains available.
+
+## Private memory
+
+Open **Memory** from the sidebar or **Open memory** in Settings to explore the map of facts, preferences, working identity and lessons. Select a memory to read its sources, edit it or forget it. Search and scope filters narrow the map; **List** provides a text view. You can also save a fact/preference for all local chats or just the current conversation. Facts/preferences use scoped keyword recall; working notes share the configured recall allowance. Memory stays in local Ollama chat without hosted search. Saving memory makes no model call.
+
+Memories and replies derived from them stay local: start a new conversation before switching that history to a remote provider or active hosted search. Chat deletion removes scoped/source-linked memory and reflection proposals; unlinked workspace records remain. Forgetting affects future recall and retains earlier messages/backups.
+
+**Settings → Task models & reflection** saves task models and resource limits. Set local context to at least 8,192 tokens, then enable automatic memory curation and independent reflection for reviewed updates and working notes every six hours. Read results in **Memory → Private reflection journal**; edit to pin a memory or forget it. Chat curation uses the memory model followed by the reflection model; periodic reflection reverses those roles. Blank choices use recommended installed models or chat fallback. Automatic options default off; the earlier accept/reject proposal workflow remains available in Memory. See the [usage guide and design](docs/MEMORY_AND_REFLECTION.md#using-background-reflection), [model assessment](docs/LOCAL_MODELS.md) and [Windows lock/sleep guidance](docs/WINDOWS_BACKGROUND.md).
+
+The interval accepts 5 minutes to seven days; try 15 minutes while evaluating repeated reflection passes. The default remains six hours. Runs wait for chat to be idle and share one generation slot. At 15 minutes there can be 96 scheduled passes per day, so allow enough daily jobs alongside chat curation; the daily token limit still bounds work. Missed intervals do not accumulate a catch-up backlog.
+
+Optional thumbs and comments on answers provide local feedback for the next scheduled reflection. It reviews complete selected exchanges against intent, accuracy and clarity without adding a model call when you rate an answer. Background context defaults to 32,768 tokens, with 16 exchanges, 8,192 output tokens per call, 50 jobs/2,000,000 tokens per day, and recall of up to 40 memories/32,000 characters. These limits are configurable separately from chat; saved settings retain their values after upgrades.
+
+Independent reflection also reviews Maestro's capabilities and working practices without new chats. It can refine practices and propose measurable self-improvement experiments, distinguishing untested ideas from observed issues. Enable **AI can create tasks during reflection** in **Task models & reflection** to save reviewed follow-ups and improvement ideas as to-dos. It defaults off and reuses the same two model calls, source checks and budgets. Results appear in **Tasks**, labeled **Initiated by** and **Suggested for**, with attribution in the private reflection journal. There is no task runner or automatic execution.
 
 ## Usage and limits
 
@@ -72,7 +86,9 @@ The header shows today's tokens and estimated USD. Each answer shows its model, 
 
 Tokens come from provider responses. USD uses your configured prices and excludes cache discounts; it is not an invoice or a billing feed. Maestro does not adjust saved rates for longer contexts; update them manually using the provider's applicable rates. [OpenAI pricing](https://developers.openai.com/api/docs/pricing) lists separate short- and long-context rates. Changing prices does not recalculate earlier requests. Spend and conservative token reservations are checked before dispatch. One chat request runs at a time, with a configured output cap and no automatic retries.
 
-Paid API requests with unknown usage retain a reservation and block further chat until their billed amount is verified in Settings. Known access/quota rejections release the reservation. Local Ollama failures release their zero-cost reservation. Restart preserves accounting and marks interrupted paid requests uncertain.
+Paid API requests with unknown usage retain a reservation and block further chat until their billed amount is verified in **Usage & limits** (open it from the header or **Open usage** in Settings). Known access/quota rejections release the reservation. Confirmed local Ollama failures release their zero-cost reservation. A generation timeout, interrupted local call, or response without confirmed completion keeps the generation slot reserved. An empty Ollama model list can omit loading or queued work, so it does not release the slot automatically. Stop other work on the original Ollama server, quit/stop that server completely and restart it. In **Usage & limits**, confirm that you restarted the server shown for the interrupted request and click **Verify and release slot**. Maestro checks that original server is reachable and has no loaded models before releasing that request. Restarting Maestro alone preserves the block; recorded usage remains accounted.
+
+An older interrupted local call may lack a saved server address. Enter its original **Ollama server URL** in the recovery form and confirm that you restarted that server. Saving or testing a new model connection does not assign an address to the interrupted request. This confirmation is your acknowledgement of restarting the original server; Maestro cannot detect a daemon restart from its model list. Keep other Ollama clients idle during recovery. Restarting the server interrupts their work too.
 
 ## Private credentials and data
 
@@ -82,7 +98,7 @@ The Ollama search key uses its own credential scope for `https://ollama.com/api/
 
 Tasks, conversations, model settings and accounting live in `%LOCALAPPDATA%\Maestro\preview`, outside the checkout. An alternative `MAESTRO_DATA_DIR` must also resolve outside it. The launcher reuses a running server only for the same private directory; stop that instance before switching directories. A public repository contains only reusable source, documentation and synthetic fixtures.
 
-Earlier prototype runs, memory records and simulated accounting remain archived in the private database; their APIs and demo screens have been removed. Existing reflection tables are retained without a runtime. Simulated chat messages are excluded from active history and model context. Real conversations, provider settings and usage accounting are preserved.
+Earlier prototype runs, memory records and simulated accounting remain archived in the private database; their APIs and demo screens have been removed. Simulated chat messages are excluded from active history and model context. Real conversations, provider settings and usage accounting are preserved.
 
 When you send API chat, its history and your key go to the configured provider. In Ollama mode, history goes to your local server without any saved provider key. Provider retention rules still apply. OpenAI requests use `store: false`; see [OpenAI data controls](https://developers.openai.com/api/docs/guides/your-data). The backend binds to loopback and requires local session/CSRF protection.
 

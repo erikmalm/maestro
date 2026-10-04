@@ -3,6 +3,7 @@
 from pathlib import Path
 from contextlib import closing
 from concurrent.futures import ThreadPoolExecutor
+import hashlib
 import json
 import os
 import sqlite3
@@ -12,6 +13,7 @@ from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 from backend import app as backend
+from backend.memory import MemoryStore, assistant_revision, revision
 from backend.provider import DEFAULT, Provider
 from backend.web_search import DEFAULT as SEARCH_DEFAULT, WebSearch
 
@@ -46,12 +48,25 @@ class WorkspaceTests(unittest.TestCase):
         created = self.client.post("/api/tasks", headers=self.headers, json={"title": "Synthetic persistence task", "details": "A test criterion", "priority": "high"})
         self.assertEqual(created.status_code, 200)
         self.assertEqual(created.json()["usage"], before["usage"])
+        self.assertEqual(created.json()["tasks"][0]["initiated_by"], "user")
+        self.assertEqual(created.json()["tasks"][0]["suggested_assignee"], "user")
         second = TestClient(backend.app)
         second.get("/api/session")
         self.assertEqual(second.get("/api/workspace").json()["tasks"][0]["title"], "Synthetic persistence task")
         second.close()
         self.assertTrue(backend.DATABASE.is_file())
         self.assertNotIn(backend.ROOT, backend.DATABASE.parents)
+
+    def test_large_unicode_chat_reaches_generation_without_request_body_rejection(self):
+        chat_id = self.client.post("/api/chats", headers=self.headers).json()["active_chat_id"]
+        text = "聊天" * 16000
+        with patch.object(Provider, "chat") as generate:
+            response = self.client.post("/api/chat", headers=self.headers, json={"chat_id": chat_id, "text": text})
+            self.assertEqual(response.status_code, 200, response.text)
+            generate.assert_called_once_with(text, chat_id, "", "chat")
+            too_long = self.client.post("/api/chat", headers=self.headers, json={"chat_id": chat_id, "text": text + "a"})
+            self.assertEqual(too_long.status_code, 422, too_long.text)
+            self.assertEqual(generate.call_count, 1)
 
     def test_non_ascii_session_and_csrf_tokens_are_rejected(self):
         result = self.client.get("/api/workspace", headers=[(b"cookie", b"maestro_session=caf\xe9")])
@@ -60,13 +75,25 @@ class WorkspaceTests(unittest.TestCase):
                                   headers=[(b"x-maestro-csrf", b"caf\xe9")])
         self.assertEqual(result.status_code, 403)
 
+    def test_request_size_uses_actual_bytes_without_trusting_content_length(self):
+        before = self.workspace()
+        payload = b'{"title":"Synthetic oversized task"}' + b" " * 262144
+        for declared_size in (None, "1", str(len(payload))):
+            headers = {**self.headers, "Content-Type": "application/json"}
+            if declared_size is not None:
+                headers["Content-Length"] = declared_size
+            response = self.client.post("/api/tasks", headers=headers, content=iter((payload,)))
+            self.assertEqual(response.status_code, 413, response.text)
+            self.assertEqual(self.workspace(), before)
+
     def test_fresh_workspace_is_empty_and_exposes_only_current_capabilities(self):
         result = self.workspace()
         self.assertEqual(result["tasks"], [])
         self.assertEqual(result["messages"], [])
         self.assertEqual(result["usage"]["calls"], 0)
         self.assertEqual(result["usage"]["today_usd"], 0)
-        for key in ("runs", "memories", "demo_usage", "legacy_preview"):
+        self.assertEqual(result["memories"], [])
+        for key in ("runs", "demo_usage", "legacy_preview"):
             self.assertNotIn(key, result)
         self.assertEqual(set(result["limits"]), {"run_usd", "daily_usd", "monthly_usd", "max_tokens"})
         self.assertTrue(result["capabilities"]["live_ai"])
@@ -176,6 +203,94 @@ class WorkspaceTests(unittest.TestCase):
         self.assertEqual(self.workspace()["usage"], before)
         self.assertEqual(self.client.patch(f"/api/tasks/{created['id']}", headers=self.headers, json={"done": True}).status_code, 404)
 
+    def test_task_labels_default_legacy_records_without_writing_and_preserve_ai_origin(self):
+        with backend.workspace_transaction() as state:
+            state["tasks"] = [
+                {"id": "legacy-task", "title": "Synthetic older task", "details": "", "priority": "normal",
+                 "done": False, "created_at": backend.now()},
+                {"id": "ai-task", "title": "Synthetic proposed task", "details": "", "priority": "normal",
+                 "done": False, "created_at": backend.now(), "initiated_by": "maestro", "suggested_assignee": "maestro"},
+            ]
+        with closing(sqlite3.connect(backend.DATABASE)) as monitor:
+            before_version = monitor.execute("PRAGMA data_version").fetchone()[0]
+            before_saved = monitor.execute("SELECT value FROM workspace WHERE id=1").fetchone()[0]
+            for _ in range(2):
+                legacy, proposed = self.workspace()["tasks"]
+                self.assertEqual((legacy["initiated_by"], legacy["suggested_assignee"]), ("user", "user"))
+                self.assertEqual((proposed["initiated_by"], proposed["suggested_assignee"]), ("maestro", "maestro"))
+            self.assertEqual(monitor.execute("PRAGMA data_version").fetchone()[0], before_version)
+            self.assertEqual(monitor.execute("SELECT value FROM workspace WHERE id=1").fetchone()[0], before_saved)
+        changed = self.client.patch("/api/tasks/ai-task", headers=self.headers, json={"suggested_assignee": "user"})
+        self.assertEqual(changed.status_code, 200, changed.text)
+        self.assertEqual(changed.json()["tasks"][1]["initiated_by"], "maestro")
+        self.assertEqual(changed.json()["tasks"][1]["suggested_assignee"], "user")
+
+    def test_suggested_task_assignment_is_editable_but_initiator_is_server_owned(self):
+        before_usage = self.workspace()["usage"]
+        created = self.client.post("/api/tasks", headers=self.headers,
+                                   json={"title": "Synthetic task labels", "suggested_assignee": "maestro"})
+        self.assertEqual(created.status_code, 200, created.text)
+        task = created.json()["tasks"][0]
+        self.assertEqual((task["initiated_by"], task["suggested_assignee"]), ("user", "maestro"))
+        for update in ({"suggested_assignee": "user"}, {"done": True, "suggested_assignee": "maestro"}):
+            response = self.client.patch(f"/api/tasks/{task['id']}", headers=self.headers, json=update)
+            self.assertEqual(response.status_code, 200, response.text)
+            saved = response.json()["tasks"][0]
+            self.assertEqual(saved["initiated_by"], "user")
+            self.assertEqual(saved["created_at"], task["created_at"])
+            for key, value in update.items():
+                self.assertEqual(saved[key], value)
+            self.assertEqual(response.json()["usage"], before_usage)
+        before = self.workspace()
+        for update in ({}, {"initiated_by": "maestro"}, {"done": False, "initiated_by": "user"},
+                       {"suggested_assignee": "other"}, {"done": None}, {"suggested_assignee": None}, {"done": "false"}):
+            with self.subTest(update=update):
+                response = self.client.patch(f"/api/tasks/{task['id']}", headers=self.headers, json=update)
+                self.assertEqual(response.status_code, 422, response.text)
+        for labels in ({"initiated_by": "maestro"}, {"initiated_by": "user"}, {"suggested_assignee": "other"}):
+            with self.subTest(labels=labels):
+                response = self.client.post("/api/tasks", headers=self.headers, json={"title": "Rejected labels", **labels})
+                self.assertEqual(response.status_code, 422, response.text)
+        self.assertEqual(self.workspace(), before)
+
+    def test_erased_or_corrected_sources_remove_ai_tasks_but_keep_user_tasks(self):
+        manual = self.client.post("/api/tasks", headers=self.headers, json={"title": "Synthetic independent user task"}).json()["tasks"][0]
+        before_usage = self.workspace()["usage"]
+        for cause in ("chat", "feedback", "memory_delete", "memory_edit"):
+            with self.subTest(cause=cause), patch("backend.provider.network", side_effect=AssertionError("Task/source edits must not infer")):
+                chat_id = self.client.post("/api/chats", headers=self.headers).json()["active_chat_id"]
+                text, answer = "A synthetic task source.", "A synthetic task answer."
+                with backend.workspace_transaction() as state:
+                    backend.selected_chat(state, chat_id)["messages"] = [
+                        {"id": "source", "role": "user", "text": text},
+                        {"id": "answer", "role": "assistant", "text": answer},
+                    ]
+                if cause.startswith("memory"):
+                    memory = MemoryStore(backend.DATABASE, backend.TIMEZONE).remember("Synthetic task memory source.")
+                    provenance = [{"memory_id": memory["id"], "hash": revision(memory)}]
+                else:
+                    provenance = [{"chat_id": chat_id, "message_id": "answer" if cause == "feedback" else "source",
+                                   "role": "assistant" if cause == "feedback" else "user",
+                                   "hash": assistant_revision(answer, None) if cause == "feedback" else hashlib.sha256(text.encode()).hexdigest()}]
+                title = f"Synthetic derived task after {cause}"
+                with backend.workspace_transaction() as state:
+                    state["tasks"].insert(0, backend.task_record({"title": title}, "maestro", backend.now(), provenance=provenance))
+                if cause == "chat":
+                    response = self.client.delete(f"/api/chats/{chat_id}", headers=self.headers)
+                elif cause == "feedback":
+                    response = self.client.patch(f"/api/chats/{chat_id}/messages/answer/feedback", headers=self.headers,
+                                                 json={"rating": "negative", "comment": "A synthetic correction."})
+                elif cause == "memory_delete":
+                    response = self.client.delete(f"/api/memory/{memory['id']}", headers=self.headers)
+                else:
+                    response = self.client.patch(f"/api/memory/{memory['id']}", headers=self.headers,
+                                                 json={"content": "Synthetic corrected memory."})
+                self.assertEqual(response.status_code, 200, response.text)
+                self.assertEqual(self.workspace()["tasks"], [manual])
+                self.assertEqual(self.workspace()["usage"], before_usage)
+                with closing(sqlite3.connect(backend.DATABASE)) as db:
+                    self.assertNotIn(title, db.execute("SELECT value FROM workspace WHERE id=1").fetchone()[0])
+
     def test_limits_reject_invalid_values_and_do_not_expose_credentials(self):
         original = self.workspace()
         for update in ({"daily_usd": -1}, {"max_tokens": -1}, {"max_refinements": 1}, {"max_minutes": 10}, {"api_key": "synthetic-placeholder"}):
@@ -282,7 +397,7 @@ class WorkspaceTests(unittest.TestCase):
         self.assertEqual(state["legacy_preview"]["messages"][0]["text"], "Synthetic canned reply")
 
     def test_removed_prototype_routes_are_unavailable(self):
-        for path in ("/api/tasks/example/preview", "/api/memory", "/api/reflection/run", "/api/reflection/feedback"):
+        for path in ("/api/tasks/example/preview", "/api/reflection/run", "/api/reflection/feedback"):
             response = self.client.post(path, headers=self.headers, json={})
             self.assertIn(response.status_code, (404, 405))
 

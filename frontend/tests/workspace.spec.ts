@@ -24,7 +24,7 @@ test("empty workspace, manual tasks and budgets persist without model calls", as
     page
       .getByRole("navigation", { name: "Main navigation" })
       .getByRole("button"),
-  ).toHaveCount(3);
+  ).toHaveCount(4);
   const initial = await (await page.request.get("/api/workspace")).json();
   expect(initial.tasks).toEqual([]);
   expect(initial.messages).toEqual([]);
@@ -612,7 +612,7 @@ test("local Ollama chat needs no key or USD budget and records native tokens", a
     .getByLabel("Available models", { exact: true })
     .selectOption("synthetic-ollama:latest");
   await page.getByText("Local worker settings", { exact: true }).click();
-  await expect(page.getByLabel("Context size (tokens)")).toHaveValue("4096");
+  await expect(page.getByLabel("Context size (tokens)")).toHaveValue("32768");
   await expect(page.getByLabel("CPU threads (0 = automatic)")).toHaveValue("0");
   await expect(page.getByLabel("Keep model loaded (minutes)")).toHaveValue("5");
   await page.getByLabel("Context size (tokens)").fill("8192");
@@ -621,6 +621,15 @@ test("local Ollama chat needs no key or USD budget and records native tokens", a
   await expect(
     page.getByRole("button", { name: "Save connection", exact: true }),
   ).toBeEnabled();
+  await page
+    .getByRole("button", { name: "Save connection", exact: true })
+    .click();
+  await expect(page.getByRole("alert")).toContainText(
+    /output.*context|context.*output/i,
+  );
+  const unchanged = await (await page.request.get("/api/workspace")).json();
+  expect(unchanged.provider.config.ollama_context_tokens).toBe(32768);
+  await page.getByLabel("Maximum output tokens per reply").fill("4096");
   await page
     .getByRole("button", { name: "Save connection", exact: true })
     .click();

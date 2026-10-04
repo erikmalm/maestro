@@ -23,6 +23,8 @@ import json
 class Ollama(BaseHTTPRequestHandler):
     def log_message(self, *args): pass
     def do_GET(self):
+        if self.path == "/api/ps":
+            return self.reply({"models": []})
         self.reply({"models": [{"name": name, "details": {"format": "gguf"}, "capabilities": ["completion", "tools"]}
                                for name in ("synthetic-chat", "synthetic-orchestrator")]})
     def do_POST(self):
@@ -32,6 +34,37 @@ class Ollama(BaseHTTPRequestHandler):
         if self.path == "/api/show":
             return self.reply({"details": {"format": "gguf"}, "capabilities": ["completion", "tools"]})
         assert self.path == "/api/chat"
+        if body.get("format"):
+            assert body["keep_alive"] == 0 and "tools" not in body
+            assert body["options"]["num_predict"] in (64, 8192)
+            if body["options"]["num_predict"] == 8192:
+                assert body["options"]["num_ctx"] == 65536
+            context = json.loads(body["messages"][1]["content"])
+            fields = body["format"]["properties"]
+            if isinstance(context, dict) and "exchanges" in context:
+                assert context["self_review"]["goals"]
+                assert not context["self_review"]["capabilities"]["task_execution"]
+            if "approved" in fields:
+                result = {"approved": list(range(len(context["drafts"]))), "summary": "Reviewed the synthetic changes."}
+                if "approved_tasks" in fields:
+                    result["approved_tasks"] = list(range(len(context["task_drafts"])))
+            else:
+                periodic = isinstance(context, dict) and "exchanges" in context
+                if periodic:
+                    proposal = {"content": "I use concise, verifiable steps and respect user control.", "evidence": "", "source_message_id": ""}
+                else:
+                    source = context["sources"][-1] if isinstance(context, dict) else context[-1]
+                    proposal = {"content": source["text"], "evidence": source["text"], "source_message_id": source["source_message_id"]}
+                result = {"memories": [proposal]}
+                if "summary" in fields:
+                    proposal.update(operation="add", memory_id="", kind="identity" if periodic else "preference",
+                                    scope="workspace" if periodic else context["new_memory_scope"])
+                    result["summary"] = "Prepared a synthetic working practice." if periodic else "Normalized a synthetic preference."
+                if "tasks" in fields:
+                    result["tasks"] = [{"title": "Review synthetic task suggestions", "details": "Compare the synthetic outcome with its baseline.",
+                                        "priority": "normal", "suggested_assignee": "maestro"}]
+            return self.reply({"done": True, "message": {"content": json.dumps(result)},
+                               "prompt_eval_count": 30, "eval_count": 10})
         title = body["messages"][0]["content"].startswith("Create a short")
         self.reply({"done": True, "message": {"content": "Synthetic model choices" if title else "Reply from " + body["model"]},
                     "prompt_eval_count": 20 if title else 100, "eval_count": 5 if title else 20})
@@ -156,6 +189,115 @@ def verify(image, tunnel=False):
         replies = [message for message in state["messages"] if message["role"] == "assistant"]
         assert [(message["kind"], message["model"]) for message in replies] == [("chat", MODELS[0]), ("orchestrator", MODELS[1]), ("orchestrator", MODELS[0])]
         assert (state["usage"]["input_tokens"], state["usage"]["output_tokens"], state["usage"]["calls"], state["usage"]["today_usd"]) == (320, 65, 4, 0)
+        policy = api("/api/work-config")["config"]
+        assert (policy["max_output_tokens"], policy["max_tokens_per_day"], policy["memory_recall_count"]) == (8192, 2000000, 40)
+        api("/api/work-config", {**policy, "enabled": True, "debounce_seconds": 0, "idle_seconds": 0,
+                                "reflection_model": MODELS[0], "max_output_tokens": 64}, method="PUT", headers=headers)
+
+        def await_proposal(text):
+            conversation = api("/api/chat", {"text": text}, headers=headers)
+            source = conversation["messages"][-2]
+            deadline = time.monotonic() + 15
+            while time.monotonic() < deadline:
+                reflection = api("/api/reflection")
+                if reflection["candidates"] and not reflection["running"] and reflection["queued"] == 0:
+                    candidate = reflection["candidates"][0]
+                    assert candidate["content"] == text and candidate["evidence"] == text
+                    assert candidate["source_message_id"] == source["id"] and candidate["chat_id"] == conversation["active_chat_id"]
+                    return candidate, reflection
+                time.sleep(0.2)
+            raise AssertionError("Container background worker did not produce a source-backed proposal")
+
+        candidate, reflection = await_proposal("I prefer concise replies.")
+        assert reflection["worker_available"] and not reflection["running"] and reflection["queued"] == 0
+        assert (reflection["today_jobs"], reflection["today_tokens"]) == (1, 40)
+        assert api("/api/memory") == []
+        accepted = api(f"/api/reflection/candidates/{candidate['id']}/accept", {"scope": "conversation"}, headers=headers)
+        assert accepted["scope"] == "conversation" and accepted["source_message_id"] == candidate["source_message_id"]
+        assert api("/api/memory") == [accepted] and api("/api/reflection")["candidates"] == []
+        candidate, reflection = await_proposal("I prefer Swedish replies.")
+        assert (reflection["today_jobs"], reflection["today_tokens"]) == (2, 80)
+        api(f"/api/reflection/candidates/{candidate['id']}", method="DELETE", headers=headers)
+        assert api("/api/reflection")["candidates"] == [] and api("/api/memory") == [accepted]
+        api("/api/work-config", policy, method="PUT", headers=headers)
+        api(f"/api/memory/{accepted['id']}", method="DELETE", headers=headers)
+        state = api("/api/workspace")
+        assert (state["usage"]["input_tokens"], state["usage"]["output_tokens"], state["usage"]["calls"], state["usage"]["today_usd"]) == (580, 125, 8, 0)
+        assert not state["work"]["config"]["enabled"] and state["memories"] == []
+        api("/api/provider", {"config": {**state["provider"]["config"], "ollama_context_tokens": 131072,
+                                          "max_output_tokens": 32768}}, method="PUT", headers=headers)
+        automatic = {**policy, "enabled": True, "auto_curate": True, "debounce_seconds": 0, "idle_seconds": 0,
+                     "memory_model": MODELS[0], "reflection_model": MODELS[1], "background_context_tokens": 65536}
+        api("/api/work-config", automatic, method="PUT", headers=headers)
+        api("/api/chat", {"text": "I prefer short, concise replies."}, headers=headers)
+
+        def await_memory(kind):
+            deadline = time.monotonic() + 15
+            while time.monotonic() < deadline:
+                records = api("/api/memory")
+                found = next((record for record in records if record["kind"] == kind), None)
+                if found:
+                    assert not found["pinned"]
+                    if kind == "preference":
+                        assert found["provenance"]
+                    return found
+                time.sleep(0.2)
+            raise AssertionError("Container background worker did not persist an independently reviewed memory: " + str(api("/api/reflection")["last_stop_reason"]))
+
+        def latest_calls():
+            return json.loads(podman("exec", name, "python", "-c", "import json,sqlite3; db=sqlite3.connect('/data/workspace.sqlite3'); print(json.dumps(json.loads(db.execute('SELECT value FROM provider_state').fetchone()[0])['ledger'][-2:]))").stdout)
+
+        curated = await_memory("preference")
+        assert curated["origin"] == "curated" and curated["content"] == "I prefer short, concise replies."
+        calls = latest_calls()
+        assert [(call["kind"], call["model"], call["stage"]) for call in calls] == [("memory", MODELS[0], 0), ("reflection", MODELS[1], 1)]
+        assert api("/api/reflection")["today_jobs"] == 3
+        api("/api/work-config", {**automatic, "periodic_reflection": True, "auto_create_tasks": True, "reflection_interval_minutes": 15}, method="PUT", headers=headers)
+        identity = await_memory("identity")
+        assert identity["origin"] == "reflective" and identity["scope"] == "workspace"
+        calls = latest_calls()
+        assert [(call["kind"], call["model"], call["stage"]) for call in calls] == [("reflection", MODELS[1], 0), ("memory", MODELS[0], 1)]
+        reflection = api("/api/reflection")
+        assert reflection["today_jobs"] == 4 and reflection["today_tokens"] == 240 and reflection["candidates"] == []
+        assert reflection["usage"] == api("/api/workspace")["usage"]
+        assert reflection["next_reflection_at"] and [entry["kind"] for entry in reflection["journal"]] == ["reflection", "curation"]
+        assert reflection["config"]["reflection_interval_minutes"] == 15
+        assert [entry["models"] for entry in reflection["journal"]] == [[MODELS[1], MODELS[0]], [MODELS[0], MODELS[1]]]
+        suggested = next(task for task in reflection["tasks"] if task["initiated_by"] == "maestro")
+        assert suggested["suggested_assignee"] == "maestro" and suggested["initiated_model"] == MODELS[1]
+        assert reflection["journal"][0]["tasks_created"][0]["id"] == suggested["id"]
+        assert reflection["journal"][0]["assessment_basis"] == "capabilities_and_practices"
+        reassigned = api(f"/api/tasks/{suggested['id']}", {"suggested_assignee": "user"}, method="PATCH", headers=headers)["tasks"][0]
+        assert reassigned["initiated_by"] == "maestro" and reassigned["suggested_assignee"] == "user"
+        api(f"/api/tasks/{suggested['id']}", method="DELETE", headers=headers)
+        api("/api/work-config", policy, method="PUT", headers=headers)
+        api(f"/api/memory/{identity['id']}", method="DELETE", headers=headers)
+        api(f"/api/memory/{curated['id']}", method="DELETE", headers=headers)
+        state = api("/api/workspace")
+        assert (state["usage"]["input_tokens"], state["usage"]["output_tokens"], state["usage"]["calls"], state["usage"]["today_usd"]) == (800, 185, 13, 0)
+        assert not state["work"]["config"]["enabled"] and state["memories"] == []
+        # A reachable empty /api/ps must not automatically clear interrupted work.
+        podman("exec", "-i", name, "python", "-", input="""
+from backend.app import provider
+service = provider()
+with service.transaction() as state:
+    state['ledger'].append({'id': 'synthetic-interrupted-local', 'at': service.stamp(),
+                           'protocol': 'ollama', 'model': state['config']['model'],
+                           'status': 'reserved', 'cost': 0, 'local_unknown': True,
+                           'connection_config': state['config'].copy()})
+""")
+        time.sleep(2.5)  # Let the server's reflection controller run another idle step.
+        waiting = api("/api/workspace")
+        interrupted = waiting["usage"]["local_requests"][0]
+        assert interrupted["id"] == "synthetic-interrupted-local" and interrupted["base_url"] == waiting["provider"]["config"]["base_url"]
+        api("/api/chat", {"text": "Do not overlap interrupted inference."}, headers=headers, expected=409)
+        recovery_path = "/api/provider/local-requests/synthetic-interrupted-local/recover"
+        api(recovery_path, {"restart_confirmed": False, "expected_base_url": interrupted["base_url"]}, headers=headers, expected=409)
+        state = api(recovery_path, {"restart_confirmed": True, "expected_base_url": interrupted["base_url"]}, headers=headers)
+        assert state["usage"]["local_requests"] == []
+        assert state["usage"]["input_tokens"] == waiting["usage"]["input_tokens"]
+        assert state["usage"]["output_tokens"] == waiting["usage"]["output_tokens"]
+        assert api(recovery_path, {"restart_confirmed": True, "expected_base_url": interrupted["base_url"]}, headers=headers)["usage"] == state["usage"]
         second = podman("exec", name, "python", "-c", "from backend.storage import workspace_owner; workspace_owner('/data').__enter__()", check=False)
         assert second.returncode != 0 and "already running" in second.stderr
         podman("exec", name, "python", "-m", "backend.storage", "/data/workspace.sqlite3", "/data/verify-backup.sqlite3")
@@ -216,7 +358,7 @@ def verify(image, tunnel=False):
         assert "missing or invalid" in rejected["detail"] and "/run/secrets" not in rejected["detail"]
         api("/api/provider", {"config": state["provider"]["config"]}, method="PUT", headers=headers)
         api("/api/web-search", {"config": {**recovered["web_search"]["config"], "enabled": False}}, method="PUT", headers=headers)
-        print("Podman integration passed: build context, isolation, model choices, persistence, recreation, backup/restore, mounted secrets and invalid-secret recovery.")
+        print("Podman integration passed: build context, isolation, model choices, reviewed memories and task suggestions, persistence, recreation, backup/restore, mounted secrets and invalid-secret recovery.")
     finally:
         podman("rm", "--force", fixture_name, check=False)
         for container, data in ((restored, restored_volume), (name, volume)):

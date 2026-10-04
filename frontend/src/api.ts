@@ -5,13 +5,23 @@ export type Task = {
   priority: "normal" | "high";
   done: boolean;
   created_at: string;
+  initiated_by?: "user" | "maestro";
+  suggested_assignee?: "user" | "maestro";
+};
+export type MessageFeedback = {
+  rating: "positive" | "negative";
+  comment: string;
+  updated_at: string;
 };
 export type Message = {
   id: string;
   role: "user" | "assistant";
   text: string;
+  demo?: boolean;
   model?: string;
   kind?: "chat" | "orchestrator";
+  memory_ids?: string[];
+  feedback?: MessageFeedback | null;
   cost?: number;
   input_tokens?: number;
   output_tokens?: number;
@@ -33,11 +43,19 @@ export type Chat = {
   created_at: string;
   updated_at: string;
 };
+export type LocalRequest = {
+  id: string;
+  at: string;
+  model: string;
+  base_url: string | null;
+};
 export type Workspace = {
   tasks: Task[];
   chats: Chat[];
   active_chat_id: string | null;
   messages: Message[];
+  memories?: Memory[];
+  work?: WorkStatus;
   limits: Limits;
   usage: {
     today_usd: number;
@@ -47,6 +65,7 @@ export type Workspace = {
     calls: number;
     reserved_usd: number;
     uncertain: { id: string; at: string; reserved_usd: number }[];
+    local_requests?: LocalRequest[];
   };
   provider: ProviderStatus;
   web_search: WebSearchStatus;
@@ -119,21 +138,53 @@ export const renameChat = (id: string, title: string) =>
   request<Workspace>(`/chats/${encodeURIComponent(id)}`, "PATCH", { title });
 export const deleteChat = (id: string) =>
   request<Workspace>(`/chats/${encodeURIComponent(id)}`, "DELETE");
-export const addTask = (title: string, details: string, priority: string) =>
-  request<Workspace>("/tasks", "POST", { title, details, priority });
+export const saveMessageFeedback = (
+  chatId: string,
+  messageId: string,
+  rating: MessageFeedback["rating"] | null,
+  comment: string,
+) =>
+  request<{
+    message_id: string;
+    feedback: MessageFeedback | null;
+    work: WorkStatus;
+    memories: Memory[];
+  }>(
+    `/chats/${encodeURIComponent(chatId)}/messages/${encodeURIComponent(messageId)}/feedback`,
+    "PATCH",
+    { rating, comment },
+  );
+export const addTask = (
+  title: string,
+  details: string,
+  priority: string,
+  suggested_assignee: NonNullable<Task["suggested_assignee"]> = "user",
+) =>
+  request<Workspace>("/tasks", "POST", {
+    title,
+    details,
+    priority,
+    suggested_assignee,
+  });
+export const assignTask = (
+  id: string,
+  suggested_assignee: NonNullable<Task["suggested_assignee"]>,
+) =>
+  request<Workspace>(`/tasks/${encodeURIComponent(id)}`, "PATCH", {
+    suggested_assignee,
+  });
 export const toggleTask = (id: string, done: boolean) =>
-  request<Workspace>(`/tasks/${id}`, "PATCH", { done });
+  request<Workspace>(`/tasks/${encodeURIComponent(id)}`, "PATCH", { done });
 export const deleteTask = (id: string) =>
-  request<Workspace>(`/tasks/${id}`, "DELETE");
+  request<Workspace>(`/tasks/${encodeURIComponent(id)}`, "DELETE");
 export const sendMessage = (
   text: string,
   chat_id?: string | null,
   model = "",
-  role: "chat" | "orchestrator" = "chat",
 ) =>
   request<Workspace>("/chat", "POST", {
     text,
-    role,
+    role: "chat",
     ...(model ? { model } : {}),
     ...(chat_id ? { chat_id } : {}),
   });
@@ -180,6 +231,12 @@ export const reconcileProviderCharge = (id: string, billed_usd: number) =>
   request<Workspace>(`/provider/charges/${id}/reconcile`, "POST", {
     billed_usd,
   });
+export const recoverLocalRequest = (id: string, expected_base_url: string) =>
+  request<Workspace>(
+    `/provider/local-requests/${encodeURIComponent(id)}/recover`,
+    "POST",
+    { restart_confirmed: true, expected_base_url },
+  );
 
 export type WebSearchConfig = {
   enabled: boolean;
@@ -204,3 +261,118 @@ export const testWebSearch = () =>
   request<WebSearchStatus>("/web-search/test", "POST", {});
 export const deleteWebSearchKey = () =>
   request<WebSearchStatus>("/web-search/key", "DELETE");
+
+export type Memory = {
+  id: string;
+  content: string;
+  scope: "workspace" | "conversation";
+  chat_id: string | null;
+  source_message_id: string | null;
+  origin: "explicit" | "curated" | "reflective";
+  kind?: "fact" | "preference" | "identity" | "lesson";
+  pinned?: boolean;
+  evidence?: string | null;
+  provenance?: ((
+    { chat_id: string; message_id: string } | { memory_id: string }
+  ) & { hash?: string })[];
+  created_at: string;
+  updated_at: string;
+};
+export const remember = (
+  content: string,
+  scope: Memory["scope"],
+  chat_id: string | null,
+) =>
+  request<Memory>("/memory", "POST", {
+    content,
+    scope,
+    chat_id: scope === "conversation" ? chat_id : null,
+  });
+export const correctMemory = (id: string, content: string) =>
+  request<Memory>(`/memory/${encodeURIComponent(id)}`, "PATCH", { content });
+export const forgetMemory = (id: string) =>
+  request<{ deleted: boolean }>(`/memory/${encodeURIComponent(id)}`, "DELETE");
+
+export type WorkConfig = {
+  reflection_model: string;
+  memory_model: string;
+  coding_model: string;
+  enabled: boolean;
+  auto_curate: boolean;
+  periodic_reflection: boolean;
+  auto_create_tasks?: boolean;
+  reflection_interval_minutes: number;
+  background_context_tokens: number;
+  reflection_exchange_count: number;
+  reflection_context_characters: number;
+  debounce_seconds: number;
+  idle_seconds: number;
+  max_output_tokens: number;
+  max_jobs_per_day: number;
+  max_tokens_per_day: number;
+  timeout_seconds: number;
+  memory_recall_count: number;
+  memory_recall_characters: number;
+};
+export type WorkStatus = {
+  config: WorkConfig;
+  worker_available: boolean;
+  waiting_for_ollama?: boolean;
+  queued: number;
+  running: boolean;
+  last_stop_reason: string | null;
+  candidates: MemoryCandidate[];
+  today_jobs: number;
+  today_tokens: number;
+  memories?: Memory[];
+  journal?: ReflectionJournalEntry[];
+  tasks?: Task[];
+  usage?: Workspace["usage"];
+  next_reflection_at?: string | null;
+};
+export type ReflectionJournalEntry = {
+  id: string;
+  created_at: string;
+  kind: "curation" | "reflection";
+  assessment_basis?: "capabilities_and_practices";
+  summary: string;
+  outcome?: string;
+  changes: {
+    operation: "add" | "update" | "remove";
+    memory_id: string;
+    kind: NonNullable<Memory["kind"]>;
+    scope?: Memory["scope"];
+    content: string;
+  }[];
+  sources: { chat_id: string; message_id: string }[];
+  models: string[];
+  tasks_created?: {
+    id: string;
+    title: string;
+    suggested_assignee: "user" | "maestro";
+  }[];
+};
+export type MemoryCandidate = {
+  id: string;
+  content: string;
+  chat_id: string;
+  source_message_id: string;
+  created_at: string;
+  evidence: string;
+};
+export const loadReflection = () => request<WorkStatus>("/reflection");
+export const saveWorkConfig = (config: WorkConfig) =>
+  request<WorkStatus>("/work-config", "PUT", config);
+export const acceptMemoryCandidate = (id: string, scope: Memory["scope"]) =>
+  request<Memory>(
+    `/reflection/candidates/${encodeURIComponent(id)}/accept`,
+    "POST",
+    {
+      scope,
+    },
+  );
+export const rejectMemoryCandidate = (id: string) =>
+  request<{ deleted: boolean }>(
+    `/reflection/candidates/${encodeURIComponent(id)}`,
+    "DELETE",
+  );
