@@ -138,8 +138,8 @@ class SourceFollowupTests(unittest.TestCase):
                     obj.write_text(self.content, encoding="utf-8")
 
     def test_private_fitted_body_hash_and_original_prefix_are_verified(self):
-        self.prime()
         for recompute in (False, True):
+            self.prime()
             state = self.workspace()
             evidence = state["chats"][0]["messages"][1]["web_search"]["evidence"][0]
             evidence["content"] = "Invented new rainfall: 3.5 mm."
@@ -191,6 +191,110 @@ class SourceFollowupTests(unittest.TestCase):
         self.assertTrue(entry["url_redacted"])
         self.assertEqual(entry["evidence_status"], "withheld_credentials")
         self.assertNotIn("content", entry)
+
+    def test_encoded_credentials_that_became_known_after_capture_are_not_replayed(self):
+        secret = "synthetic-new-key"
+        percent = "".join(f"%{ord(char):02X}" for char in secret)
+        entities = "".join(f"&#x{ord(char):x};" for char in secret)
+        for field, encoded in (("title", entities), ("url", percent), ("content", percent.replace("%", "%25")),
+                               ("content", entities.replace("&", "%26"))):
+            with self.subTest(field=field, encoding=encoded == entities):
+                self.keys.clear()
+                source = {"title": "Public guide", "url": "https://docs.example.org/guide", "content": "Public guide documentation."}
+                source[field] = "https://docs.example.org/" + encoded if field == "url" else "Public guide " + encoded
+                self.prime([source])
+                archive_before = {path.relative_to(self.archive): path.read_bytes()
+                                  for path in self.archive.rglob("*") if path.is_file()}
+                self.keys[ENDPOINT] = secret
+                self.send("Summarize the earlier source")
+                packet = self.packet()
+                self.assertNotIn(encoded, json.dumps(packet))
+                self.assertNotIn(encoded, json.dumps(self.calls[-1][2]))
+                self.assertNotIn(secret, json.dumps(packet))
+                entry = packet["previous_searches"][0]["sources"][0]
+                if field == "content":
+                    self.assertEqual(entry["evidence_status"], "withheld_credentials")
+                    self.assertNotIn("content", entry)
+                else:
+                    self.assertTrue(entry[field + "_redacted"])
+                    self.assertNotIn(field, entry)
+                self.assertEqual(archive_before, {path.relative_to(self.archive): path.read_bytes()
+                                                 for path in self.archive.rglob("*") if path.is_file()})
+
+    def test_saved_exact_and_keyword_credentials_are_rejected_before_final_synthesis(self):
+        secret = "synthetic-newly-known-search-key"
+        encoded = "".join(f"%{ord(char):02X}" for char in secret)
+        original = self.network
+        for query in ("private-original-query", "Public guide"):
+            with self.subTest(retrieval="exact" if query == "private-original-query" else "keyword"):
+                self.keys.clear()
+                self.prime([{"title": "Public guide", "url": "https://docs.example.org/guide",
+                             "content": "Public guide documentation " + encoded}])
+                self.keys[ENDPOINT] = secret
+                self.calls.clear()
+                def saved(config, key, method, path, payload=None):
+                    response = original(config, key, method, path, payload)
+                    if path == "/api/chat" and "tools" in payload:
+                        response["message"] = {"role": "assistant", "content": "", "tool_calls": [{"function": {
+                            "name": "search_context", "arguments": {"query": query, "freshness": "stable"}}}]}
+                    return response
+                self.network = saved
+                archive_before = {path.relative_to(self.archive): path.read_bytes()
+                                  for path in self.archive.rglob("*") if path.is_file()}
+                with patch("backend.provider.WebSearch.search") as hosted:
+                    with self.assertRaisesRegex(ValueError, "evidence contains configured credentials"):
+                        self.send("Use saved sources for this public guide", context_mode="saved_only")
+                    hosted.assert_not_called()
+                self.assertEqual(len([call for call in self.calls if call[1] == "/api/chat"]), 1)
+                self.assertTrue(all(encoded not in json.dumps(payload) for _, _, payload in self.calls))
+                self.assertEqual(len(self.workspace()["chats"][0]["messages"]), 2)
+                entry = self.provider.read_state()["ledger"][-1]
+                self.assertEqual((entry["status"], entry["input_tokens"], entry["output_tokens"]), ("failed", 37, 11))
+                self.assertEqual(archive_before, {path.relative_to(self.archive): path.read_bytes()
+                                                 for path in self.archive.rglob("*") if path.is_file()})
+
+    def test_saved_exact_and_keyword_omit_unsafe_sources_and_renumber_safe_evidence(self):
+        secret = "synthetic-newly-known-search-key"
+        encoded = "".join(f"%{ord(char):02X}" for char in secret)
+        original = self.network
+        for query in ("private-original-query", "Public guide"):
+            with self.subTest(retrieval="exact" if query == "private-original-query" else "keyword"):
+                self.keys.clear()
+                sources = self.prime([
+                    {"title": "Public guide " + encoded, "url": "https://docs.example.org/unsafe-title",
+                     "content": "Public guide documentation with an unsafe title."},
+                    {"title": "Public guide safe", "url": "https://docs.example.org/safe",
+                     "content": "Public guide documentation supported by safe evidence."},
+                    {"title": "Public guide unsafe URL", "url": "https://docs.example.org/" + encoded,
+                     "content": "Public guide documentation with an unsafe URL."}])
+                self.keys[ENDPOINT] = secret
+                self.calls.clear()
+                def saved(config, key, method, path, payload=None):
+                    response = original(config, key, method, path, payload)
+                    if path == "/api/chat" and "tools" in payload:
+                        response["message"] = {"role": "assistant", "content": "", "tool_calls": [{"function": {
+                            "name": "search_context", "arguments": {"query": query, "freshness": "stable"}}}]}
+                    return response
+                self.network = saved
+                archive_before = {path.relative_to(self.archive): path.read_bytes()
+                                  for path in self.archive.rglob("*") if path.is_file()}
+                with patch("backend.provider.WebSearch.search") as hosted:
+                    result = self.send("Use saved sources for this public guide", context_mode="saved_only")
+                    hosted.assert_not_called()
+                self.assertEqual(len([call for call in self.calls if call[1] == "/api/chat"]), 2)
+                self.assertTrue(all(encoded not in json.dumps(payload) for _, _, payload in self.calls))
+                fitted = json.loads(self.calls[-1][2]["messages"][-1]["content"])
+                self.assertEqual(len(fitted), 1)
+                self.assertEqual((fitted[0]["source"], fitted[0]["capture_id"], fitted[0]["content"]),
+                                 (1, sources[1]["capture_id"], sources[1]["content"]))
+                answer = self.workspace()["chats"][0]["messages"][-1]
+                self.assertEqual([source["capture_id"] for source in answer["web_search"]["sources"]],
+                                 [sources[1]["capture_id"]])
+                self.assertEqual(answer["web_search"]["evidence"][0]["sha256"],
+                                 hashlib.sha256(sources[1]["content"].encode()).hexdigest())
+                self.assertEqual((result["input_tokens"], result["output_tokens"]), (74, 22))
+                self.assertEqual(archive_before, {path.relative_to(self.archive): path.read_bytes()
+                                                 for path in self.archive.rglob("*") if path.is_file()})
 
     def test_source_packet_omits_whole_excerpts_and_rejects_too_small_total_budget_before_dispatch(self):
         self.content = "Bounded original excerpt " + "x" * 1200
@@ -358,6 +462,113 @@ class SourceFollowupTests(unittest.TestCase):
                 self.assertNotIn("source_context", answer)
                 self.assertEqual(answer["web_search"]["retrieval"], "web_search")
 
+    def test_rewrite_of_latest_unsourced_answer_does_not_replay_an_older_search(self):
+        self.keys[ENDPOINT] = "synthetic-search-key"
+        service = WebSearch(self.database, timezone.utc)
+        with service.transaction() as state:
+            state["config"] = {**SEARCH_DEFAULT, "enabled": True}
+            state["tested_at"] = service.now().isoformat()
+        original = self.network
+
+        def redis(config, key, method, path, payload=None):
+            response = original(config, key, method, path, payload)
+            if path == "/api/chat" and "tools" in payload:
+                for report in self.packet(payload)["previous_searches"]:
+                    for source in report["sources"]:
+                        self.assertNotIn("content", source)
+                        self.assertNotIn("title", source)
+                        self.assertNotIn("url", source)
+                response["message"] = {"role": "assistant", "content": "", "tool_calls": [{"function": {
+                    "name": "search_context", "arguments": {"query": "Redis Linux installation", "freshness": "stable"}}}]}
+            return response
+
+        self.network = redis
+        hosted = {"query": "Redis Linux installation", "at": service.now().isoformat(), "sources": [
+            {"title": "Redis", "url": "https://docs.example.org/redis", "content": "Redis installation documentation."}]}
+        for text in ("Rewrite that answer in Swedish", "Sammanfatta det svaret"):
+            with self.subTest(text=text):
+                self.prime()
+                state = self.workspace()
+                state["chats"][0]["messages"].extend([
+                    {"id": "redis-user", "role": "user", "text": "Explain Redis installation."},
+                    {"id": "redis-answer", "role": "assistant", "text": "Redis installs with a package manager."}])
+                self.save_workspace(state)
+                self.calls.clear()
+                with patch.object(self.store, "lookup", return_value=None), \
+                        patch.object(self.store, "search", return_value={"sources": []}), \
+                        patch("backend.provider.WebSearch.search", return_value=hosted) as search:
+                    self.send(text)
+                search.assert_called_once_with("Redis Linux installation")
+                answer = self.workspace()["chats"][0]["messages"][-1]
+                self.assertNotIn("source_context", answer)
+                self.assertEqual(answer["web_search"]["sources"][0]["title"], "Redis")
+
+    def test_chained_rewrites_replay_only_the_latest_answers_pinned_source_subset(self):
+        self.content = "First exact public source. " + "x" * 1800
+        sources = self.prime([
+            {"title": "First source", "url": "https://docs.example.org/first", "content": self.content},
+            {"title": "Second source", "url": "https://docs.example.org/second", "content": "Second public source. " + "y" * 1800}])
+        with patch("backend.provider.WebSearch.search", side_effect=AssertionError("Chained rewrite searched online")):
+            self.send("Rewrite that answer in Swedish")
+            references = self.workspace()["chats"][0]["messages"][-1]["source_context"]["references"]
+            self.assertEqual(len(references), 1)
+            self.assertEqual(references[0]["capture_id"], sources[0]["capture_id"])
+            self.assertEqual(self.packet()["previous_searches"][0]["sources"][1]["evidence_status"], "omitted_budget")
+            for text in ("Make it shorter", "Translate it in English"):
+                self.calls.clear()
+                self.send(text)
+                report = self.packet()["previous_searches"][0]
+                self.assertEqual(report["sources"][0]["content"], self.content)
+                self.assertNotIn("content", report["sources"][1])
+                self.assertNotIn("title", report["sources"][1])
+                self.assertEqual(report["sources"][1]["evidence_status"], "not_replayed_this_turn")
+                self.assertEqual(self.workspace()["chats"][0]["messages"][-1]["source_context"]["references"], references)
+                self.assertEqual(len([call for call in self.calls if call[1] == "/api/chat"]), 1)
+
+    def test_deleted_latest_source_cannot_replay_an_older_unrelated_report_or_go_online(self):
+        self.prime()
+        latest = self.store.capture("Redis Linux installation", self.store.now().isoformat(), [
+            {"title": "Redis", "url": "https://docs.example.org/redis", "content": "Redis installation documentation."}], 3)
+        source = latest["sources"][0]
+        report = {"query": latest["query"], "at": latest["at"],
+                  "sources": [{field: value for field, value in source.items() if field != "content"}],
+                  "evidence": [{"capture_id": source["capture_id"], "content": source["content"],
+                                "sha256": hashlib.sha256(source["content"].encode()).hexdigest()}]}
+        state = self.workspace()
+        state["chats"][0]["messages"].extend([
+            {"id": "redis-user", "role": "user", "text": "Explain Redis installation."},
+            {"id": "redis-answer", "role": "assistant", "text": "Sourced Redis answer.", "web_search": report}])
+        self.save_workspace(state)
+        self.store.delete_capture(source["capture_id"])
+        self.keys[ENDPOINT] = "synthetic-search-key"
+        service = WebSearch(self.database, timezone.utc)
+        with service.transaction() as state:
+            state["config"] = {**SEARCH_DEFAULT, "enabled": True}
+            state["tested_at"] = service.now().isoformat()
+        original = self.network
+
+        def repair(config, key, method, path, payload=None):
+            response = original(config, key, method, path, payload)
+            if path == "/api/chat" and "tools" in payload:
+                reports = self.packet(payload)["previous_searches"]
+                self.assertEqual(reports[0]["message_id"], "redis-answer")
+                self.assertEqual(reports[0]["sources"][0]["evidence_status"], "unavailable")
+                self.assertTrue(all("content" not in item for report in reports for item in report["sources"]))
+                response["message"] = {"role": "assistant", "content": "", "tool_calls": [{"function": {
+                    "name": "search_context", "arguments": {"query": "Redis Linux installation", "freshness": "stable"}}}]}
+            return response
+
+        self.network = repair
+        with patch.object(self.store, "lookup", return_value=None), \
+                patch.object(self.store, "search", return_value={"sources": []}), \
+                patch("backend.provider.WebSearch.search") as search:
+            with self.assertRaisesRegex(ValueError, "Fresh search is unavailable or forbidden"):
+                self.send("Rewrite that answer in Swedish")
+            search.assert_not_called()
+        self.assertEqual(self.workspace()["chats"][0]["messages"][-1]["id"], "redis-answer")
+        entry = self.provider.read_state()["ledger"][-1]
+        self.assertEqual((entry["status"], entry["input_tokens"], entry["output_tokens"]), ("failed", 37, 11))
+
     def test_no_search_directives_fence_current_tool_requests_and_conflicting_refresh(self):
         self.keys[ENDPOINT] = "synthetic-search-key"
         service = WebSearch(self.database, timezone.utc)
@@ -375,7 +586,8 @@ class SourceFollowupTests(unittest.TestCase):
 
         self.network = current_tool
         for directive in ("Do not search online", "Don't do a new search", "No new search",
-                          "Gör ingen ny sökning", "Sök inte", "Använd inte webbsökning"):
+                          "Gör ingen ny sökning", "Sök inte", "Använd inte webbsökning", "Använd inte internet",
+                          "Never use web search"):
             with self.subTest(directive=directive):
                 self.prime()
                 self.calls.clear()
@@ -390,6 +602,40 @@ class SourceFollowupTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "Fresh search conflicts"):
                     self.send(directive + ". Explain Redis installation.", context_mode="refresh")
                 self.assertEqual(self.calls, [])
+
+    def test_non_search_negative_instructions_allow_fresh_sources_in_english_and_swedish(self):
+        self.keys[ENDPOINT] = "synthetic-search-key"
+        service = WebSearch(self.database, timezone.utc)
+        with service.transaction() as state:
+            state["config"] = {**SEARCH_DEFAULT, "enabled": True}
+            state["tested_at"] = service.now().isoformat()
+        original = self.network
+
+        def fresh(config, key, method, path, payload=None):
+            response = original(config, key, method, path, payload)
+            if path == "/api/chat" and "tools" in payload:
+                self.assertNotIn("content", self.packet(payload)["previous_searches"][0]["sources"][0])
+                response["message"] = {"role": "assistant", "content": "", "tool_calls": [{"function": {
+                    "name": "search_context", "arguments": {"query": "Stockholm forecast 2026-10-05", "freshness": "current"}}}]}
+            return response
+
+        self.network = fresh
+        hosted = {"query": "Stockholm forecast 2026-10-05", "at": service.now().isoformat(), "sources": [
+            {"title": "New source", "url": "https://docs.example.org/fresh", "content": "Forecast 2026-10-05: rain 1.5 mm."}]}
+        for text in ("Vad blir vädret i Stockholm 2026-10-05? Använd inte Fahrenheit.",
+                     "Vad blir vädret i Stockholm 2026-10-05? Använd inte tidigare sparade källor.",
+                     "Search for Stockholm forecast 2026-10-05. Never use Fahrenheit.",
+                     "Search for Stockholm forecast 2026-10-05. Do not use previously saved sources."):
+            with self.subTest(text=text):
+                self.prime()
+                self.calls.clear()
+                with patch("backend.provider.WebSearch.search", return_value=hosted) as search:
+                    self.send(text, context_mode="refresh")
+                search.assert_called_once_with("Stockholm forecast 2026-10-05")
+                answer = self.workspace()["chats"][0]["messages"][-1]
+                self.assertNotIn("source_context", answer)
+                self.assertEqual(answer["web_search"]["retrieval"], "web_search")
+                self.assertEqual(answer["web_search"]["forecast_date_check"]["requested_dates"], ["2026-10-05"])
 
     def test_explicit_no_search_same_date_rewrite_reuses_verified_body_without_new_tool(self):
         self.prime()

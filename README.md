@@ -86,7 +86,7 @@ In **Settings → Saved web sources → Find saved sources**, search saved title
 
 Open a saved citation to inspect its text, source URL, retrieval date and completeness, or remove it. Publisher dates remain unknown in this increment; a search excerpt is not a downloaded webpage. Missing or changed snapshots show an unavailable error. The [search context design](docs/SEARCH_CONTEXT_STORAGE.md) records the implemented foundation and the next steps: full page capture, publisher dates and bounded PDF extraction.
 
-Local follow-ups about earlier search results receive a bounded server-built source record, including saving status and verified evidence when available. Explicit rewrites can reuse the original excerpt and its values without a new hosted request; unrelated new questions follow the normal source path. Recognized English/Swedish instructions prohibiting a new online search block hosted dispatch. Deleted or changed saved evidence cannot support a late answer. A JSON answer does not create archive files; the backend saves eligible search excerpts.
+Local follow-ups about earlier search results receive a bounded server-built source record, including saving status and verified evidence when available. Explicit rewrites follow the latest answer's own evidence; chained rewrites preserve its pinned source subset without a new hosted request. An unsourced reply or unrelated new question follows the normal source path. Recognized English/Swedish instructions prohibiting a new online search block hosted dispatch. Deleted, changed or credential-bearing saved evidence cannot support a late answer. A JSON answer does not create archive files; the backend saves eligible search excerpts.
 
 ## Private memory
 

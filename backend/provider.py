@@ -16,7 +16,7 @@ import httpx
 
 from backend import credentials
 from backend.web_search import WebSearch, TOOL, SEARCH_INSTRUCTIONS, fit_sources, ENDPOINT as SEARCH_ENDPOINT
-from backend.context_store import ContextStore, validate_search, contains_url_secret
+from backend.context_store import ContextStore, validate_search, contains_url_secret, contains_source_secret
 from backend.context_tools import (TOOL as CONTEXT_TOOL, INSTRUCTIONS as CONTEXT_INSTRUCTIONS, requires_refresh,
                                    explicit_search_request, requested_relative_dates, dated_search_query,
                                    requested_calendar_dates, is_weather_request, forecast_date_supported, gate_forecast_sources,
@@ -90,6 +90,30 @@ def reuse_prior_source_bodies(text):
         return True
     stripped = re.sub(r"^(?:please|could\s+you|can\s+you|kan\s+du)\s+", "", stripped, flags=re.I).strip(" .,!?:;")
     return bool(SOURCE_PRIOR_TRANSFORM.match(stripped) or SOURCE_SHORT_TRANSFORM.fullmatch(stripped))
+
+
+def source_replay_target(messages):
+    """A rewrite follows the latest answer's own evidence, including chained refs."""
+    latest = next((item for item in reversed(messages) if isinstance(item, dict)
+                   and item.get("role") == "assistant" and not item.get("demo")), None)
+    if latest is None:
+        return False, {}
+    if isinstance(latest.get("web_search"), dict):
+        return True, {str(latest.get("id", "")): None}
+    provenance = latest.get("source_context")
+    if not isinstance(provenance, dict):
+        return False, {}
+    targets = {}
+    references = provenance.get("references")
+    for reference in references[:6] if isinstance(references, list) else []:
+        if (not isinstance(reference, dict) or not isinstance(reference.get("message_id"), str)
+                or not 1 <= len(reference["message_id"]) <= 64 or type(reference.get("source")) is not int
+                or not 1 <= reference["source"] <= 3):
+            continue
+        targets.setdefault(reference["message_id"], {})[reference["source"]] = reference
+    # Broken provenance still identifies a sourced rewrite; it cannot be
+    # repaired by guessing from a different earlier search or going online.
+    return True, targets
 
 
 class ProviderFailure(ValueError):
@@ -497,8 +521,11 @@ class Provider:
 
         if not fits():
             raise ValueError("The conversation cannot fit its source status. Start a new chat or increase the context/token allowance.")
-        previous = [item for item in reversed(messages) if isinstance(item, dict) and item.get("role") == "assistant"
-                    and not item.get("demo") and isinstance(item.get("web_search"), dict)][:2]
+        _, replay_targets = source_replay_target(messages)
+        searches = [item for item in reversed(messages) if isinstance(item, dict) and item.get("role") == "assistant"
+                    and not item.get("demo") and isinstance(item.get("web_search"), dict)]
+        previous = ([item for item in searches if item.get("id") in replay_targets]
+                    + [item for item in searches if item.get("id") not in replay_targets])[:2]
         for item in previous:
             report = item["web_search"]
             sources = report.get("sources")
@@ -527,21 +554,26 @@ class Provider:
             evidence = report.get("evidence")
             evidence = evidence[:3] if isinstance(evidence, list) else []
             for index, source in original_sources:
+                target = replay_targets.get(item.get("id"), {})
+                replay_body = include_content and item.get("id") in replay_targets and (target is None or index + 1 in target)
                 recorded = source.get("archive_status")
                 recorded = recorded if recorded in ("saved", "skipped", "not_saved") else "unknown"
                 entry = {"source": index + 1, "recorded_archive_status": recorded,
-                         "evidence_status": "not_replayed_this_turn" if not include_content else "not_recorded"}
+                         "evidence_status": "not_replayed_this_turn" if not replay_body else "not_recorded"}
                 for field, bound in (("title", 200), ("url", 2048), ("retrieved_at", 80), ("content_kind", 32)):
-                    if not include_content and field in ("title", "url"):
+                    if not replay_body and field in ("title", "url"):
                         continue  # Fresh query planning receives no older untrusted source strings.
                     value = source.get(field)
                     if isinstance(value, str) and len(value) <= bound:
-                        if field == "url" and contains_url_secret(value, secrets):
+                        if field == "url" and (contains_url_secret(value, secrets) or contains_source_secret(value, secrets)):
                             entry["url_redacted"] = True
                         else:
                             for secret in secrets:
                                 value = credentials.redact(value, secret)
-                            entry[field] = value
+                            if contains_source_secret(value, secrets):
+                                entry[field + "_redacted"] = True
+                            else:
+                                entry[field] = value
                 current = None
                 if recorded == "saved":
                     try:
@@ -562,7 +594,7 @@ class Provider:
                     record["sources"].pop()
                     record["source_details_omitted"] += 1
                     continue
-                if not include_content or recorded == "saved" and current is None:
+                if not replay_body or recorded == "saved" and current is None:
                     continue
                 if invalid_forecast_dates or isinstance(check, dict) and check.get("supported_source_count") == 0:
                     entry["evidence_status"] = "unsupported_forecast_date"
@@ -575,7 +607,14 @@ class Provider:
                         or current is not None and not current["content"].startswith(content)):
                     entry["evidence_status"] = "unavailable"
                     continue
-                if any(secret and secret in content for secret in secrets):
+                if target is not None:
+                    reference = target[index + 1]
+                    if (reference.get("sha256") != digest or reference.get("recorded_archive_status") != recorded
+                            or any(reference.get(field) != source.get(field)
+                                   for field in ("capture_id", "content_hash", "manifest_hash"))):
+                        entry["evidence_status"] = "unavailable"
+                        continue
+                if contains_source_secret(content, secrets):
                     entry["evidence_status"] = "withheld_credentials"
                     continue
                 if forecast_dates and not forecast_date_supported({"title": source.get("title", ""), "content": content}, forecast_dates):
@@ -740,16 +779,19 @@ class Provider:
                                     + json.dumps(history) + (json.dumps(search_tool) if auto_search else "")).encode("utf-8")) + 2048
                     allowance = min(SOURCE_RECORD_BYTES, min(workspace["limits"]["max_tokens"], config["ollama_context_tokens"])
                                     - baseline - config["max_output_tokens"])
-                    include_content = possible_replay and (not search_dates or hosted_forbidden)
+                    targeted_replay, _ = source_replay_target(chat["messages"])
+                    status_question = bool(ARCHIVE_QUESTION.search(text) and SOURCE_STATUS_SUBJECT.search(text)
+                                           and SOURCE_STATUS_QUESTION.search(text))
+                    include_content = possible_replay and targeted_replay and (not search_dates or hosted_forbidden)
                     try:
                         search_key = credentials.read(SEARCH_ENDPOINT)[0]
                     except ValueError:
                         search_key = None
                     record, prior_sources, source_context = self.source_record(chat["messages"], archive_status, allowance,
-                        include_content=bool(include_content), secrets=(search_key,) if search_key else (),
+                        include_content=bool(include_content), secrets=tuple(secret for secret in (search_key, key) if secret),
                         required_dates=search_dates if include_content else ())
                     history.insert(0, record)
-                    if include_content and previous_search:
+                    if previous_search and (include_content or possible_replay and status_question):
                         allow_hosted = False
                     if hosted_forbidden and dated_weather and include_content and source_context["references"]:
                         require_sources = False  # Already supplied verified evidence for the requested day.
@@ -1063,7 +1105,19 @@ class Provider:
                     result["archive_warning"] = lookup_warning
         source_fields = ("title", "url", "capture_id", "content_hash", "manifest_hash", "archive_status", "retrieved_at",
                          "published_at", "modified_at", "content_kind", "completeness", "stale")
-        selected, forecast_check = result["sources"], None
+        try:
+            known_search_key = credentials.read(SEARCH_ENDPOINT)[0]
+        except ValueError:
+            known_search_key = None
+        source_secrets = service._source_secrets(known_search_key)
+        selected = [source for source in result["sources"]
+                    if not contains_url_secret(source.get("url"), source_secrets)
+                    and not any(contains_source_secret(source.get(field), source_secrets)
+                                for field in ("url", "title", "content"))]
+        if not selected:
+            raise ValueError("Source evidence contains configured credentials. No source text was used; choose different evidence.")
+        safe_sources = selected
+        forecast_check = None
         if search_dates and is_weather_request(user_text, args["query"]):
             selected, forecast_check = gate_forecast_sources(selected, search_dates)
         fitted = fit_sources(selected, source_budget) if selected else []
@@ -1074,7 +1128,7 @@ class Provider:
             forecast_check.update(supported_source_count=len(fitted), excluded_source_count=len(result["sources"]) - len(fitted))
         if not fitted and forecast_check is not None:
             fitted = [{"source": index + 1, **{name: source[name] for name in source_fields if name in source}}
-                      for index, source in enumerate(result["sources"][:max_results])]
+                      for index, source in enumerate(safe_sources[:max_results])]
             dates = ", ".join(search_dates)
             refusal = ("De hämtade utdragen belägger ingen prognos för " + dates + ". Jag kan inte verifiera det efterfrågade vädret från dessa källor."
                        if re.search(r"\b(?:väder\w*|prognos\w*|imorgon|idag|sammanfatt\w*)\b|på\s+svenska|i\s+morgon", user_text, re.I)

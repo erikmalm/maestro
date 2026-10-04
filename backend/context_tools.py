@@ -66,7 +66,8 @@ NO_HOSTED_SEARCH = re.compile(
     r"\b(?:gör\s+)?(?:ingen|inga|utan|inte)\s+"
     r"(?:(?:en|ett|någon|några|gör|göra|utför|utföra|starta|kör|köra|använd|använda|ny|nya|nytt)\s+){0,6}"
     r"(?:sökning(?:ar)?|webbsökning(?:ar)?|sökfunktionen)\b|"
-    r"\b(?:sök|söka|använd|använda)\s+inte(?:\s+(?:webbsökning|sökfunktionen))?\b", re.I)
+    r"\b(?:sök|söka)\s+inte\b|"
+    r"\b(?:använd|använda)\s+inte\s+(?:(?:webb|online)?sökning(?:ar)?|sökfunktionen|internet|webben)\b", re.I)
 
 
 def forbids_hosted_search(text):
