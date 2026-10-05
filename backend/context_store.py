@@ -497,15 +497,15 @@ class ContextStore:
         except (OSError, sqlite3.Error, ValueError, UnicodeError):
             result["archive_warning"] = "Some source evidence could not be saved. Existing captures remain unchanged."
             try:
-                try:
-                    total, items, _ = archive_inventory(self.archive, config["max_items"])
-                except (OSError, ValueError):
-                    total = items = None
-                with self._write_lock, self._transaction() as (state, _):
-                    state["last_error"] = result["archive_warning"]
-                    state["last_capture"] = measured
-                    if total is not None:
-                        state.update(archive_bytes=total, archive_items=items)
+                with self._write_lock:
+                    try:
+                        total, items, _ = archive_inventory(self.archive, config["max_items"])
+                    except (OSError, ValueError):
+                        total = items = None
+                    with self._transaction() as (state, _):
+                        state.update(last_error=result["archive_warning"], last_capture=measured)
+                        if total is not None:
+                            state.update(archive_bytes=total, archive_items=items)
             except (OSError, sqlite3.Error):
                 pass
         return result

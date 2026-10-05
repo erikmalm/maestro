@@ -265,6 +265,62 @@ class ContextStoreTests(unittest.TestCase):
         self.assertEqual(self.store.get_capture(result["sources"][0]["capture_id"]), result["sources"][0])
         self.assertEqual(self.store.rebuild()["indexed_count"], 2)
 
+    def test_failed_capture_recovery_cannot_overwrite_concurrent_capture_usage(self):
+        self.enable()
+        scanned, release, checked = threading.Event(), threading.Event(), threading.Event()
+        results, errors, scans = {}, [], 0
+        original = self.store._index_capture
+        def index(*args):
+            if threading.current_thread() is first:
+                raise sqlite3.OperationalError("Synthetic failed index")
+            return original(*args)
+        def inventory(*args):
+            nonlocal scans
+            value = archive_inventory(*args)
+            if threading.current_thread() is first:
+                scans += 1
+                if scans == 2:
+                    scanned.set()
+                    if not release.wait(5):
+                        raise TimeoutError("The recovery scan test was not released.")
+            return value
+        def capture(label, source):
+            try:
+                if label == "second":
+                    results["lock_available"] = self.store._write_lock.acquire(blocking=False)
+                    if results["lock_available"]:
+                        self.store._write_lock.release()
+                    checked.set()
+                results[label] = self.capture(query=label, sources=[source])
+            except Exception as error:
+                errors.append(error)
+        first = threading.Thread(target=capture, args=("first", self.source), daemon=True)
+        second = threading.Thread(target=capture, args=("second", {
+            **self.source, "url": self.source["url"] + "/second", "content": "Second public evidence."}), daemon=True)
+        with self.store.archive_owner(), patch.object(self.store, "_index_capture", side_effect=index), \
+                patch("backend.context_store.archive_inventory", side_effect=inventory):
+            try:
+                first.start()
+                self.assertTrue(scanned.wait(5))
+                second.start()
+                self.assertTrue(checked.wait(5))
+                self.assertFalse(results["lock_available"])
+                self.assertNotIn("second", results)
+            finally:
+                release.set()
+                first.join(5)
+                if second.ident is not None:
+                    second.join(5)
+            self.assertFalse(first.is_alive() or second.is_alive())
+            self.assertEqual(errors, [])
+            self.assertIn("archive_warning", results["first"])
+            actual = archive_inventory(self.archive, self.config["max_items"])
+            status = self.store.status()
+            self.assertEqual((status["archive_bytes"], status["archive_items"]), actual[:2])
+            self.assertEqual(status["last_capture"]["sources_saved"], 1)
+            source = results["second"]["sources"][0]
+            self.assertEqual(self.store.get_capture(source["capture_id"], source["content_hash"], source["manifest_hash"]), source)
+
     def test_narrowing_all_public_to_approved_policy_hides_unlisted_versions_without_deleting_them(self):
         broad = {**self.config, "capture_policy": "all_public", "public_sources": []}
         self.store.configure(broad)
