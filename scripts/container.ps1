@@ -60,7 +60,8 @@ function Get-ArchiveMountSource($directory, $machine) {
     $absolute = $item.FullName.TrimEnd('\')
     if ($absolute -notmatch '^[a-zA-Z]:\\' -or $absolute.Substring(2) -match '[:\r\n]') { throw 'Choose a local Windows drive directory for -ContextArchivePath; UNC and device paths are unsupported.' }
     $repoAbsolute = [IO.Path]::GetFullPath($repoDirectory).TrimEnd('\')
-    if ($absolute -eq $repoAbsolute -or $absolute.StartsWith($repoAbsolute + '\', [StringComparison]::OrdinalIgnoreCase)) {
+    if ($absolute -eq $repoAbsolute -or $absolute.StartsWith($repoAbsolute + '\', [StringComparison]::OrdinalIgnoreCase) -or
+            $repoAbsolute.StartsWith($absolute + '\', [StringComparison]::OrdinalIgnoreCase)) {
         throw 'Choose -ContextArchivePath outside the Git checkout.'
     }
     for ($ancestor = $item; $ancestor; $ancestor = $ancestor.Parent) {

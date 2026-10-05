@@ -116,8 +116,9 @@ $global:connectionUrl = 'ssh://root@127.0.0.1:65152/run/podman/podman.sock'
 Assert-Blocked start 'another image or configuration' @{ ContextArchivePath = $archiveDirectory }
 Assert-Blocked start 'existing directory' @{ ContextArchivePath = (Join-Path $archiveDirectory 'does-not-exist') }
 Assert-Blocked start 'filesystem directory' @{ ContextArchivePath = $env:MAESTRO_TEST_ARCHIVE_FILE }
-Assert-Blocked start 'outside the Git checkout' @{ ContextArchivePath = (Get-Location).Path }
-Assert-Blocked start 'outside the Git checkout' @{ ContextArchivePath = (Join-Path (Get-Location) 'frontend') }
+foreach ($overlap in @((Get-Location).Path, (Join-Path (Get-Location) 'frontend'), (Split-Path -Parent (Get-Location).Path))) {
+    Assert-Blocked start 'outside the Git checkout' @{ ContextArchivePath = $overlap }
+}
 $junction = Join-Path $env:LOCALAPPDATA 'archive-junction'
 New-Item -ItemType Junction -Path $junction -Target (Get-Location).Path | Out-Null
 try { Assert-Blocked start 'junction' @{ ContextArchivePath = (Join-Path $junction 'frontend') } }
