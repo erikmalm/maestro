@@ -511,7 +511,7 @@ function ContextArchiveSetup({
         </div>
       )}
       {notice && <p role="status">{notice}</p>}
-      <p className="reflection-note archive-path">
+      <p className="reflection-note">
         {status.configured ? (
           <>Archive folder: {status.path}</>
         ) : (

@@ -529,9 +529,6 @@ textarea {
   padding: 3px 8px;
   font-size: 12px;
 }
-.archive-path {
-  overflow-wrap: anywhere;
-}
 .archive-accounting {
   margin: 8px 0 14px;
   color: var(--muted);
@@ -563,10 +560,6 @@ textarea {
   padding-top: 24px;
   border-top: 1px solid var(--line);
 }
-.saved-source-finder form {
-  display: grid;
-  gap: 14px;
-}
 .archive-search-fields {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -577,10 +570,7 @@ textarea {
   gap: 18px;
   padding-left: 20px;
 }
-.archive-search-results li,
-.archive-search-results h4,
-.archive-result-url,
-.archive-result-excerpt {
+.archive-search-results li {
   overflow-wrap: anywhere;
 }
 .archive-search-results h4,

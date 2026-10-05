@@ -53,6 +53,10 @@ class SourceFollowupTests(unittest.TestCase):
         with closing(sqlite3.connect(self.database)) as db, db:
             db.execute("UPDATE workspace SET value=? WHERE id=1", (json.dumps(value),))
 
+    def archive_files(self):
+        return {path.relative_to(self.archive): path.read_bytes()
+                for path in self.archive.rglob("*") if path.is_file()}
+
     def prime(self, sources=None):
         sources = sources or [{"title": "Synthetic forecast", "url": "https://docs.example.org/forecast", "content": self.content}]
         result = self.store.capture("private-original-query", self.store.now().isoformat(), sources, 3)
@@ -79,6 +83,14 @@ class SourceFollowupTests(unittest.TestCase):
     def send(self, text="Rewrite that forecast in Celsius", **kwargs):
         with patch("backend.provider.network", side_effect=self.network):
             return self.provider.generate(text, "chat", **kwargs)
+
+    def search_network(self, original, query):
+        def requested(config, key, method, path, payload=None):
+            response = original(config, key, method, path, payload)
+            if path == "/api/chat" and "tools" in payload:
+                response["message"] = search_tool(query)
+            return response
+        return requested
 
     def packet(self, payload=None):
         payload = payload or self.calls[-1][2]
@@ -274,8 +286,7 @@ class SourceFollowupTests(unittest.TestCase):
                 source = {"title": "Public guide", "url": "https://docs.example.org/guide", "content": "Public guide documentation."}
                 source[field] = "https://docs.example.org/" + encoded if field == "url" else "Public guide " + encoded
                 self.prime([source])
-                archive_before = {path.relative_to(self.archive): path.read_bytes()
-                                  for path in self.archive.rglob("*") if path.is_file()}
+                archive_before = self.archive_files()
                 self.keys[ENDPOINT] = secret
                 self.send("Summarize the earlier source")
                 packet = self.packet()
@@ -289,8 +300,7 @@ class SourceFollowupTests(unittest.TestCase):
                 else:
                     self.assertTrue(entry[field + "_redacted"])
                     self.assertNotIn(field, entry)
-                self.assertEqual(archive_before, {path.relative_to(self.archive): path.read_bytes()
-                                                 for path in self.archive.rglob("*") if path.is_file()})
+                self.assertEqual(archive_before, self.archive_files())
 
     def test_credential_rotation_rescreens_only_server_evidence_before_each_inference(self):
         secret = "synthetic-rotated-key"
@@ -314,8 +324,7 @@ class SourceFollowupTests(unittest.TestCase):
                         {"title": "Second guide", "url": "https://docs.example.org/second",
                          "content": "Second guide: beta is disabled."}], 3)["sources"][0]
                     before = self.workspace()["chats"][0]["messages"]
-                    archive_before = {path.relative_to(self.archive): path.read_bytes()
-                                      for path in self.archive.rglob("*") if path.is_file()}
+                    archive_before = self.archive_files()
                     self.calls.clear()
                     def rotated(config, credential, method, path, payload=None):
                         response = original(config, credential, method, path, payload)
@@ -338,8 +347,7 @@ class SourceFollowupTests(unittest.TestCase):
                     self.assertEqual((entry["status"], entry.get("model_calls", 0), entry.get("input_tokens", 0), entry.get("output_tokens", 0)),
                                      ("failed", model_calls, 37 * model_calls, 11 * model_calls))
                     self.assertEqual(self.store.get_capture(safe["capture_id"], safe["content_hash"], safe["manifest_hash"]), safe)
-                    self.assertEqual(archive_before, {path.relative_to(self.archive): path.read_bytes()
-                                                     for path in self.archive.rglob("*") if path.is_file()})
+                    self.assertEqual(archive_before, self.archive_files())
         self.network = original
 
     def test_fitted_saved_and_transient_evidence_is_rescreened_after_final_guard_key_rotation(self):
@@ -363,8 +371,7 @@ class SourceFollowupTests(unittest.TestCase):
                         state["config"] = {**SEARCH_DEFAULT, "enabled": transient}
                         state["tested_at"] = service.now().isoformat()
                     before = self.workspace()["chats"][0]["messages"]
-                    archive_before = {path.relative_to(self.archive): path.read_bytes()
-                                      for path in self.archive.rglob("*") if path.is_file()}
+                    archive_before = self.archive_files()
                     self.calls.clear()
                     rotations = []
                     @contextmanager
@@ -374,12 +381,7 @@ class SourceFollowupTests(unittest.TestCase):
                                 service.configure({**SEARCH_DEFAULT, "enabled": False}, secret, False)
                                 rotations.append(True)
                             yield
-                    def planning(config, key, method, path, payload=None):
-                        response = original(config, key, method, path, payload)
-                        if path == "/api/chat" and "tools" in payload:
-                            response["message"] = search_tool(query)
-                        return response
-                    self.network = planning
+                    self.network = self.search_network(original, query)
                     with patch("backend.provider.credentials.save", side_effect=lambda url, value, persist: self.keys.__setitem__(url, value)), \
                             patch.object(self.store, "evidence_guard", side_effect=rotate_after_guard), \
                             patch("backend.provider.WebSearch.search", return_value={"query": query, "at": at, "sources": [source]}) as hosted:
@@ -398,8 +400,7 @@ class SourceFollowupTests(unittest.TestCase):
                     entry = self.provider.read_state()["ledger"][-1]
                     self.assertEqual((entry["status"], entry["model_calls"], entry["input_tokens"], entry["output_tokens"]),
                                      ("settled", 2, 74, 22) if name == "safe" else ("failed", 1, 37, 11))
-                    self.assertEqual(archive_before, {path.relative_to(self.archive): path.read_bytes()
-                                                     for path in self.archive.rglob("*") if path.is_file()})
+                    self.assertEqual(archive_before, self.archive_files())
         self.network = original
 
     def test_user_source_record_prefix_does_not_become_server_evidence_during_key_rotation(self):
@@ -442,14 +443,8 @@ class SourceFollowupTests(unittest.TestCase):
                              "content": "Public guide documentation " + encoded}])
                 self.keys[ENDPOINT] = secret
                 self.calls.clear()
-                def saved(config, key, method, path, payload=None):
-                    response = original(config, key, method, path, payload)
-                    if path == "/api/chat" and "tools" in payload:
-                        response["message"] = search_tool(query)
-                    return response
-                self.network = saved
-                archive_before = {path.relative_to(self.archive): path.read_bytes()
-                                  for path in self.archive.rglob("*") if path.is_file()}
+                self.network = self.search_network(original, query)
+                archive_before = self.archive_files()
                 with patch("backend.provider.WebSearch.search") as hosted:
                     with self.assertRaisesRegex(ValueError, "evidence contains configured credentials"):
                         self.send("Use saved sources for this public guide", context_mode="saved_only")
@@ -459,8 +454,7 @@ class SourceFollowupTests(unittest.TestCase):
                 self.assertEqual(len(self.workspace()["chats"][0]["messages"]), 2)
                 entry = self.provider.read_state()["ledger"][-1]
                 self.assertEqual((entry["status"], entry["input_tokens"], entry["output_tokens"]), ("failed", 37, 11))
-                self.assertEqual(archive_before, {path.relative_to(self.archive): path.read_bytes()
-                                                 for path in self.archive.rglob("*") if path.is_file()})
+                self.assertEqual(archive_before, self.archive_files())
 
     def test_saved_exact_and_keyword_omit_unsafe_sources_and_renumber_safe_evidence(self):
         secret = "synthetic-newly-known-search-key"
@@ -478,14 +472,8 @@ class SourceFollowupTests(unittest.TestCase):
                      "content": "Public guide documentation with an unsafe URL."}])
                 self.keys[ENDPOINT] = secret
                 self.calls.clear()
-                def saved(config, key, method, path, payload=None):
-                    response = original(config, key, method, path, payload)
-                    if path == "/api/chat" and "tools" in payload:
-                        response["message"] = search_tool(query)
-                    return response
-                self.network = saved
-                archive_before = {path.relative_to(self.archive): path.read_bytes()
-                                  for path in self.archive.rglob("*") if path.is_file()}
+                self.network = self.search_network(original, query)
+                archive_before = self.archive_files()
                 with patch("backend.provider.WebSearch.search") as hosted:
                     result = self.send("Use saved sources for this public guide", context_mode="saved_only")
                     hosted.assert_not_called()
@@ -501,8 +489,7 @@ class SourceFollowupTests(unittest.TestCase):
                 self.assertEqual(answer["web_search"]["evidence"][0]["sha256"],
                                  hashlib.sha256(sources[1]["content"].encode()).hexdigest())
                 self.assertEqual((result["input_tokens"], result["output_tokens"]), (74, 22))
-                self.assertEqual(archive_before, {path.relative_to(self.archive): path.read_bytes()
-                                                 for path in self.archive.rglob("*") if path.is_file()})
+                self.assertEqual(archive_before, self.archive_files())
 
     def test_source_packet_omits_whole_excerpts_and_rejects_too_small_total_budget_before_dispatch(self):
         self.content = "Bounded original excerpt " + "x" * 1200
@@ -974,13 +961,7 @@ class SourceFollowupTests(unittest.TestCase):
             {"title": "Redis", "url": "https://docs.example.org/redis", "content": "Redis installation documentation."}], 3)
         original = self.network
 
-        def saved_tool(config, key, method, path, payload=None):
-            response = original(config, key, method, path, payload)
-            if path == "/api/chat" and "tools" in payload:
-                response["message"] = search_tool("Redis")
-            return response
-
-        self.network = saved_tool
+        self.network = self.search_network(original, "Redis")
         with patch("backend.provider.WebSearch.search") as hosted:
             self.send("Explain Redis installation", context_mode="saved_only")
             hosted.assert_not_called()
