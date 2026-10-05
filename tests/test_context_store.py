@@ -323,6 +323,23 @@ class ContextStoreTests(unittest.TestCase):
         credential_link = self.capture(sources=[{**source, "url": self.source["url"] + "/" + secret}], secrets=(secret,))
         self.assertEqual(credential_link["sources"], [])
 
+    def test_credential_iterators_protect_every_field_and_source_in_one_capture(self):
+        self.enable()
+        secrets = ("synthetic-first-secret", "synthetic-second-secret")
+        encoded = ["".join("%" + format(ord(character), "02X") for character in secret) for secret in secrets]
+        sources = [{**self.source, "title": "Title " + secrets[0], "content": "Body " + secrets[1]},
+                   {**self.source, "title": "Encoded " + encoded[1]},
+                   {**self.source, "url": self.source["url"] + "/" + encoded[0]}]
+        result = self.capture(sources=sources, secrets=iter(("", None, *secrets)))
+        self.assertEqual(len(result["sources"]), 1)
+        saved = result["sources"][0]
+        self.assertEqual((saved["title"], saved["content"], saved["archive_status"]), ("Title \u2588", "Body \u2588", "saved"))
+        self.assertEqual(len(self.manifests()), 1)
+        self.assertEqual(self.store.status()["last_capture"]["sources_saved"], 1)
+        public_text = "\n".join(path.read_text(encoding="utf-8") for path in self.archive.rglob("*") if path.is_file())
+        for secret in (*secrets, *encoded):
+            self.assertNotIn(secret, public_text)
+
     def test_encoded_known_credentials_in_titles_and_content_are_never_exported(self):
         self.enable()
         secret = "synthetic-known-archive-secret"

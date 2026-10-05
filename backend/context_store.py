@@ -16,21 +16,17 @@ from urllib.parse import urlsplit
 import uuid
 
 from backend.context_policy import (
-    DEFAULT, MAX_ARCHIVE_ITEMS, configuration, contains_source_secret, contains_url_secret,
-    decoded_url_variants, eligible, manifest_hash, public_url, timestamp,
+    DEFAULT, ID, MANIFEST_BYTES, MAX_ARCHIVE_ITEMS, SCHEMA, SOURCE_BYTES, capture_source,
+    configuration, contains_source_secret, contains_url_secret, decoded_url_variants, eligible,
+    manifest_hash, public_url, timestamp, validate_capture_manifest,
 )
 from backend.storage import (archive_available, archive_inventory, archive_owner, archive_path,
                              publish_archive, read_archive, read_archive_json)
 
 
-SCHEMA = 1
-SOURCE_BYTES = 8192
-MANIFEST_BYTES = 16384
 SEARCH_CANDIDATES = 200
 SEARCH_SECONDS = 2
 REBUILD_SECONDS = 5
-ID = re.compile(r"[a-f0-9]{32}\Z")
-HASH = re.compile(r"[a-f0-9]{64}\Z")
 ROOT = Path(__file__).resolve().parent.parent
 
 
@@ -90,7 +86,6 @@ def validate_search(query, limit=3, *, domain=None, retrieved_from=None, retriev
                 raise ValueError()
         except (ValueError, TypeError):
             raise ValueError("Use an exact public hostname without a URL, path, port or wildcard.") from None
-    dates = []
     for value in (retrieved_from, retrieved_to):
         if value is not None:
             try:
@@ -99,8 +94,7 @@ def validate_search(query, limit=3, *, domain=None, retrieved_from=None, retriev
                 date.fromisoformat(value)
             except ValueError:
                 raise ValueError("Use valid retrieval dates in YYYY-MM-DD format.") from None
-        dates.append(value)
-    if all(dates) and dates[0] > dates[1]:
+    if retrieved_from and retrieved_to and retrieved_from > retrieved_to:
         raise ValueError("The retrieval start date must not follow its end date.")
     return {"query": query, "limit": limit, "domain": domain,
             "retrieved_from": retrieved_from, "retrieved_to": retrieved_to}
@@ -157,10 +151,9 @@ class ContextStore:
 
     def record_error(self, message=None):
         # Never persist arbitrary exceptions, paths or provider-generated prose.
-        with self._write_lock:
-            with self._transaction() as (state, _):
-                state["last_error"] = "The context archive is unavailable. Check its directory and writer ownership."
-                state["write_unavailable"] = True
+        with self._write_lock, self._transaction() as (state, _):
+            state["last_error"] = "The context archive is unavailable. Check its directory and writer ownership."
+            state["write_unavailable"] = True
         return self.status()
 
     @contextmanager
@@ -258,37 +251,14 @@ class ContextStore:
         return archive_path(self.archive, "records/deletions/" + capture_id + ".json").exists()
 
     def _manifest(self, relative, config):
-        data = read_archive_json(self.archive, relative, MANIFEST_BYTES)
-        required = {"schema_version", "capture_id", "source_id", "source_url", "title", "object", "retrieved_at", "content_kind", "completeness", "published_at", "modified_at"}
-        if (not isinstance(data, dict) or set(data) != required or type(data["schema_version"]) is not int or data["schema_version"] != SCHEMA
-                or not isinstance(data["capture_id"], str) or not ID.fullmatch(data["capture_id"])
-                or not relative.endswith("/" + data["capture_id"] + ".json") or self._deleted(data["capture_id"])
-                or not eligible(data["source_url"], config)
-                or data["source_id"] != hashlib.sha256(public_url(data["source_url"], allow_query=True, allow_http=True).encode()).hexdigest()
-                or not isinstance(data["title"], str) or len(data["title"]) > 200
-                or data["content_kind"] != "search_excerpt" or data["published_at"] is not None or data["modified_at"] is not None
-                or not isinstance(data["completeness"], dict) or set(data["completeness"]) != {"maestro_truncated", "full_page"}
-                or type(data["completeness"]["maestro_truncated"]) is not bool or data["completeness"]["full_page"] is not False):
+        data = validate_capture_manifest(read_archive_json(self.archive, relative, MANIFEST_BYTES), relative, config)
+        if self._deleted(data["capture_id"]):
             raise ValueError("Invalid or unavailable source capture.")
-        data["title"].encode("utf-8")
-        if relative != "records/captures/" + timestamp(data["retrieved_at"])[:7] + "/" + data["capture_id"] + ".json":
-            raise ValueError("Invalid capture observation path.")
         obj = data["object"]
-        if (not isinstance(obj, dict) or set(obj) != {"path", "sha256", "bytes", "encoding"}
-                or not isinstance(obj["sha256"], str) or not HASH.fullmatch(obj["sha256"])
-                or obj["path"] != "objects/sha256/" + obj["sha256"][:2] + "/" + obj["sha256"] + ".txt"
-                or obj["encoding"] != "utf-8" or type(obj["bytes"]) is not int or not 1 <= obj["bytes"] <= SOURCE_BYTES):
-            raise ValueError("Invalid archived source object.")
         raw = read_archive(self.archive, obj["path"], SOURCE_BYTES)
         if len(raw) != obj["bytes"] or hashlib.sha256(raw).hexdigest() != obj["sha256"]:
             raise ValueError("An archived source failed its hash check.")
         return data, raw.decode("utf-8")
-
-    @staticmethod
-    def _source(manifest, content):
-        return {"capture_id": manifest["capture_id"], "title": manifest["title"], "url": manifest["source_url"], "content": content,
-                "content_hash": manifest["object"]["sha256"], "manifest_hash": manifest_hash(manifest), "archive_status": "saved",
-                **{key: manifest[key] for key in ("content_kind", "completeness", "retrieved_at", "published_at", "modified_at")}}
 
     def _key(self, query, max_results):
         if type(max_results) is not int or not 1 <= max_results <= 3:
@@ -446,6 +416,7 @@ class ContextStore:
                 raise ValueError("The local source index could not be searched. Rebuild it and retry.") from None
 
     def capture(self, query, at, sources, max_results, secrets=()):
+        secrets = tuple(secret for secret in secrets if secret)
         key, at = self._key(query, max_results), timestamp(at)
         query = normalize_query(query)
         result = {"query": query, "at": at, "sources": [], "from_cache": False}
@@ -461,8 +432,7 @@ class ContextStore:
             clean = {field: source[field] for field in ("title", "url", "content")}
             for field in ("title", "content"):
                 for secret in secrets:
-                    if secret:
-                        clean[field] = clean[field].replace(secret, "\u2588")
+                    clean[field] = clean[field].replace(secret, "\u2588")
             if any(contains_source_secret(clean[field], secrets) for field in ("title", "content")):
                 continue  # Encoded credentials must not reach inference or synced files.
             existing = source.get("completeness")
@@ -510,7 +480,7 @@ class ContextStore:
                         measured["manifest_bytes"] += len(encoded)
                         measured["new_bytes"] += len(encoded)
                     self._index_capture(manifest, relative, clean["content"])
-                    clean.update(self._source(manifest, clean["content"]))
+                    clean.update(capture_source(manifest, clean["content"]))
                     saved.append({"capture_id": capture_id, "content_hash": content_hash, "manifest_hash": manifest_hash(manifest)})
                     measured["sources_saved"] += 1
                     measured["excerpt_bytes"] += len(raw)
@@ -570,7 +540,7 @@ class ContextStore:
                     raise KeyError(capture_id)
                 if expected_hash is not None and manifest["object"]["sha256"] != expected_hash:
                     raise KeyError(capture_id)
-                return self._source(manifest, content)
+                return capture_source(manifest, content)
             except (OSError, sqlite3.Error, ValueError, TypeError, UnicodeError):
                 raise KeyError(capture_id) from None
 
