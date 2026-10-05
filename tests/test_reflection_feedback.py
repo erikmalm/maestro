@@ -187,6 +187,8 @@ class FeedbackTests(unittest.TestCase):
         self.assertEqual({source["message_id"] for source in note["provenance"]}, {"provenance-user", "provenance-answer"})
 
     def test_larger_memory_and_working_notes_fit_two_stage_context_and_recall(self):
+        with self.provider.transaction() as state:
+            state["config"].update(ollama_context_tokens=4096, max_output_tokens=512)
         fact = self.memory.remember("Synthetic project details. " + "x" * 7000)
         self.pair("long", "A complete substantial answer. " * 150 + "Final caveat.")
         self.drafts = self.notes(1900)
@@ -207,8 +209,6 @@ class FeedbackTests(unittest.TestCase):
     def test_review_that_cannot_fit_abstains_before_second_inference(self):
         self.workspace["work_config"].update(max_output_tokens=512, background_context_tokens=8192)
         self.save()
-        with self.provider.transaction() as state:
-            state["config"].update(ollama_context_tokens=8192, max_output_tokens=512)
         self.pair("long", "A complete answer. " * 75)
         self.drafts = self.notes(1900)
         self.worker.step()

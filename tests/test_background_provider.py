@@ -215,16 +215,22 @@ class ClaimedProviderTests(unittest.TestCase):
                                              max_jobs_per_day=1, max_tokens_per_day=100000,
                                              background_context_tokens=65536, max_output_tokens=32768)
         self.store.recover()
+        text = "I prefer concise Swedish replies. " + "Synthetic detail for context fitting. " * 300
+        self.workspace["chats"][0]["messages"][0].update(id="synthetic-large-source", text=text)
         with self.store.transaction() as db:
+            db.execute("DELETE FROM reflection_jobs")
             db.execute("UPDATE workspace SET value=?", (json.dumps(self.workspace),))
-        self.provider.configure({**self.provider.read_state()["config"], "ollama_context_tokens": 16384,
-                                 "max_output_tokens": 1024}, "", False)
+            self.store.enqueue("synthetic-chat", self.workspace, db)
+        foreground = {**self.provider.read_state()["config"], "ollama_context_tokens": 8192, "max_output_tokens": 1024}
+        self.provider.configure(foreground, "", False)
         self.prepared = self.store.prepare()
+        self.assertEqual(self.prepared["context"]["sources"][0]["text"], text)
         draft = {"operation": "add", "memory_id": "", "kind": "preference", "scope": "conversation",
-                 "content": "I prefer concise Swedish replies.", "source_message_id": "synthetic-user", "evidence": "I prefer concise Swedish replies."}
+                 "content": "I prefer concise Swedish replies.", "source_message_id": "synthetic-large-source", "evidence": "I prefer concise Swedish replies."}
         def network(config, path, payload, deadline):
             result = self.network(config, path, payload, deadline)
             if path == "/api/chat":
+                self.assertGreater(len(json.dumps(payload["messages"]).encode()), foreground["ollama_context_tokens"])
                 result["message"]["content"] = json.dumps({"approved": [0], "summary": "Reviewed."} if "approved" in payload["format"]["properties"]
                                                           else {"memories": [draft], "summary": "Normalized."})
             return result
@@ -256,50 +262,12 @@ class ClaimedProviderTests(unittest.TestCase):
         self.assertEqual(ledger[0]["attempt"], ledger[1]["attempt"])
         self.assertEqual(self.store.status()["today_jobs"], 1)
         self.assertEqual(self.store.status()["today_tokens"], 80)
-        self.assertEqual(self.provider.read_state()["config"]["ollama_context_tokens"], 16384)
-        self.assertEqual(self.provider.read_state()["config"]["max_output_tokens"], 1024)
+        self.assertEqual(self.provider.read_state()["config"], foreground)
+        self.assertTrue(all(entry["connection_config"] == foreground for entry in ledger))
+        self.assertEqual(MemoryStore(self.database, timezone.utc).list()[0]["content"], draft["content"])
         self.assertEqual(MemoryStore(self.database, timezone.utc).list()[0]["origin"], "curated")
 
-    def test_large_formation_and_review_use_captured_work_limits_above_foreground_limits(self):
-        self.store.recover()
-        self.workspace["work_config"].update(auto_curate=True, background_context_tokens=65536, max_output_tokens=8192)
-        text = "I prefer concise Swedish replies. " + "Synthetic detail for context fitting. " * 800
-        self.workspace["chats"][0]["messages"][0].update(id="synthetic-large-source", text=text)
-        with self.store.transaction() as db:
-            db.execute("DELETE FROM reflection_jobs")
-            db.execute("UPDATE workspace SET value=?", (json.dumps(self.workspace),))
-            self.store.enqueue("synthetic-chat", self.workspace, db)
-        foreground = {**self.provider.read_state()["config"], "ollama_context_tokens": 16384, "max_output_tokens": 1024}
-        self.provider.configure(foreground, "", False)
-        self.prepared = self.store.prepare()
-        self.assertEqual(self.prepared["context"]["sources"][0]["text"], text)
-        draft = {"operation": "add", "memory_id": "", "kind": "preference", "scope": "conversation",
-                 "content": "I prefer concise Swedish replies.", "source_message_id": "synthetic-large-source",
-                 "evidence": "I prefer concise Swedish replies."}
-
-        def network(config, path, payload, deadline):
-            result = self.network(config, path, payload, deadline)
-            if path == "/api/chat":
-                self.assertGreater(len(json.dumps(payload["messages"]).encode()), foreground["ollama_context_tokens"])
-                result["message"]["content"] = json.dumps({"approved": [0], "summary": "Reviewed."}
-                    if "approved" in payload["format"]["properties"] else {"memories": [draft], "summary": "Normalized."})
-            return result
-
-        with patch("backend.provider.background_network", side_effect=network):
-            formed = self.generate()
-            review = self.store.record_stage_result(self.prepared["job"], formed, lambda value: value, self.prepared["context"])
-            reviewed = self.provider.generate_context(review["instructions"], review["messages"], kind=review["job"]["kind"],
-                                                     job=review["job"], schema=review["schema"])
-            self.store.complete_auto(review["job"], reviewed, review["drafts"], lambda value: value)
-        dispatches = [call[2] for call in self.calls if call[1] == "/api/chat"]
-        self.assertEqual([(payload["options"]["num_ctx"], payload["options"]["num_predict"]) for payload in dispatches],
-                         [(65536, 8192), (65536, 8192)])
-        self.assertEqual(self.provider.read_state()["config"], foreground)
-        self.assertTrue(all(entry["connection_config"] == foreground for entry in self.provider.read_state()["ledger"]))
-        self.assertEqual(self.store.status()["today_tokens"], 80)
-        self.assertEqual(MemoryStore(self.database, timezone.utc).list()[0]["content"], draft["content"])
-
-    def test_explicit_context_without_durable_job_retains_foreground_limits(self):
+    def test_ordinary_chat_and_explicit_context_without_job_retain_foreground_limits(self):
         self.store.recover()
         self.workspace["work_config"].update(background_context_tokens=65536, max_output_tokens=8192)
         with self.store.transaction() as db:
@@ -314,11 +282,15 @@ class ClaimedProviderTests(unittest.TestCase):
             payloads.append(payload)
             return {"done": True, "message": {"content": "Synthetic answer"}, "prompt_eval_count": 30, "eval_count": 10}
 
-        with patch("backend.provider.network", side_effect=network):
+        with patch("backend.provider.network", side_effect=network), patch("backend.provider.background_network") as background:
             self.provider.generate_context("Use the supplied text.", [{"role": "user", "content": "Synthetic task."}],
                                            max_output_tokens=8192)
-        self.assertEqual((payloads[0]["options"]["num_ctx"], payloads[0]["options"]["num_predict"]), (16384, 1024))
+            self.provider.generate("A normal synthetic question.", "synthetic-chat")
+            background.assert_not_called()
+        self.assertEqual([(payload["options"]["num_ctx"], payload["options"]["num_predict"]) for payload in payloads],
+                         [(16384, 1024), (16384, 1024)])
         self.assertEqual(self.provider.read_state()["config"], foreground)
+        self.assertTrue(all("job_id" not in entry for entry in self.provider.read_state()["ledger"]))
 
     def test_background_kind_schema_and_deadline_are_checked_before_reserving(self):
         for options in ({"kind": "memory"}, {"kind": "coding"}, {"schema": {"type": "object"}},
