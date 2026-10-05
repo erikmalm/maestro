@@ -129,9 +129,9 @@ def _calendar_dates(text, *, strict=False):
     for year, month, day in CALENDAR_DATE.findall(text):
         add(year, month, day)
     for day, month, year in DAY_MONTH_YEAR.findall(text):
-        add(year, MONTHS[month.casefold()], day)
+        add(year, MONTHS.get(month.casefold()), day)
     for month, day, year in MONTH_DAY_YEAR.findall(text):
-        add(year, MONTHS[month.casefold()], day)
+        add(year, MONTHS.get(month.casefold()), day)
     for day, month, year in NUMERIC_DATE.findall(text):
         # Numeric month/day ordering is ambiguous unless only one is valid.
         if int(day) > 12 or int(day) == int(month):

@@ -73,3 +73,10 @@ class ForecastDateTests(unittest.TestCase):
         self.assertEqual(requested_calendar_dates("Weather on 05/5/2026", date(2026, 10, 4)), ("2026-05-05",))
         with self.assertRaisesRegex(ValueError, "unambiguous"):
             requested_calendar_dates("Weather on 5/10/2026", date(2026, 10, 4))
+
+    def test_unicode_regex_month_variants_fail_as_managed_dates(self):
+        for text in ("Forecast 5 apr\u0131l 2026", "Forecast APR\u0130L 5, 2026"):
+            with self.subTest(text=text):
+                self.assertFalse(forecast_date_supported(self.source(text), ("2026-04-05",)))
+                with self.assertRaisesRegex(ValueError, "valid calendar dates"):
+                    requested_calendar_dates(text, date(2026, 4, 4))
