@@ -1373,6 +1373,7 @@ export default function App() {
   const navigationMenu = useRef<HTMLButtonElement>(null);
   const chatEnd = useRef<HTMLDivElement>(null);
   const workspaceRevision = useRef(0);
+  const workspaceRefresh = useRef(0);
   const archiveQueue = useRef(Promise.resolve());
   const reflectionPolling = useRef(false);
   const [reflectionActions, setReflectionActions] = useState(0);
@@ -1577,15 +1578,20 @@ export default function App() {
     setChatUrl(next.active_chat_id);
     setWorkspace(next);
   }
-  function refreshWorkspace() {
+  function refreshWorkspace(): Promise<void> {
+    const request = ++workspaceRefresh.current;
     const revision = ++workspaceRevision.current;
     return api
       .loadWorkspace()
       .then((next) => {
         if (workspaceRevision.current === revision) applyWorkspace(next);
+        else if (workspaceRefresh.current === request)
+          return refreshWorkspace();
       })
       .catch((reason: Error) => {
         if (workspaceRevision.current === revision) setError(reason.message);
+        else if (workspaceRefresh.current === request)
+          return refreshWorkspace();
       });
   }
   function archiveAction(action: () => Promise<ContextArchiveStatus>) {

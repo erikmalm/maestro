@@ -1803,6 +1803,7 @@ for (const refresh of ["failed", "stale"] as const) {
           status: 503,
           json: { detail: "Synthetic workspace refresh failed." },
         });
+      if (refreshes > 1) return route.fulfill({ json: api.state });
       workspaceRead = route;
     });
     await page.getByRole("button", { name: "Settings", exact: true }).click();
@@ -1851,9 +1852,78 @@ for (const refresh of ["failed", "stale"] as const) {
         exact: true,
       }),
     ).toContainText("Source saving is off.");
-    expect(refreshes).toBe(1);
+    await expect.poll(() => refreshes).toBe(refresh === "stale" ? 2 : 1);
   });
 }
+
+test("latest settings refresh retries after archive revocation without older refreshes overtaking it", async ({
+  page,
+}) => {
+  const state = workspace();
+  state.provider.models.push("synthetic-coordinator");
+  Object.assign(state.web_search, {
+    config: { enabled: true, daily_limit: 20, max_results: 3 },
+    credentials_present: true,
+    tested_at: retrieved,
+    searches_today: 0,
+    remaining_today: 20,
+    ready: true,
+    unavailable_reason: null,
+  });
+  const api = await fixture(page, state);
+  const reads: { route: Route; snapshot: Workspace }[] = [];
+  await page.route("**/api/workspace*", (route) => {
+    reads.push({ route, snapshot: structuredClone(state) });
+    if (reads.length > 2) return route.fulfill({ json: state });
+  });
+  await page.route("**/api/provider", (route) => {
+    state.provider.config = route.request().postDataJSON().config;
+    return route.fulfill({ json: state.provider });
+  });
+  await page.getByLabel("Message Maestro").fill("Keep this chat draft");
+  await page.getByRole("button", { name: "Settings", exact: true }).click();
+  const archive = page.locator(".context-archive-setup");
+  await archive.getByLabel("Save and reuse public search results").uncheck();
+  api.hold.add("PUT /api/context");
+  await archive.getByRole("button", { name: "Save source settings" }).click();
+  await expect.poll(() => api.held.has("PUT /api/context")).toBe(true);
+  const provider = page.locator(".provider-setup");
+  await provider.getByLabel("Chat routing").selectOption("orchestrator");
+  await provider
+    .getByLabel("Orchestrator default model")
+    .selectOption("synthetic-coordinator");
+  await provider.getByRole("button", { name: "Save connection" }).click();
+  await expect.poll(() => reads.length).toBe(1);
+  const search = page.locator(".ollama-search-setup");
+  await search.getByLabel("Let Maestro decide when to search").uncheck();
+  await search.getByRole("button", { name: "Save search settings" }).click();
+  await expect.poll(() => reads.length).toBe(2);
+  await reads[0].route.fulfill({ json: reads[0].snapshot });
+  await page.waitForTimeout(100);
+  expect(reads).toHaveLength(2);
+  const save = api.held.get("PUT /api/context")!;
+  state.context_archive!.config = save.request().postDataJSON();
+  await save.fulfill({ json: state.context_archive });
+  await expect(
+    archive.getByText("Saved source settings updated."),
+  ).toBeVisible();
+  await reads[1].route.fulfill({ json: reads[1].snapshot });
+  await page.getByRole("button", { name: "Workspace", exact: true }).click();
+  await expect(
+    page.getByRole("button", { name: "Choose model:" }),
+  ).toContainText("synthetic-coordinator");
+  const options = await openSearchOptions(page);
+  await expect(
+    options.getByRole("status", { name: "Online search readiness" }),
+  ).toContainText("Enable Optional web search in Settings.");
+  await expect(
+    options.getByRole("status", { name: "Source saving status" }),
+  ).toContainText("Source saving is off.");
+  await expect.poll(() => reads.length).toBe(3);
+  await expect(page.getByLabel("Message Maestro")).toHaveValue(
+    "Keep this chat draft",
+  );
+});
 
 test("archive actions serialize older status reads and continue after a rejected mutation", async ({
   page,
