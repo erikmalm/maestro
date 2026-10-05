@@ -253,6 +253,226 @@ test("settings updates never silently replace an explicit chat model", async ({
   expect(sentModel).toBe("old-model");
 });
 
+function routingWorkspace(): Workspace {
+  const state = structuredClone(initial);
+  Object.assign(state.provider.config, {
+    model: "qwen2.5:7b",
+    orchestrator_model: "devstral-small-2:24b",
+  });
+  state.provider.models = [
+    "qwen2.5:7b",
+    "devstral-small-2:24b",
+    "new-coordinator",
+  ];
+  state.active_chat_id = "routing-chat";
+  state.chats = [
+    {
+      id: "routing-chat",
+      title: "Routing chat",
+      created_at: "2026-10-01",
+      updated_at: "2026-10-01",
+    },
+  ];
+  return state;
+}
+
+for (const [name, routing, orchestrator, expected] of [
+  ["legacy direct", undefined, "devstral-small-2:24b", "qwen2.5:7b"],
+  ["explicit direct", "direct", "devstral-small-2:24b", "qwen2.5:7b"],
+  [
+    "orchestrator",
+    "orchestrator",
+    "devstral-small-2:24b",
+    "devstral-small-2:24b",
+  ],
+  ["chat fallback", "orchestrator", "", "qwen2.5:7b"],
+] as const) {
+  test(`chat routing uses the ${name} default without an explicit override`, async ({
+    page,
+  }) => {
+    const state = routingWorkspace();
+    Object.assign(state.provider.config, {
+      chat_routing: routing,
+      orchestrator_model: orchestrator,
+    });
+    await mockSettings(page, state, "");
+    await page.route("**/api/chat", (route) => route.fulfill({ json: state }));
+    await page.goto("/");
+    const picker = page.getByRole("button", { name: /^Choose model:/ });
+    await expect(picker).toHaveAccessibleName(`Choose model: ${expected}`);
+    await picker.click();
+    await expect(
+      page
+        .locator(".model-picker")
+        .getByRole("button", { name: expected, exact: false })
+        .getByText("Default", { exact: true }),
+    ).toBeVisible();
+    await page.keyboard.press("Escape");
+    const sent = page.waitForRequest("**/api/chat");
+    await page.getByLabel("Message Maestro").fill("Use the saved reply model");
+    await page
+      .getByRole("button", { name: "Send message", exact: true })
+      .click();
+    expect((await sent).postDataJSON()).toEqual({
+      text: "Use the saved reply model",
+      role: "chat",
+      chat_id: "routing-chat",
+    });
+    await page.getByRole("button", { name: "Settings", exact: true }).click();
+    await expect(
+      page.getByRole("combobox", { name: "Chat routing", exact: true }),
+    ).toHaveValue(routing ?? "direct");
+    const preference = page.getByRole("combobox", {
+      name: "Orchestrator default model",
+      exact: true,
+    });
+    await expect(preference).toHaveValue(orchestrator);
+    await expect(preference).toBeEnabled();
+  });
+}
+
+test("saving chat routing updates the composer default and keeps the chat request", async ({
+  page,
+}) => {
+  const state = routingWorkspace();
+  await mockSettings(page, state, "");
+  await page.route("**/api/chat", (route) => route.fulfill({ json: state }));
+  await page.goto("/");
+  const picker = page.getByRole("button", { name: /^Choose model:/ });
+  await expect(picker).toHaveAccessibleName("Choose model: qwen2.5:7b");
+  await page.getByLabel("Message Maestro").fill("Keep this routing draft");
+  await page.getByRole("button", { name: "Settings", exact: true }).click();
+  await page
+    .getByRole("combobox", { name: "Chat routing", exact: true })
+    .selectOption("orchestrator");
+  await page
+    .getByRole("button", { name: "Save connection", exact: true })
+    .click();
+  await expect(
+    page.getByText(
+      "Chat model settings saved. Return to Workspace to send a message.",
+      { exact: true },
+    ),
+  ).toBeVisible();
+  expect(state.provider.config).toMatchObject({
+    chat_routing: "orchestrator",
+    model: "qwen2.5:7b",
+    orchestrator_model: "devstral-small-2:24b",
+  });
+  await page.getByRole("button", { name: "Workspace", exact: true }).click();
+  await expect(picker).toHaveAccessibleName(
+    "Choose model: devstral-small-2:24b",
+  );
+  await expect(page.getByLabel("Message Maestro")).toHaveValue(
+    "Keep this routing draft",
+  );
+  const sent = page.waitForRequest("**/api/chat");
+  await page.getByRole("button", { name: "Send message", exact: true }).click();
+  expect((await sent).postDataJSON()).toEqual({
+    role: "chat",
+    text: "Keep this routing draft",
+    chat_id: "routing-chat",
+  });
+});
+
+test("delayed chat routing saves preserve an explicit model and newer drafts", async ({
+  page,
+}) => {
+  const state = routingWorkspace();
+  state.provider.config.chat_routing = "orchestrator";
+  const pending = await mockSettings(page, state, "/api/provider");
+  await page.route("**/api/chat", (route) => route.fulfill({ json: state }));
+  await page.goto("/");
+  const picker = page.getByRole("button", { name: /^Choose model:/ });
+  await picker.click();
+  await page
+    .locator(".model-picker")
+    .getByRole("button", { name: "qwen2.5:7b", exact: true })
+    .click();
+  const composer = page.getByLabel("Message Maestro");
+  await composer.fill("Keep this model and draft");
+  await page.getByRole("button", { name: "Settings", exact: true }).click();
+  await page
+    .getByRole("combobox", { name: "Orchestrator default model", exact: true })
+    .selectOption("new-coordinator");
+  await page
+    .getByRole("button", { name: "Save connection", exact: true })
+    .click();
+  await expect.poll(() => !!pending()).toBe(true);
+  state.provider.config = pending()!.request().postDataJSON().config;
+  expect(state.provider.config).toMatchObject({
+    chat_routing: "orchestrator",
+    orchestrator_model: "new-coordinator",
+  });
+  await page.getByRole("button", { name: "Workspace", exact: true }).click();
+  await composer.fill("Keep my newer question");
+  const refreshed = page.waitForResponse(
+    (response) => new URL(response.url()).pathname === "/api/workspace",
+  );
+  await pending()!.fulfill({ json: state.provider });
+  await refreshed;
+  await expect(picker).toHaveAccessibleName("Choose model: qwen2.5:7b");
+  await expect(composer).toHaveValue("Keep my newer question");
+  await picker.click();
+  await expect(
+    page
+      .locator(".model-picker")
+      .getByRole("button", { name: "new-coordinator", exact: false })
+      .getByText("Default", { exact: true }),
+  ).toBeVisible();
+  await page.keyboard.press("Escape");
+  const sent = page.waitForRequest("**/api/chat");
+  await page.getByRole("button", { name: "Send message", exact: true }).click();
+  expect((await sent).postDataJSON()).toEqual({
+    role: "chat",
+    model: "qwen2.5:7b",
+    text: "Keep my newer question",
+    chat_id: "routing-chat",
+  });
+});
+
+test("changing provider resets local chat routing before remote settings are saved", async ({
+  page,
+}) => {
+  const state = routingWorkspace();
+  state.provider.config.chat_routing = "orchestrator";
+  await mockSettings(page, state, "");
+  await page.goto("/");
+  await page.getByRole("button", { name: "Settings", exact: true }).click();
+  await page
+    .getByRole("combobox", { name: "Model provider", exact: true })
+    .selectOption("custom");
+  await expect(
+    page.getByRole("combobox", { name: "Chat routing", exact: true }),
+  ).toHaveCount(0);
+  await expect(
+    page.getByRole("combobox", {
+      name: "Orchestrator default model",
+      exact: true,
+    }),
+  ).toHaveCount(0);
+  await page
+    .getByLabel("API base URL", { exact: true })
+    .fill("https://provider.example/v1");
+  await page.getByLabel("Model ID", { exact: true }).fill("remote-model");
+  await page
+    .getByLabel("API key", { exact: true })
+    .fill("synthetic-remote-key");
+  await page
+    .getByLabel("Use these prices for cost estimates", { exact: true })
+    .check();
+  const saved = page.waitForRequest("**/api/provider");
+  await page
+    .getByRole("button", { name: "Save connection", exact: true })
+    .click();
+  expect((await saved).postDataJSON().config).toMatchObject({
+    protocol: "chat_completions",
+    model: "remote-model",
+    orchestrator_model: "",
+    chat_routing: "direct",
+  });
+});
+
 for (const search of [false, true]) {
   test(`an older ${search ? "search" : "provider"} save cannot restore invalidated settings`, async ({
     page,
