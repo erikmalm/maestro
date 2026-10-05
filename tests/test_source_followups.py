@@ -143,6 +143,27 @@ class SourceFollowupTests(unittest.TestCase):
         self.assertTrue(all("content" not in source for source in citations))
         self.assertEqual([source["citation"] for source in earlier["sources"]], [1, 2])
 
+    def test_source_record_credential_iterators_match_tuples_for_saved_evidence(self):
+        secrets = ("synthetic-first-key", "synthetic-second-key")
+        encoded = "".join("%" + format(ord(character), "02X") for character in secrets[1])
+        sources = self.prime([{"title": "First guide", "url": "https://docs.example.org/first", "content": "Body " + secrets[0]},
+                              {"title": "Title " + secrets[1], "url": "https://docs.example.org/second/" + encoded,
+                               "content": "Encoded body " + encoded}])
+        self.assertTrue(all(source["archive_status"] == "saved" for source in sources))
+        messages, status, records = self.workspace()["chats"][0]["messages"], self.store.status(), []
+        with patch.object(self.provider, "stamp", return_value="2026-10-05T10:00:00+00:00"):
+            for supplied in (secrets, iter(secrets)):
+                record, guards, context = self.provider.source_record(messages, status, SOURCE_RECORD_BYTES,
+                                                                      include_content=True, secrets=supplied)
+                packet = json.loads(record["content"][len(SOURCE_RECORD_PREFIX):])
+                entries = packet["previous_searches"][0]["sources"]
+                self.assertEqual([entry["evidence_status"] for entry in entries], ["withheld_credentials"] * 2)
+                self.assertEqual((guards, context["references"]), ([], []))
+                for secret in (*secrets, encoded):
+                    self.assertNotIn(secret, record["content"])
+                records.append(record)
+        self.assertEqual(records[0], records[1])
+
     def test_missing_tampered_deleted_or_out_of_scope_capture_is_unavailable_without_private_body_fallback(self):
         for action in ("missing", "tamper", "manifest", "delete", "scope", "disable"):
             with self.subTest(action=action):

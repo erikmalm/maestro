@@ -495,6 +495,7 @@ class Provider:
 
     def source_record(self, messages, archive_status, allowance, *, include_content, secrets=(), required_dates=()):
         """Bounded local provenance; saved bodies remain pinned to their original capture."""
+        secrets = tuple(secret for secret in secrets if secret)
         status = archive_status or {}
         settings = status.get("config", {})
         packet = {"snapshot_at": self.stamp(), "archive": {
