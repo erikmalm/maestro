@@ -2,7 +2,7 @@
 
 A local web interface for persistent chats with your chosen model, usage tracking and to-dos. Workspace, Tasks, Memory and Settings expose live conversation, user-created and reviewed AI-created tasks, private memory and configuration.
 
-Maestro saves one provider connection with a chat model and a separate orchestrator preference. Chat supports per-message model choices, Markdown and private memory. Opt-in background reflection curates reviewed memories automatically, maintains working notes and provides a private journal. It can also create independently reviewed task suggestions. Task execution and delegation remain future work. Optional Ollama web search is the only model-selected tool. The [development plan](DEVELOPMENT_PLAN.md) and [memory/reflection architecture](docs/MEMORY_AND_REFLECTION.md) describe working behavior and the next increments.
+Maestro saves one provider connection with chat and orchestrator models. Local chat can use either as its default, with per-message model choices, Markdown and private memory. Opt-in background reflection curates reviewed memories automatically, maintains working notes and provides a private journal. It can also create independently reviewed task suggestions. Task execution and delegation remain future work. Optional Ollama web search is the only model-selected tool. The [development plan](DEVELOPMENT_PLAN.md) and [memory/reflection architecture](docs/MEMORY_AND_REFLECTION.md) describe working behavior and the next increments.
 
 ## Run locally
 
@@ -25,7 +25,7 @@ For local Ollama:
 3. Click **Connect and load models**, select an installed model, then **Save connection**.
 4. Return to **Workspace** and send a message. Tokens are reported by Ollama and provider API charges are $0; hardware and electricity costs are not estimated.
 
-The installed-model list is the same inventory shown by `ollama list`. Click the model name below the message field to choose a different chat model; the configured chat default is selected initially. Switching preserves the conversation and draft, and each answer records the model actually used. After adding or removing models in Ollama, use **Connect and load models** in Settings to update the list. Settings also retains a separate orchestrator model preference for future orchestration; the chat window always sends chat messages. Saving a task does not execute it.
+The installed-model list is the same inventory shown by `ollama list`. In **Settings → Model provider → Chat routing**, choose **Chat model** or **Orchestrator model** and save the connection. A blank orchestrator choice uses the chat model. The model picker below the message field overrides the default for a message, preserving the conversation and draft. Each answer records the model actually used. After adding or removing installed models, use **Connect and load models** to update the list. Both routes use the chat role and existing inference/search allowances. Separate assessment, live progress and delegation remain planned. Saving a task does not execute it.
 
 New replies reveal progressively after generation finishes; saved history appears immediately. This display effect respects reduced-motion preferences and does not stream tokens from the provider or shorten the initial wait.
 
