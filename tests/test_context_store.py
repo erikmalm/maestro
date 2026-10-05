@@ -12,7 +12,7 @@ import threading
 import unittest
 from unittest.mock import patch
 
-from backend.context_store import ContextStore, DEFAULT, MANIFEST_BYTES, ROOT, decoded_url_variants, public_url, validate_search
+from backend.context_store import ContextStore, DEFAULT, SCHEMA, MANIFEST_BYTES, ROOT, decoded_url_variants, public_url, validate_search
 from backend.storage import archive_inventory, publish_archive
 
 
@@ -509,8 +509,10 @@ class ContextStoreTests(unittest.TestCase):
         path = self.manifests()[0]
         manifest = json.loads(path.read_text(encoding="utf-8"))
         manifest["source_url"] = second_url
-        path.write_text(json.dumps(manifest), encoding="utf-8")
-        self.assert_missing_capture(saved["capture_id"])
+        for digest in (hashlib.sha256(second_url.encode()).hexdigest(), manifest["source_id"]):
+            manifest["source_id"] = digest
+            path.write_text(json.dumps(manifest), encoding="utf-8")
+            self.assert_missing_capture(saved["capture_id"])
         self.assertIsNone(self.store.lookup(self.query, 3))
         self.assertEqual(self.store.rebuild()["corrupt_count"], 1)
         manifest["source_id"] = hashlib.sha256(second_url.encode()).hexdigest()
@@ -597,6 +599,13 @@ class ContextStoreTests(unittest.TestCase):
         self.assertNotEqual(first["content_hash"], third["content_hash"])
         self.assertEqual(len(list(self.archive.glob("objects/sha256/*/*.txt"))), 2)
         self.assertEqual(self.store.get_capture(first["capture_id"]), first)
+        for pins in ({"expected_hash": "0" * 64}, {"expected_manifest_hash": "0" * 64}):
+            with self.subTest(pins=pins), self.assertRaises(KeyError):
+                self.store.get_capture(first["capture_id"], **pins)
+        publish_archive(self.archive, "records/deletions/" + first["capture_id"] + ".json",
+                        json.dumps({"schema_version": SCHEMA, "capture_id": first["capture_id"]}).encode())
+        self.assert_missing_capture(first["capture_id"])
+        self.assertEqual(self.store.get_capture(second["capture_id"]), second)
 
     def test_hash_tampering_and_missing_objects_never_reuse_saved_evidence(self):
         saved = self.seed_source()
@@ -606,6 +615,7 @@ class ContextStoreTests(unittest.TestCase):
         self.assert_missing_capture(saved["capture_id"])
         self.assertEqual(self.store.rebuild()["corrupt_count"], 1)
         obj.unlink()
+        self.assert_missing_capture(saved["capture_id"])
         self.assertEqual(self.store.rebuild()["missing_count"], 1)
 
     def test_manifest_traversal_and_schema_tampering_are_rejected(self):

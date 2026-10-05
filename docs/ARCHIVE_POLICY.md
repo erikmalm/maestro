@@ -1,6 +1,6 @@
 # Public-source archive policy
 
-This is the archive foundation extracted from draft PR #8. `backend/context_policy.py` contains pure source-policy validation (R8-03a) and capture-manifest validation/projection (R8-03d); `backend/storage.py` provides bounded file access/publication (R8-03b) and local ownership/inventory (R8-03c). Capture/index integration, saved lookup and chat/UI integration follow in separate review units.
+This is the archive foundation extracted from draft PR #8. `backend/context_policy.py` contains pure source-policy validation (R8-03a) and capture-manifest validation/projection (R8-03d); `backend/storage.py` provides bounded file access/publication (R8-03b) and local ownership/inventory (R8-03c). `backend/context_store.py` integrates configuration, capture/private indexing and pinned readback (R8-03e). API setup, acquisition, lookup, deletion and reconstruction follow in separate review units.
 
 New archive settings propose `all_public` with capture disabled, a 24-hour reuse window, 10 GiB and at most 200,000 files/directories. Legacy settings that omit the policy retain `approved_sources`; they require an approved HTTPS scope before enabling capture. Validation accepts byte caps up to 100 GiB and reuse windows from one to 168 hours.
 
@@ -18,7 +18,9 @@ The policy performs no network request, file publication or settings mutation. U
 
 `validate_capture_manifest` checks the supported exact schema, strict integer/boolean fields, eligible URL and canonical source identity, bounded UTF-8 title, UTC observation path, excerpt completeness and object path/hash/encoding/byte contract. It preserves the supplied metadata and URL/query identity. `capture_source` projects an already verified durable capture for callers; it performs no storage action.
 
-Callers must still check deletion, read bounded object bytes, verify their size/hash/UTF-8 and bind index/requested capture IDs and metadata/content pins. Known-credential screening remains required at export and inference boundaries. No filesystem, private index or chat integration is enabled by these pure functions.
+`ContextStore.get_capture` combines those checks with bounded object reads, size/hash/UTF-8 verification, current eligibility and portable deletion markers, binding the index and requested capture IDs and metadata/content pins. Known-credential screening remains required at export and inference boundaries. The pure policy functions perform no filesystem, private-index or chat action.
+
+Cold construction/state/status reads create no storage. Explicit opt-in capture takes writer ownership, enforces byte/item/free-space limits and publishes the immutable object, manifest and private index in that order. Repeated observations share objects while retaining distinct capture IDs/dates; private query mappings never enter the archive. Receipts count confirmed new bytes and successfully indexed captures independently of full inventory, reporting skipped, refused or partially failed evidence truthfully. Main's capture core is callable storage only; it enables no API/chat capture, retrieval, deletion or rebuild. Reconstruction will add its mutation-invalidation hooks with R8-04d.
 
 ## File access and publication
 

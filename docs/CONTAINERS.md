@@ -67,8 +67,6 @@ Adding, changing or removing `-ContextArchivePath` changes the launch fingerprin
 
 OneDrive synchronizes the public source objects and metadata, not the live database. Keep required files on this device for offline use. Unavailable files, incomplete synchronization or access failures must be reported as unavailable evidence. Do not recursively change ownership on the OneDrive tree. See [search context storage](SEARCH_CONTEXT_STORAGE.md) for source eligibility, date provenance and reuse behavior, and the [Podman volume reference](https://docs.podman.io/en/latest/markdown/podman-run.1.html#volume-v-source-volume-host-dir-container-dir-options) for mount semantics.
 
-An isolated synthetic fixture under the supplied OneDrive root passed write, flush, rename and read checks at UID 1000 on 2026-10-04, using the reviewed image, disabled networking and these mount options. The fixture and temporary container were removed. This verifies local filesystem access; offline hydration and cloud synchronization behavior need separate checks.
-
 ## Reach host Ollama
 
 The default container endpoint is `http://host.containers.internal:11434`. Check it before configuring chat:

@@ -14,6 +14,7 @@ import httpx
 from fastapi.testclient import TestClient
 
 from backend import app as backend, credentials
+from backend.context_store import ContextStore, DEFAULT as ARCHIVE_DEFAULT
 from backend.provider import DEFAULT as PROVIDER_DEFAULT, TITLE_INSTRUCTIONS
 from backend.web_search import DEFAULT, ENDPOINT, WebSearch, fit_sources, safe_url
 
@@ -567,8 +568,6 @@ class WebSearchTests(unittest.TestCase):
                 self.assertNotIn(encoded_key.encode(), backend.DATABASE.read_bytes())
 
     def test_rotated_request_credential_is_excluded_from_layered_source_urls_before_archiving(self):
-        from backend.context_store import ContextStore, DEFAULT as ARCHIVE_DEFAULT
-
         self.enable()
         original_key = self.key
         replacement_key = "synthetic-replacement-search-key"
@@ -606,8 +605,6 @@ class WebSearchTests(unittest.TestCase):
                 self.assertNotIn(leaked.encode(), exported)
 
     def test_encoded_credentials_in_titles_and_bodies_are_excluded_before_chat_and_archive(self):
-        from backend.context_store import ContextStore, DEFAULT as ARCHIVE_DEFAULT
-
         self.enable()
         encoded = "".join(f"%{ord(char):02X}" for char in self.key)
         entities = "".join(f"&#x{ord(char):x};" for char in self.key)
