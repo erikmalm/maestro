@@ -26,7 +26,7 @@ from backend import credentials
 from backend.capabilities import CAPABILITIES
 from backend.web_search import WebSearch, ENDPOINT as SEARCH_ENDPOINT
 from backend.context_store import ContextStore, validate_search
-from backend.context_policy import HASH, decoded_url_variants
+from backend.context_policy import HASH, contains_source_secret
 from backend.storage import workspace_owner
 from backend.memory import MAX_CONTENT, MemoryStore
 from backend.work_config import WorkConfig, config_value
@@ -308,27 +308,29 @@ async def lifespan(application):
         store = context_store()
         application.state.archive_ownership = archive_ownership
         application.state.archive_owner = False
-        if store.status()["config"]["enabled"]:
-            try:
-                archive_ownership.enter_context(store.archive_owner())
-                store.initialize()
-                application.state.archive_owner = True
-            except (ValueError, OSError):
-                archive_ownership.close()
-                store.record_error("Saved sources are unavailable or their archive is owned by another instance. Check the archive setup before saving sources.")
-        provider().recover()
-        WebSearch(DATABASE, TIMEZONE).recover()
-        MemoryStore(DATABASE, TIMEZONE).initialize()
-        reflection = ReflectionStore(DATABASE, TIMEZONE)
-        reflection.initialize()
-        reflection.recover()
-        stop = asyncio.Event()
-        worker = asyncio.create_task(ReflectionWorker(reflection, provider(), safe_private_content).run(stop))
         try:
-            yield
+            if store.status()["config"]["enabled"]:
+                try:
+                    archive_ownership.enter_context(store.archive_owner())
+                    store.initialize()
+                    application.state.archive_owner = True
+                except (ValueError, OSError):
+                    archive_ownership.close()
+                    store.record_error()
+            provider().recover()
+            WebSearch(DATABASE, TIMEZONE).recover()
+            MemoryStore(DATABASE, TIMEZONE).initialize()
+            reflection = ReflectionStore(DATABASE, TIMEZONE)
+            reflection.initialize()
+            reflection.recover()
+            stop = asyncio.Event()
+            worker = asyncio.create_task(ReflectionWorker(reflection, provider(), safe_private_content).run(stop))
+            try:
+                yield
+            finally:
+                stop.set()
+                await worker
         finally:
-            stop.set()
-            await worker
             application.state.archive_ownership = None
             application.state.archive_owner = False
 
@@ -426,7 +428,7 @@ def safe_private_content(content):
             key = credentials.read(endpoint)[0]
         except ValueError:
             continue
-        if key and key in content:
+        if contains_source_secret(content, (key,)):
             raise ValueError("Remove credentials before saving.")
     return content
 
@@ -558,8 +560,8 @@ def get_context_archive():
 def configure_context_archive(entry: ContextArchiveConfig):
     # Factory access must remain available to reflection validators holding SQLite.
     with conflict_errors(), _archive_config_lock:
-        safe_private_content("\n".join(variant for scope in entry.public_sources
-                                       for variant in decoded_url_variants(scope)))
+        for scope in entry.public_sources:
+            safe_private_content(scope)
         store = context_store()
         ownership = getattr(app.state, "archive_ownership", None)
         acquired = False

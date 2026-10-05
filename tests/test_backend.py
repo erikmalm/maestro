@@ -1,6 +1,7 @@
 """Private storage, preview migration and local access checks with synthetic data."""
 
 from pathlib import Path
+from datetime import datetime, timezone
 from contextlib import closing
 from concurrent.futures import ThreadPoolExecutor
 import hashlib
@@ -8,6 +9,7 @@ import json
 import os
 import sqlite3
 import tempfile
+import threading
 import unittest
 from unittest.mock import patch
 
@@ -23,6 +25,8 @@ class WorkspaceTests(unittest.TestCase):
         self.directory = Path(self.enterContext(tempfile.TemporaryDirectory(prefix="maestro-test-"))).resolve()
         self.assertEqual(self.directory.parent, Path(tempfile.gettempdir()).resolve())
         self.enterContext(patch.object(backend, "DATABASE", self.directory / "workspace.sqlite3"))
+        archive = Path(self.enterContext(tempfile.TemporaryDirectory(prefix="maestro-api-archive-"))) / "public"
+        self.enterContext(patch.dict("os.environ", {"MAESTRO_CONTEXT_ARCHIVE_DIR": str(archive)}))
         self.enterContext(patch.object(backend.credentials, "read", return_value=(None, "missing")))
         self.client = TestClient(backend.app)
         self.addCleanup(self.client.close)
@@ -400,6 +404,173 @@ class WorkspaceTests(unittest.TestCase):
         for path in ("/api/tasks/example/preview", "/api/reflection/run", "/api/reflection/feedback"):
             response = self.client.post(path, headers=self.headers, json={})
             self.assertIn(response.status_code, (404, 405))
+
+    def save(self, config):
+        return self.client.put("/api/context", headers=self.headers, json=config)
+
+    def test_new_status_proposes_disabled_broad_capture_and_visible_capacity(self):
+        status = self.client.get("/api/context").json()
+        self.assertEqual(status["config"]["capture_policy"], "all_public")
+        self.assertFalse(status["config"]["enabled"])
+        self.assertEqual(status["config"]["max_bytes"], 10 * 1024 ** 3)
+        self.assertEqual(status["config"]["max_items"], 200000)
+        self.assertIsNone(status["last_capture"])
+        with self.client:
+            self.assertFalse(backend.context_store().archive.exists())
+
+    def test_legacy_client_body_does_not_silently_expand_source_permission(self):
+        config = self.client.get("/api/context").json()["config"]
+        config.pop("capture_policy")
+        config.update(enabled=True, public_sources=["https://docs.example.org/public/"])
+        with self.client:
+            with patch.object(backend.ContextStore, "configure", side_effect=ValueError("Synthetic save failure")):
+                self.assertEqual(self.save(config).status_code, 409)
+            self.assertFalse((backend.context_store().archive / "writer-owner.tmp").exists())
+            result = self.save(config)
+        self.assertEqual(result.status_code, 200, result.text)
+        self.assertEqual(result.json()["config"]["capture_policy"], "approved_sources")
+
+    def test_broad_policy_can_be_enabled_without_a_site_allowlist(self):
+        config = self.client.get("/api/context").json()["config"]
+        result = self.save({**config, "enabled": True, "public_sources": []})
+        self.assertEqual(result.status_code, 200, result.text)
+        self.assertTrue(result.json()["available"])
+        self.assertEqual(result.json()["config"]["capture_policy"], "all_public")
+        claim = backend.context_store().archive / "writer-owner.tmp"
+        with patch.object(backend.ContextStore, "archive_owner", side_effect=ValueError("Synthetic private failure")), self.client:
+            self.assertFalse(self.client.get("/api/context").json()["available"])
+            self.assertEqual(self.client.get("/api/workspace").status_code, 200)
+        self.assertFalse(claim.exists())
+        self.assertNotIn("Synthetic private failure", self.client.get("/api/context").json()["last_error"])
+        with patch.object(backend.Provider, "recover", side_effect=ValueError("Synthetic startup failure")), self.assertRaises(ValueError):
+            with self.client:
+                self.fail("A failed provider recovery cannot finish startup.")
+        self.assertIsNone(backend.app.state.archive_ownership)
+        self.assertFalse(backend.app.state.archive_owner)
+        self.assertFalse(claim.exists())
+        with self.client:
+            self.assertTrue(claim.is_file())
+            self.assertEqual(self.save({**config, "enabled": False}).status_code, 200)
+            self.assertFalse(claim.exists())
+        self.assertFalse(claim.exists())
+
+    def test_capture_measurements_are_owned_by_the_server(self):
+        config = self.client.get("/api/context").json()["config"]
+        for changed in ({**config, "capture_policy": "all_private"},
+                        {**config, "last_capture": {"sources_saved": 99}},
+                        {**config, "max_bytes": 100 * 1024 ** 3 + 1}):
+            response = self.save(changed)
+            self.assertEqual(response.status_code, 422, response.text)
+            self.assertEqual(self.client.get("/api/context").json()["config"], config)
+
+    def test_connection_test_results_are_captured_under_broad_policy(self):
+        config = self.client.get("/api/context").json()["config"]
+        self.assertEqual(self.save({**config, "enabled": True}).status_code, 200)
+        result = {"query": "Ollama official web search documentation", "at": datetime.now(timezone.utc).isoformat(),
+                  "sources": [{"title": "Public synthetic search guide", "url": "https://new.example.org/guide", "content": "Public synthetic tool documentation."}]}
+        with patch.object(WebSearch, "search", return_value=result) as search:
+            response = self.client.post("/api/web-search/test", headers=self.headers, json={})
+        self.assertEqual(response.status_code, 200, response.text)
+        search.assert_called_once_with(result["query"], test=True)
+        status = self.client.get("/api/context").json()
+        self.assertEqual(status["indexed_count"], 1)
+        self.assertEqual(status["last_capture"]["sources_saved"], 1)
+        self.assertGreater(status["last_capture"]["new_bytes"], 0)
+
+    def test_connection_test_preserves_search_excerpt_truncation_metadata(self):
+        config = self.client.get("/api/context").json()["config"]
+        self.assertEqual(self.save({**config, "enabled": True}).status_code, 200)
+        result = {"query": "Ollama official web search documentation", "at": datetime.now(timezone.utc).isoformat(),
+                  "sources": [{"title": "Public synthetic guide", "url": "https://new.example.org/guide", "content": "A bounded excerpt."}],
+                  "completeness": [{"maestro_truncated": True}]}
+        with patch.object(WebSearch, "search", return_value=result):
+            response = self.client.post("/api/web-search/test", headers=self.headers, json={})
+        self.assertEqual(response.status_code, 200, response.text)
+        captures = self.client.post("/api/context/search", headers=self.headers,
+                                    json={"query": "bounded excerpt"}).json()
+        source = self.client.get("/api/context/sources/" + captures["sources"][0]["capture_id"]).json()
+        self.assertTrue(source["completeness"]["maestro_truncated"])
+        self.assertFalse(source["completeness"]["full_page"])
+
+    def test_connection_test_preserves_legacy_restricted_capture_behavior(self):
+        config = self.client.get("/api/context").json()["config"]
+        configured = {**config, "enabled": True, "capture_policy": "approved_sources", "public_sources": ["https://docs.example.org/"]}
+        self.assertEqual(self.save(configured).status_code, 200)
+        result = {"query": "Ollama official web search documentation", "at": datetime.now(timezone.utc).isoformat(),
+                  "sources": [{"title": "Synthetic documentation", "url": "https://docs.example.org/guide", "content": "Public synthetic evidence."}]}
+        with patch.object(WebSearch, "search", return_value=result):
+            response = self.client.post("/api/web-search/test", headers=self.headers, json={})
+        self.assertEqual(response.status_code, 200, response.text)
+        status = self.client.get("/api/context").json()
+        self.assertEqual(status["indexed_count"], 0)
+        self.assertIsNone(status["last_capture"])
+
+    def test_archive_configure_does_not_block_private_validation_holding_sqlite(self):
+        # Reflection validates drafts while holding the private write transaction.
+        # An archive save waiting for that transaction must leave provider lookup free.
+        store = backend.context_store()
+        config = backend.ContextArchiveConfig(**{**store.status()["config"], "enabled": True})
+        self.assertEqual(self.save(config.model_dump()).status_code, 200)
+        private_locked, configuring = threading.Event(), threading.Event()
+        errors = []
+        original_configure, original_connect = store.configure, sqlite3.connect
+
+        def configure_after_signal(settings):
+            configuring.set()
+            return original_configure(settings)
+
+        def short_connection(*args, **kwargs):
+            kwargs["timeout"] = 1
+            return original_connect(*args, **kwargs)
+
+        def validate_private():
+            try:
+                with backend.workspace_transaction():
+                    private_locked.set()
+                    if not configuring.wait(3):
+                        raise AssertionError("Archive configuration did not start.")
+                    backend.context_store()
+                    backend.safe_private_content("Synthetic reflection draft without credentials.")
+            except Exception as error:
+                errors.append(error)
+
+        def configure_archive():
+            try:
+                if not private_locked.wait(3):
+                    raise AssertionError("Private transaction did not start.")
+                backend.configure_context_archive(config)
+            except Exception as error:
+                errors.append(error)
+
+        workers = [threading.Thread(target=validate_private, daemon=True),
+                   threading.Thread(target=configure_archive, daemon=True)]
+        with patch.object(store, "configure", side_effect=configure_after_signal), \
+                patch("sqlite3.connect", side_effect=short_connection):
+            for worker in workers:
+                worker.start()
+            for worker in workers:
+                worker.join(5)
+        self.assertFalse(any(worker.is_alive() for worker in workers), "Archive save and private validation deadlocked.")
+        self.assertEqual(errors, [], repr(errors))
+
+    def test_public_source_scope_cannot_store_a_known_search_credential(self):
+        config = self.client.get("/api/context").json()["config"]
+        key = "synthetic-public-search-key"
+        self.enterContext(patch.object(backend.credentials, "read", return_value=(key, "synthetic")))
+        dispatch = self.enterContext(patch("backend.provider.network"))
+        encoded = "".join("%" + format(ord(character), "02X") for character in key)
+        entities = "".join(f"&#x{ord(character):x};" for character in key)
+        escaped_entities = entities.replace("&", "%26").replace("#", "%23").replace(";", "%3B")
+        for value in (key, encoded, encoded.replace("%", "%25"), encoded.replace("%", "%2525"), escaped_entities):
+            with self.subTest(encoded=value != key):
+                blocked = self.client.put("/api/context", headers=self.headers,
+                    json={**config, "public_sources": ["https://docs.ollama.com/public?token=" + value]})
+                self.assertEqual(blocked.status_code, 409, blocked.text)
+                self.assertNotIn(key, blocked.text)
+                self.assertNotIn(encoded, blocked.text)
+                self.assertNotIn(value, blocked.text)
+                self.assertEqual(self.client.get("/api/context").json()["config"], config)
+        dispatch.assert_not_called()
 
 
 if __name__ == "__main__":

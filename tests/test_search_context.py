@@ -6,7 +6,6 @@ import hashlib
 import json
 import sqlite3
 import tempfile
-import threading
 import unittest
 from unittest.mock import patch
 
@@ -174,21 +173,6 @@ class SearchContextTests(unittest.TestCase):
                                         "expected_manifest_hash": original["manifest_hash"]})
         self.assertEqual(viewed.status_code, 200)
         self.assertEqual(viewed.json()["content"], self.snippet)
-
-    def test_public_source_scope_cannot_store_a_known_search_credential(self):
-        config = self.client.get("/api/context").json()["config"]
-        key = self.keys[ENDPOINT]
-        encoded = "".join("%" + format(ord(character), "02X") for character in key)
-        for value in (key, encoded, encoded.replace("%", "%25"), encoded.replace("%", "%2525")):
-            with self.subTest(encoded=value != key):
-                blocked = self.client.put("/api/context", headers=self.headers,
-                    json={**config, "public_sources": ["https://docs.ollama.com/public?token=" + value]})
-                self.assertEqual(blocked.status_code, 409, blocked.text)
-                self.assertNotIn(key, blocked.text)
-                self.assertNotIn(encoded, blocked.text)
-                self.assertNotIn(value, blocked.text)
-                self.assertEqual(self.client.get("/api/context").json()["config"], config)
-        self.assertEqual(self.requests, [])
 
     def test_repeat_uses_original_source_without_network_or_search_allowance(self):
         source = self.seed_answer()
@@ -907,52 +891,6 @@ class SearchContextTests(unittest.TestCase):
         self.assertEqual(self.client.post("/api/context/rebuild", json={"limit": 1000}).status_code, 403)
         self.assertEqual(self.client.post("/api/chat", headers=self.headers,
                          json={"text": "Synthetic request", "context_mode": "unrestricted"}).status_code, 422)
-
-    def test_archive_configure_does_not_block_private_validation_holding_sqlite(self):
-        # Reflection validates drafts while holding the private write transaction.
-        # An archive save waiting for that transaction must leave provider lookup free.
-        store = backend.context_store()
-        config = backend.ContextArchiveConfig(**store.status()["config"])
-        private_locked, configuring = threading.Event(), threading.Event()
-        errors = []
-        original_configure, original_connect = store.configure, sqlite3.connect
-
-        def configure_after_signal(settings):
-            configuring.set()
-            return original_configure(settings)
-
-        def short_connection(*args, **kwargs):
-            kwargs["timeout"] = 1
-            return original_connect(*args, **kwargs)
-
-        def validate_private():
-            try:
-                with backend.workspace_transaction():
-                    private_locked.set()
-                    if not configuring.wait(3):
-                        raise AssertionError("Archive configuration did not start.")
-                    backend.safe_private_content("Synthetic reflection draft without credentials.")
-            except Exception as error:
-                errors.append(error)
-
-        def configure_archive():
-            try:
-                if not private_locked.wait(3):
-                    raise AssertionError("Private transaction did not start.")
-                backend.configure_context_archive(config)
-            except Exception as error:
-                errors.append(error)
-
-        workers = [threading.Thread(target=validate_private, daemon=True),
-                   threading.Thread(target=configure_archive, daemon=True)]
-        with patch.object(store, "configure", side_effect=configure_after_signal), \
-                patch("sqlite3.connect", side_effect=short_connection):
-            for worker in workers:
-                worker.start()
-            for worker in workers:
-                worker.join(5)
-        self.assertFalse(any(worker.is_alive() for worker in workers), "Archive save and private validation deadlocked.")
-        self.assertEqual(errors, [], repr(errors))
 
     def test_lifespan_owner_allows_threaded_chat_and_enable_disable(self):
         claim = self.archive / "writer-owner.tmp"

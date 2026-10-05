@@ -59,6 +59,10 @@ function sourceViewer(page: Page) {
   return page.getByRole("dialog", { name: "Saved source", exact: true });
 }
 
+function savedSourceText(viewer: ReturnType<typeof sourceViewer>) {
+  return viewer.getByLabel("Saved source text");
+}
+
 function savedSourceFinder(page: Page) {
   return page.getByRole("region", { name: "Find saved sources", exact: true });
 }
@@ -1701,9 +1705,7 @@ for (const read of ["loaded", "pending"] as const) {
     const open = page.getByRole("button", { name: "View saved source 1" });
     const viewer = sourceViewer(page);
     await open.click();
-    await expect(viewer.getByLabel("Saved source text")).toHaveText(
-      source.content,
-    );
+    await expect(savedSourceText(viewer)).toHaveText(source.content);
     api.hold.add(`DELETE ${path}`);
     await viewer
       .getByRole("button", { name: "Remove saved source", exact: true })
@@ -1715,20 +1717,17 @@ for (const read of ["loaded", "pending"] as const) {
     await open.click();
     if (read === "pending")
       await expect.poll(() => api.held.has(`GET ${path}`)).toBe(true);
-    else
-      await expect(viewer.getByLabel("Saved source text")).toHaveText(
-        source.content,
-      );
+    else await expect(savedSourceText(viewer)).toHaveText(source.content);
     api.missing.add(source.capture_id);
     state.context_archive!.indexed_count -= 1;
     await api.held
       .get(`DELETE ${path}`)!
       .fulfill({ json: state.context_archive });
     await expect(viewer.getByText(/Saved source removed/)).toBeVisible();
-    await expect(viewer.getByLabel("Saved source text")).toHaveCount(0);
+    await expect(savedSourceText(viewer)).toHaveCount(0);
     if (read === "pending") {
       await api.held.get(`GET ${path}`)!.fulfill({ json: source });
-      await expect(viewer.getByLabel("Saved source text")).toHaveCount(0);
+      await expect(savedSourceText(viewer)).toHaveCount(0);
     }
     await viewer.getByRole("button", { name: "Close dialog" }).click();
     await open.click();
@@ -1777,9 +1776,7 @@ for (const refresh of ["failed", "stale"] as const) {
     await expect.poll(() => refreshes).toBe(1);
     await card.getByRole("button", { name: "View saved result 1" }).click();
     const viewer = sourceViewer(page);
-    await expect(viewer.getByLabel("Saved source text")).toHaveText(
-      source.content,
-    );
+    await expect(savedSourceText(viewer)).toHaveText(source.content);
     const save = api.held.get("PUT /api/context")!;
     api.state.context_archive!.config = save.request().postDataJSON();
     api.missing.add(source.capture_id);
@@ -1788,7 +1785,7 @@ for (const refresh of ["failed", "stale"] as const) {
       "This saved source is unavailable.",
     );
     if (workspaceRead) await workspaceRead.fulfill({ json: olderWorkspace });
-    await expect(viewer.getByLabel("Saved source text")).toHaveCount(0);
+    await expect(savedSourceText(viewer)).toHaveCount(0);
     await viewer.getByRole("button", { name: "Close dialog" }).click();
     await expect(
       card.getByLabel("Save and reuse public search results"),
@@ -1893,9 +1890,7 @@ test("archive actions serialize older status reads and continue after a rejected
   await expect.poll(() => api.held.has("GET /api/context")).toBe(true);
   await card.getByRole("button", { name: "View saved result 1" }).click();
   const viewer = sourceViewer(page);
-  await expect(viewer.getByLabel("Saved source text")).toHaveText(
-    source.content,
-  );
+  await expect(savedSourceText(viewer)).toHaveText(source.content);
   const path = `/api/context/sources/${source.capture_id}`;
   api.hold.add(`DELETE ${path}`);
   await viewer
@@ -2178,9 +2173,9 @@ for (const mode of ["lookup", "combined", "replayed"] as const) {
         name: `View saved source ${mode === "combined" ? 2 : 1}`,
       })
       .click();
-    await expect(
-      page.getByRole("dialog").getByLabel("Saved source text"),
-    ).toHaveText(source.content);
+    await expect(savedSourceText(page.getByRole("dialog"))).toHaveText(
+      source.content,
+    );
     const request = api.requests.find(
       (entry) =>
         entry.path === "/api/context/sources/capture-one" &&
@@ -2215,7 +2210,7 @@ for (const digest of ["content_hash", "manifest_hash"] as const) {
     await expect(viewer.getByRole("alert")).toHaveText(
       "This saved source is unavailable.",
     );
-    await expect(viewer.getByLabel("Saved source text")).toHaveCount(0);
+    await expect(savedSourceText(viewer)).toHaveCount(0);
     expect(
       new URL(api.requests.at(-1)!.url).searchParams.get(
         `expected_${digest === "content_hash" ? "hash" : digest}`,
@@ -2276,9 +2271,7 @@ test("finder sends keyword and retrieval filters locally with bounded results an
   ).toBe(true);
   await results.getByRole("button", { name: "View saved result 1" }).click();
   const viewer = sourceViewer(page);
-  await expect(viewer.getByLabel("Saved source text")).toHaveText(
-    source.content,
-  );
+  await expect(savedSourceText(viewer)).toHaveText(source.content);
   await expect(
     viewer.getByText(`Published ${publication}`, { exact: false }),
   ).toBeVisible();
@@ -2419,95 +2412,85 @@ test("finder remains readable without writer availability and clears results whe
   expect(api.requestsFor("/api/context/search")).toHaveLength(1);
 });
 
-test("finder invalidates changed saved eligibility while preserving drafts and unchanged refresh results", async ({
-  page,
-}) => {
-  const { api, card, finder } = await archiveSettings(page);
-  const query = finder.getByLabel("Keywords", { exact: true });
-  await query.fill("saved eligibility");
-  await finder.getByLabel("Domain (optional)").fill("docs.example.org");
-  await query.press("Enter");
-  await expect(
-    finder.getByRole("heading", { name: source.title }),
-  ).toBeVisible();
-  await card.getByRole("button", { name: "Refresh archive status" }).click();
-  await expect(card.getByText("Archive status refreshed.")).toBeVisible();
-  await expect(
-    finder.getByRole("heading", { name: source.title }),
-  ).toBeVisible();
-  api.hold.add("POST /api/context/search");
-  await query.press("Enter");
-  await expect.poll(() => api.held.has("POST /api/context/search")).toBe(true);
-  await card.getByLabel("Reuse saved searches for (hours)").fill("1");
-  await card.getByRole("button", { name: "Save source settings" }).click();
-  await expect(card.getByText("Saved source settings updated.")).toBeVisible();
-  await api.held
-    .get("POST /api/context/search")!
-    .fulfill({ json: savedResult("saved eligibility") });
-  await expect(
-    finder.getByRole("region", { name: "Saved source results" }),
-  ).toHaveCount(0);
-  await expect(query).toHaveValue("saved eligibility");
-  await expect(finder.getByLabel("Domain (optional)")).toHaveValue(
-    "docs.example.org",
-  );
-  await query.press("Enter");
-  await expect(
-    finder.getByRole("heading", { name: source.title }),
-  ).toBeVisible();
-  await card
-    .getByLabel("Approved public source URLs (one per line)")
-    .fill("https://other.example.org/");
-  await card.getByRole("button", { name: "Save source settings" }).click();
-  await expect(card.getByText("Saved source settings updated.")).toBeVisible();
-  await expect(
-    finder.getByRole("region", { name: "Saved source results" }),
-  ).toHaveCount(0);
-  await expect(query).toHaveValue("saved eligibility");
-  await expect(finder.getByLabel("Domain (optional)")).toHaveValue(
-    "docs.example.org",
-  );
-});
-
-test("finder discards delayed evidence when the persisted saving policy changes", async ({
-  page,
-}) => {
-  const state = workspace();
-  Object.assign(state.context_archive!.config, {
-    capture_policy: "all_public",
-    public_sources: [],
+for (const change of ["reuse", "policy"] as const) {
+  const title =
+    change === "reuse"
+      ? "finder invalidates changed saved eligibility while preserving drafts and unchanged refresh results"
+      : "finder discards delayed evidence when the persisted saving policy changes";
+  test(title, async ({ page }) => {
+    const state = workspace();
+    if (change === "policy")
+      Object.assign(state.context_archive!.config, {
+        capture_policy: "all_public",
+        public_sources: [],
+      });
+    const { api, card, finder } = await archiveSettings(page, state);
+    const text =
+      change === "reuse" ? "saved eligibility" : "retain these keywords";
+    const query = finder.getByLabel("Keywords", { exact: true });
+    await query.fill(text);
+    if (change === "reuse")
+      await finder.getByLabel("Domain (optional)").fill("docs.example.org");
+    await query.press("Enter");
+    await expect(
+      finder.getByRole("heading", { name: source.title }),
+    ).toBeVisible();
+    await card.getByRole("button", { name: "Refresh archive status" }).click();
+    await expect(card.getByText("Archive status refreshed.")).toBeVisible();
+    await expect(
+      finder.getByRole("heading", { name: source.title }),
+    ).toBeVisible();
+    api.hold.add("POST /api/context/search");
+    await query.press("Enter");
+    await expect
+      .poll(() => api.held.has("POST /api/context/search"))
+      .toBe(true);
+    if (change === "reuse")
+      await card.getByLabel("Reuse saved searches for (hours)").fill("1");
+    else
+      await card
+        .getByRole("combobox", { name: "Source saving policy" })
+        .selectOption("approved_sources");
+    await card.getByRole("button", { name: "Save source settings" }).click();
+    await expect(
+      card.getByText("Saved source settings updated."),
+    ).toBeVisible();
+    await api.held
+      .get("POST /api/context/search")!
+      .fulfill({ json: savedResult(text) });
+    await expect(
+      finder.getByRole("region", { name: "Saved source results" }),
+    ).toHaveCount(0);
+    await expect(query).toHaveValue(text);
+    if (change === "policy")
+      expect(api.state.context_archive!.config.capture_policy).toBe(
+        "approved_sources",
+      );
+    else {
+      await expect(finder.getByLabel("Domain (optional)")).toHaveValue(
+        "docs.example.org",
+      );
+      await query.press("Enter");
+      await expect(
+        finder.getByRole("heading", { name: source.title }),
+      ).toBeVisible();
+      await card
+        .getByLabel("Approved public source URLs (one per line)")
+        .fill("https://other.example.org/");
+      await card.getByRole("button", { name: "Save source settings" }).click();
+      await expect(
+        card.getByText("Saved source settings updated."),
+      ).toBeVisible();
+      await expect(
+        finder.getByRole("region", { name: "Saved source results" }),
+      ).toHaveCount(0);
+      await expect(query).toHaveValue(text);
+      await expect(finder.getByLabel("Domain (optional)")).toHaveValue(
+        "docs.example.org",
+      );
+    }
   });
-  const { api, card, finder } = await archiveSettings(page, state);
-  const keywords = finder.getByLabel("Keywords", { exact: true });
-  await keywords.fill("retain these keywords");
-  await keywords.press("Enter");
-  await expect(
-    finder.getByRole("heading", { name: source.title }),
-  ).toBeVisible();
-  await card.getByRole("button", { name: "Refresh archive status" }).click();
-  await expect(card.getByText("Archive status refreshed.")).toBeVisible();
-  await expect(
-    finder.getByRole("heading", { name: source.title }),
-  ).toBeVisible();
-  api.hold.add("POST /api/context/search");
-  await keywords.press("Enter");
-  await expect.poll(() => api.held.has("POST /api/context/search")).toBe(true);
-  await card
-    .getByRole("combobox", { name: "Source saving policy" })
-    .selectOption("approved_sources");
-  await card.getByRole("button", { name: "Save source settings" }).click();
-  await expect(card.getByText("Saved source settings updated.")).toBeVisible();
-  await api.held
-    .get("POST /api/context/search")!
-    .fulfill({ json: savedResult("retain these keywords") });
-  await expect(
-    finder.getByRole("region", { name: "Saved source results" }),
-  ).toHaveCount(0);
-  await expect(keywords).toHaveValue("retain these keywords");
-  expect(api.state.context_archive!.config.capture_policy).toBe(
-    "approved_sources",
-  );
-});
+}
 
 test("finder ignores out-of-order results after the user changes search drafts", async ({
   page,
@@ -2606,9 +2589,7 @@ test("finder removes deleted results and cannot restore a known deleted capture"
   await query.press("Enter");
   await finder.getByRole("button", { name: "View saved result 1" }).click();
   const viewer = sourceViewer(page);
-  await expect(viewer.getByLabel("Saved source text")).toHaveText(
-    source.content,
-  );
+  await expect(savedSourceText(viewer)).toHaveText(source.content);
   await viewer
     .getByRole("button", { name: "Remove saved source", exact: true })
     .click();
@@ -2671,9 +2652,7 @@ test("finder result excerpts remain bounded plaintext and keyboard usable on a n
   const open = results.getByRole("button", { name: "View saved result 1" });
   await open.focus();
   await open.press("Enter");
-  await expect(
-    page.getByRole("dialog").getByLabel("Saved source text"),
-  ).toBeVisible();
+  await expect(savedSourceText(page.getByRole("dialog"))).toBeVisible();
   await page.getByRole("dialog").press("Escape");
   await expect(page.getByRole("dialog")).toHaveCount(0);
   await expect(open).toBeFocused();
@@ -2694,8 +2673,6 @@ test("source mode and the text snapshot viewer fit a narrow screen", async ({
   await expectFitsViewport(page);
   await page.getByRole("button", { name: "Close search options" }).click();
   await page.getByRole("button", { name: "View saved source 1" }).click();
-  await expect(
-    page.getByRole("dialog").getByLabel("Saved source text"),
-  ).toBeVisible();
+  await expect(savedSourceText(page.getByRole("dialog"))).toBeVisible();
   await expectFitsViewport(page);
 });
