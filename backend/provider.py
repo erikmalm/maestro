@@ -1066,8 +1066,7 @@ class Provider:
                 " the excerpt itself must explicitly support that day; do not relabel an undated or older forecast as current."
                 " If no excerpt supports the requested date, say that the returned sources could not verify it;"
                 " do not provide unsupported forecast temperatures or conditions. State the calendar date and the"
-                " location actually supported by the sources, and identify any broader city coverage or disagreement."
-                + (" The requested calendar dates are " + ", ".join(search_dates) + "." if search_dates else ""))
+                " location actually supported by the sources, and identify any broader city coverage or disagreement.")
         final_messages[0] = {**final_messages[0], "content": final_messages[0]["content"] + grounding}
         base_bound = len(json.dumps(final_messages, ensure_ascii=False).encode("utf-8")) + 2048
         source_budget = min(4096, config["ollama_context_tokens"] - base_bound - remaining,

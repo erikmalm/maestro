@@ -40,13 +40,16 @@ async def search_response(key, query, max_results):
 
 
 def fit_sources(sources, byte_limit):
+    def encoded_size(items):
+        return len(json.dumps(json.dumps(items, ensure_ascii=False), ensure_ascii=False).encode("utf-8")) - 2
+
     fitted = []
     for source in sources:
         item = {"source": len(fitted) + 1, **source}
-        overhead = len(json.dumps([*fitted, {**item, "content": ""}], ensure_ascii=False).encode("utf-8"))
-        allowance = max(0, byte_limit - overhead - 16)
+        overhead = encoded_size([*fitted, {**item, "content": ""}])
+        allowance = max(0, byte_limit - overhead)
         item["content"] = item["content"].encode("utf-8")[:allowance].decode("utf-8", errors="ignore")
-        while item["content"] and len(json.dumps([*fitted, item], ensure_ascii=False).encode("utf-8")) > byte_limit:
+        while item["content"] and encoded_size([*fitted, item]) > byte_limit:
             item["content"] = item["content"][:len(item["content"]) // 2]
         if item["content"]:
             fitted.append(item)

@@ -162,6 +162,12 @@ class SearchContextTests(unittest.TestCase):
         self.assertEqual(evidence["sources"][0]["capture_id"], original["capture_id"])
         self.assertEqual(evidence["sources"][0]["retrieved_at"], original["retrieved_at"])
         self.assertEqual(self.hosted_requests(), [])
+        payloads = [json.loads(request.content) for request in self.requests if request.url.path == "/api/chat"]
+        self.assertEqual(len(payloads), 2)
+        self.assertNotIn("tools", payloads[-1])
+        self.assertEqual(evidence["forecast_date_check"]["supported_source_count"], 1)
+        self.assertLessEqual(len(json.dumps(payloads[-1]["messages"], ensure_ascii=False).encode("utf-8"))
+                             + 2048 + payloads[-1]["options"]["num_predict"], self.config["ollama_context_tokens"])
         viewed = self.client.get("/api/context/sources/" + original["capture_id"],
                                 params={"expected_hash": original["content_hash"],
                                         "expected_manifest_hash": original["manifest_hash"]})
