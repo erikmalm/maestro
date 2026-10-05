@@ -705,10 +705,22 @@ class ContextStoreTests(unittest.TestCase):
             healthy = self.capture(query="Healthy source", sources=[{
                 **self.source, "url": self.source["url"] + "/healthy", "content": "Healthy historical evidence."}])["sources"][0]
             saved = [first, healthy]
-            for number in range(100 - self.store._inventory()[1]):
+            for number in range(98 - self.store._inventory()[1]):
                 source = self.capture(query="Repeated capture " + str(number))["sources"][0]
                 self.assertEqual(source["archive_status"], "saved")
                 saved.append(source)
+            partial = self.capture(query="Partially saved query", sources=[self.source,
+                {**self.source, "content": "A new object that exceeds the remaining allowance."},
+                {**self.source, "url": self.source["url"] + "/smaller"}])
+            self.assertEqual([source["archive_status"] for source in partial["sources"]], ["saved", "not_saved", "saved"])
+            reused = self.store.lookup("Partially saved query", 3)
+            subset = [partial["sources"][0], partial["sources"][2]]
+            self.assertEqual(reused["sources"], [{**source, "stale": False} for source in subset])
+            self.assertEqual(reused["at"], partial["at"])
+            measured = self.store.status()
+            self.assertEqual(measured["last_error"], partial["archive_warning"])
+            self.assertEqual((measured["last_capture"]["sources_received"], measured["last_capture"]["sources_saved"]), (3, 2))
+            saved.extend(subset)
             self.assertEqual(self.store._inventory()[1], 100)
             self.store.delete_capture(first["capture_id"])
             measured = self.store._inventory()[:2]
@@ -800,6 +812,9 @@ class ContextStoreTests(unittest.TestCase):
                     usage.return_value.free = 0 if metric == "free" else 10 ** 10
                     result = self.capture(query="New query", sources=[{**self.source, "content": "A fresh version"}])
                 self.assertIn("archive_warning", result)
+                self.assertEqual(result["sources"][0]["archive_status"], "not_saved")
+                self.assertIsNone(self.store.lookup("New query", 3))
+                self.assertEqual(self.store.status()["last_capture"]["sources_saved"], 0)
                 self.assertEqual(self.store.get_capture(saved["capture_id"]), saved)
                 self.assertEqual(len(self.manifests()), 1)
 

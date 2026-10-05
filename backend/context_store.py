@@ -787,7 +787,8 @@ class ContextStore:
                     new_paths |= {parent for path in tuple(new_paths) for parent in path.parents if parent != self.archive and self.archive in parent.parents}
                     additions = sum(not path.exists() for path in new_paths)
                     if total + extra > config["max_bytes"] or items + additions > config["max_items"] or shutil.disk_usage(self.archive).free < extra + 65536:
-                        raise ValueError("The archive has reached its byte, item or free-space allowance.")
+                        result["archive_warning"] = "The archive has reached its byte, item or free-space allowance. Some source evidence was not saved."
+                        continue
                     if self._publish(obj["path"], raw):
                         measured["object_bytes"] += len(raw)
                         measured["new_bytes"] += len(raw)
@@ -805,7 +806,7 @@ class ContextStore:
                     if saved:
                         db.execute("INSERT INTO context_queries VALUES(?,?,?,?) ON CONFLICT(key) DO UPDATE SET query=excluded.query,at=excluded.at,captures=excluded.captures", (key, query, at, json.dumps(saved)))
                     total, items, _ = self._inventory(config["max_items"])
-                    state.update(archive_bytes=total, archive_items=items, last_error=None,
+                    state.update(archive_bytes=total, archive_items=items, last_error=result.get("archive_warning"),
                                  write_unavailable=False, last_capture=measured)
                     if saved:
                         state["last_indexed_at"] = self.now().isoformat()
