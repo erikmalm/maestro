@@ -329,10 +329,8 @@ export type ContextArchiveStatus = {
     new_bytes: number;
   } | null;
 };
-export type ContextCapture = {
+export type ContextCapture = CitationSource & {
   capture_id: string;
-  title: string;
-  url: string;
   content: string;
   content_hash: string;
   manifest_hash: string;
@@ -342,7 +340,6 @@ export type ContextCapture = {
   modified_at: string | null;
   completeness: { maestro_truncated: boolean; full_page: false };
   archive_status: "saved";
-  stale?: boolean;
 };
 export type ContextSearchInput = {
   query: string;

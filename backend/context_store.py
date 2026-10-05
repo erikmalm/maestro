@@ -318,11 +318,14 @@ class ContextStore:
                         parameters.append(filters[field])
                 eligibility = " AND ".join(clauses)
 
-                def canonical(value):
+                def check_time():
                     nonlocal work_exceeded
                     if time.monotonic() > deadline:
                         work_exceeded = True
                         raise ValueError("Saved-source search exceeded its time allowance.")
+
+                def canonical(value):
+                    check_time()
                     try:
                         return public_url(value, allow_query=True, allow_http=True)
                     except ValueError:
@@ -333,10 +336,7 @@ class ContextStore:
                     return urlsplit(normalized).hostname if normalized else None
 
                 def observation(value):
-                    nonlocal work_exceeded
-                    if time.monotonic() > deadline:
-                        work_exceeded = True
-                        raise ValueError("Saved-source search exceeded its time allowance.")
+                    check_time()
                     try:
                         return datetime.fromisoformat(timestamp(value)).isoformat(timespec="microseconds")
                     except ValueError:
@@ -379,9 +379,7 @@ class ContextStore:
                         [*parameters, *urls, SEARCH_CANDIDATES + 1]).fetchall()
                     found, seen = [], set()
                     for capture_id, title, url, content, at, digest in versions[:SEARCH_CANDIDATES]:
-                        if time.monotonic() > deadline:
-                            work_exceeded = True
-                            raise ValueError("Saved-source search exceeded its time allowance.")
+                        check_time()
                         canonical_url = public_url(url, allow_query=True, allow_http=True)
                         if canonical_url in seen:
                             continue
@@ -473,15 +471,13 @@ class ContextStore:
                     if total + extra > config["max_bytes"] or items + additions > config["max_items"] or shutil.disk_usage(self.archive).free < extra + 65536:
                         result["archive_warning"] = "The archive has reached its byte, item or free-space allowance. Some source evidence was not saved."
                         continue
-                    if publish_archive(self.archive, obj["path"], raw):
-                        measured["object_bytes"] += len(raw)
-                        measured["new_bytes"] += len(raw)
-                    if publish_archive(self.archive, relative, encoded):
-                        measured["manifest_bytes"] += len(encoded)
-                        measured["new_bytes"] += len(encoded)
+                    for field, path, data in (("object_bytes", obj["path"], raw), ("manifest_bytes", relative, encoded)):
+                        if publish_archive(self.archive, path, data):
+                            measured[field] += len(data)
+                            measured["new_bytes"] += len(data)
                     self._index_capture(manifest, relative, clean["content"])
                     clean.update(capture_source(manifest, clean["content"]))
-                    saved.append({"capture_id": capture_id, "content_hash": content_hash, "manifest_hash": manifest_hash(manifest)})
+                    saved.append({field: clean[field] for field in ("capture_id", "content_hash", "manifest_hash")})
                     measured["sources_saved"] += 1
                     measured["excerpt_bytes"] += len(raw)
                     total += extra

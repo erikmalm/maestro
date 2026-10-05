@@ -26,7 +26,7 @@ from backend import credentials
 from backend.capabilities import CAPABILITIES
 from backend.web_search import WebSearch, ENDPOINT as SEARCH_ENDPOINT
 from backend.context_store import ContextStore, validate_search
-from backend.context_policy import decoded_url_variants
+from backend.context_policy import HASH, decoded_url_variants
 from backend.storage import workspace_owner
 from backend.memory import MAX_CONTENT, MemoryStore
 from backend.work_config import WorkConfig, config_value
@@ -270,8 +270,7 @@ class ContextSearchInput(StrictModel):
 
     @model_validator(mode="after")
     def validate_lookup(self):
-        validate_search(self.query, self.limit, domain=self.domain,
-                        retrieved_from=self.retrieved_from, retrieved_to=self.retrieved_to)
+        validate_search(**self.model_dump(exclude={"allow_stale"}))
         return self
 
 
@@ -570,11 +569,9 @@ def configure_context_archive(entry: ContextArchiveConfig):
                 acquired = True
             result = store.configure(entry.model_dump())
             if ownership is not None:
-                if entry.enabled:
-                    app.state.archive_owner = True
-                else:
+                if not entry.enabled:
                     ownership.close()
-                    app.state.archive_owner = False
+                app.state.archive_owner = entry.enabled
             return result
         except Exception:
             if acquired:
@@ -599,15 +596,13 @@ def search_saved_context(entry: ContextSearchInput):
         if not store.archive.is_dir():
             raise ValueError("The saved-source archive directory is unavailable. Check its local storage before searching.")
         # POST protects private terms from URL logging; lookup has no writes or inference.
-        return store.search(entry.query, entry.limit, domain=entry.domain,
-                            retrieved_from=entry.retrieved_from, retrieved_to=entry.retrieved_to,
-                            allow_stale=entry.allow_stale)
+        return store.search(**entry.model_dump())
 
 
 @app.get("/api/context/sources/{capture_id}")
 def get_saved_source(capture_id: str, expected_hash: str | None = None, expected_manifest_hash: str | None = None):
     for value in (expected_hash, expected_manifest_hash):
-        if value is not None and (len(value) != 64 or any(c not in "0123456789abcdef" for c in value)):
+        if value is not None and not HASH.fullmatch(value):
             raise HTTPException(422, "Check the saved source reference and try again.")
     try:
         with conflict_errors():

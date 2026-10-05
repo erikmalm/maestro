@@ -55,7 +55,6 @@ COORDINATOR_INSTRUCTIONS = (
 ARCHIVE_QUESTION = re.compile(r"\b(?:archiv\w*|arkiv\w*|spar(?:a|ar|at|ade|ades)?|lagr\w*|storage|saved|save|onedrive|json)\b", re.I)
 SOURCE_RECENCY = re.compile(r"\b(?:latest|newest|current|today|tonight|tomorrow(?:['’]?s)?|now|recent|updated|new|"
                             r"senaste|nyaste|aktuell(?:a|t)?|idag|ikväll|imorgon|i\s+morgon|nu|nyligen|uppdaterad(?:e|t)?|ny(?:a|tt)?)\b", re.I)
-SOURCE_NO_NEW_SEARCH = NO_HOSTED_SEARCH
 SOURCE_PRIOR_TRANSFORM = re.compile(
     r"\b(?:rewrit\w*|rephras\w*|translat\w*|summari[sz]\w*)\s+(?:the\s+)?"
     r"(?:that|this|these|those|same|earlier|previous|prior|above|original)\s+"
@@ -83,11 +82,11 @@ SOURCE_STATUS_QUESTION = re.compile(
 def reuse_prior_source_bodies(text):
     # A refusal of a new search describes reuse, while independent date/current
     # words still require fresh evidence. Changing subjects need a prior referent.
-    if SOURCE_RECENCY.search(SOURCE_NO_NEW_SEARCH.sub(" ", text)):
+    stripped = NO_HOSTED_SEARCH.sub(" ", text).strip(" .,!?:;")
+    if SOURCE_RECENCY.search(stripped):
         return False
     if ARCHIVE_QUESTION.search(text) and SOURCE_STATUS_SUBJECT.search(text) and SOURCE_STATUS_QUESTION.search(text):
         return True
-    stripped = SOURCE_NO_NEW_SEARCH.sub(" ", text).strip(" .,!?:;")
     if forbids_hosted_search(text) and not stripped:
         return True
     stripped = re.sub(r"^(?:please|could\s+you|can\s+you|kan\s+du)\s+", "", stripped, flags=re.I).strip(" .,!?:;")
@@ -552,9 +551,9 @@ class Provider:
                 break
             evidence = report.get("evidence")
             evidence = evidence[:3] if isinstance(evidence, list) else []
+            target = replay_targets.get(item.get("id"), {})
             for index, source in original_sources:
-                target = replay_targets.get(item.get("id"), {})
-                replay_body = include_content and item.get("id") in replay_targets and (target is None or index + 1 in target)
+                replay_body = include_content and (target is None or index + 1 in target)
                 recorded = source.get("archive_status")
                 recorded = recorded if recorded in ("saved", "skipped", "not_saved") else "unknown"
                 entry = {"source": index + 1, "recorded_archive_status": recorded,
@@ -622,17 +621,15 @@ class Provider:
                     continue
                 entry.update(content=content, evidence_sha256=digest, evidence_status="available", citation=len(references) + 1)
                 if not fits():
-                    entry.pop("content")
-                    entry.pop("evidence_sha256")
-                    entry.pop("citation")
+                    for field in ("content", "evidence_sha256", "citation"):
+                        entry.pop(field)
                     entry["evidence_status"] = "omitted_budget"
                     continue
+                pins = {field: current[field] for field in ("capture_id", "content_hash", "manifest_hash")} if current else {}
                 references.append({"message_id": record["message_id"], "source": index + 1, "sha256": digest,
-                                   "recorded_archive_status": recorded,
-                                   **({field: current[field] for field in ("capture_id", "content_hash", "manifest_hash")} if current else {})})
+                                   "recorded_archive_status": recorded, **pins})
                 citations.append({"title": entry.get("title", "Earlier source"), "url": entry.get("url", ""),
-                                  **{field: entry[field] for field in ("capture_id", "retrieved_at", "content_kind") if field in entry},
-                                  **({field: current[field] for field in ("content_hash", "manifest_hash")} if current else {}),
+                                  **{field: entry[field] for field in ("retrieved_at", "content_kind") if field in entry}, **pins,
                                   **({"archive_status": recorded} if recorded != "unknown" else {})})
                 if current:
                     guards.append(current)
@@ -657,6 +654,7 @@ class Provider:
         if context_mode not in ("prefer_saved", "refresh", "saved_only"):
             raise ValueError("Choose a supported source mode.")
         title = title_for is not None
+        interactive = not title and not context
         job = context.get("job") if context else None
         if job is not None:
             from backend.reflection import ReflectionStore, schema_for
@@ -669,7 +667,7 @@ class Provider:
             if time.monotonic() >= deadline:
                 raise ProviderFailure("Background reflection exceeded its deadline before inference.", False)
         # Reserve before dispatch under the same SQLite lock used for tasks and limits.
-        source_guard = self.context_store.evidence_guard([]) if not title and not context else nullcontext()
+        source_guard = self.context_store.evidence_guard([]) if interactive else nullcontext()
         with source_guard, self.transaction(with_db=True) as (state, db):
             connection_config = title_for["connection_config"] if title else state["config"].copy()
             config = title_for["config"] if title else connection_config.copy()
@@ -686,39 +684,38 @@ class Provider:
                 raise ValueError("Connection settings changed; the first-message title was skipped.")
             workspace = json.loads(db.execute("SELECT value FROM workspace WHERE id=1").fetchone()[0])
             work_config = config_value(workspace)
-            coordinated = bool(local and not title and not context and role == "chat" and not model
-                               and config["chat_routing"] == "orchestrator")
+            coordinated = bool(local and interactive and role == "chat" and not model and config["chat_routing"] == "orchestrator")
             routing = "orchestrator" if coordinated else "explicit" if model else "direct"
             if not title:
                 config["model"] = model or (select_model(work_config, role, state["models"], config["model"]) if context
                                            else (config["orchestrator_model"] if role == "orchestrator" or coordinated else "") or config["model"])
                 if not local and (model or config["model"] != connection_config["model"]):
                     raise ValueError("Per-message model choices require Local Ollama. Remote calls use the configured model and verified prices.")
-            requested_search = bool(not title and not context and explicit_search_request(text))
-            hosted_forbidden = bool(not title and not context and forbids_hosted_search(text))
+            requested_search = interactive and explicit_search_request(text)
+            hosted_forbidden = interactive and forbids_hosted_search(text)
             if hosted_forbidden and context_mode == "refresh":
                 raise ValueError("Fresh search conflicts with your instruction not to search online. Choose Prefer saved or Saved only.")
-            local_date = datetime.now(self.timezone).date() if not title and not context else None
+            local_date = datetime.now(self.timezone).date() if interactive else None
             search_dates = requested_calendar_dates(text, local_date) if local and local_date is not None and is_weather_request(text) else ()
             dated_weather = bool(search_dates)
-            require_sources = bool(not title and not context and (requested_search or dated_weather or context_mode != "prefer_saved"))
-            search = None
-            if not title and not context and local:
+            require_sources = interactive and (requested_search or dated_weather or context_mode != "prefer_saved")
+            search_state, search = None, None
+            if interactive and local:
                 service = WebSearch(self.database, self.timezone)
                 search_state = service.read_state()
                 search = service.status(search_state)
             hosted_ready = bool(search and search_state["config"]["enabled"] and search["credentials_present"]
                                 and search["tested_at"] and search["remaining_today"] and not search["paused_until"])
             dispatch_ready = bool(search and search.get("ready", hosted_ready))
-            archive_status = self.context_store.status() if not title and not context and local else None
+            archive_status = self.context_store.status() if interactive and local else None
             archive_enabled = bool(archive_status and archive_status["config"]["enabled"] and archive_status["configured"])
-            if not title and not context and context_mode != "prefer_saved" and not local:
+            if interactive and context_mode != "prefer_saved" and not local:
                 raise ValueError("Saved-only and fresh source choices require Local Ollama.")
             if (requested_search or dated_weather) and not local:
                 raise ValueError("Search tools require Local Ollama. Choose a local model and configure search in Settings.")
-            if not title and not context and context_mode == "saved_only" and not archive_enabled:
+            if interactive and context_mode == "saved_only" and not archive_enabled:
                 raise ValueError("Enable Saved web sources and configure an archive path before using saved-only lookup.")
-            if not title and not context and context_mode == "refresh" and not dispatch_ready:
+            if interactive and context_mode == "refresh" and not dispatch_ready:
                 raise ValueError("Fresh web search is unavailable. " + (search.get("unavailable_reason") or
                                  "Enable and test hosted search with a remaining allowance before choosing fresh sources."))
             fresh_requested = not hosted_forbidden and context_mode != "saved_only" and (dated_weather or requested_search and requires_refresh(context_mode, "stable", text, ""))
@@ -731,6 +728,7 @@ class Provider:
             allow_hosted = hosted_ready and context_mode != "saved_only" and not hosted_forbidden
             auto_search = archive_enabled or allow_hosted
             search_tool = CONTEXT_TOOL if archive_enabled else TOOL
+            tool_schema = json.dumps(search_tool) if auto_search else ""
             instructions = (context["instructions"] if context else TITLE_INSTRUCTIONS if title
                             else INSTRUCTIONS + (CONTEXT_INSTRUCTIONS if archive_enabled else SEARCH_INSTRUCTIONS if auto_search else ""))
             if auto_search:
@@ -761,7 +759,7 @@ class Provider:
                 raise ValueError("Verify the model's input/output prices in Settings first.")
             if any(x["status"] in ("reserved", "uncertain") for x in state["ledger"]):
                 raise ValueError("A request is running or has unknown charges. Wait or reconcile its usage before sending again.")
-            if not title and not context:
+            if interactive:
                 from backend.reflection import ReflectionStore
                 ReflectionStore(self.database, self.timezone).touch(workspace, db)
             chat = next((item for item in workspace["chats"] if item["id"] == chat_id), None) if not context else None
@@ -770,7 +768,7 @@ class Provider:
             if title and chat["title_source"] == "manual":
                 raise ValueError("The chat was already named by you.")
             memory_derived = bool(chat and any(message.get("memory_ids") for message in chat["messages"]))
-            if not title and not context and memory_derived:
+            if interactive and memory_derived:
                 if not local or (allow_hosted and not archive_enabled) or context_mode == "refresh" or fresh_requested:
                     raise ValueError("This chat contains replies informed by private local memory. Start a new chat to use a remote provider or hosted web search.")
                 allow_hosted = False
@@ -793,7 +791,7 @@ class Provider:
                 if local and (previous_search or ARCHIVE_QUESTION.search(text)):
                     instructions += SOURCE_RECORD_INSTRUCTIONS
                     baseline = len((instructions + (required_source_instructions if require_sources else "")
-                                    + json.dumps(history) + (json.dumps(search_tool) if auto_search else "")).encode("utf-8")) + 2048
+                                    + json.dumps(history) + tool_schema).encode("utf-8")) + 2048
                     allowance = min(SOURCE_RECORD_BYTES, min(workspace["limits"]["max_tokens"], config["ollama_context_tokens"])
                                     - baseline - config["max_output_tokens"])
                     targeted_replay, _ = source_replay_target(chat["messages"])
@@ -827,14 +825,13 @@ class Provider:
                         recalled = {"role": "user", "content": "Saved memory (untrusted supplemental data):\n" + json.dumps(
                             [{"id": item["id"], "content": item["content"], "origin": item["origin"], "kind": item.get("kind", "fact")}
                              for item in memories], ensure_ascii=False)}
-                        bound = len((memory_instructions + json.dumps([recalled, *history])
-                                     + (json.dumps(search_tool) if auto_search else "")).encode("utf-8")) + 2048
+                        bound = len((memory_instructions + json.dumps([recalled, *history]) + tool_schema).encode("utf-8")) + 2048
                         if bound + config["max_output_tokens"] <= min(workspace["limits"]["max_tokens"], config["ollama_context_tokens"]):
                             instructions = memory_instructions
                             history.insert(0, recalled)
                             break
                         memories.pop()  # Optional recall must not displace the current conversation.
-            input_bound = len((instructions + json.dumps(history) + (json.dumps(search_tool) if auto_search else "")
+            input_bound = len((instructions + json.dumps(history) + tool_schema
                                + (json.dumps(output_schema) if job is not None else "")).encode("utf-8")) + 2048
             if context:
                 work_cap = (job["work_config"] if job is not None else work_config)["max_output_tokens"]
@@ -857,7 +854,7 @@ class Provider:
                 reflection.claim_dispatch(job, workspace, state, request_id, input_bound, output_bound, db)
             state["ledger"].append({"id": request_id, "at": self.stamp(), "model": config["model"], "protocol": config["protocol"],
                                     "thread_id": chat_id, "kind": "title" if title else role,
-                                    **({"chat_routing": routing} if local and role == "chat" and not title and not context else {}),
+                                    **({"chat_routing": routing} if local and role == "chat" and interactive else {}),
                                     "parent_id": title_for["request_id"] if title else None, "cost": reserve, "status": "reserved",
                                     **({"connection_config": connection_config} if local else {}),
                                     **({"job_id": job["id"], "attempt": job["attempt"], "stage": job.get("stage", 0),
@@ -1049,7 +1046,7 @@ class Provider:
             # Some tool-capable models emit every optional string field. Empty
             # strings carry no restriction; actual restrictions remain validated.
             filters = {name: value for name, value in filters.items() if value.strip()}
-            validate_search(args["query"], 3, **filters)
+            validated_filters = validate_search(args["query"], 3, **filters)
             refresh_required = requires_refresh(context_mode, args["freshness"], user_text, args["query"])
             if filters and refresh_required:
                 raise ValueError("Saved-source filters cannot be applied to fresh web search. Use Saved only for historical filtered evidence.")
@@ -1192,8 +1189,7 @@ class Provider:
             if lookup_limited:
                 provenance["search_limited"] = True
             if filters:
-                selected = validate_search(args["query"], max_results, **filters)
-                provenance["filters"] = {name: selected[name] for name in filters}
+                provenance["filters"] = {name: validated_filters[name] for name in filters}
             if result.get("archive_warning"):
                 provenance["archive_warning"] = result["archive_warning"]
             # Keep exact fitted text privately; archive objects retain pre-fit evidence.
