@@ -199,12 +199,11 @@ export default function WorkSetup({
           </div>
           <p className="reflection-note">
             Set either memory limit to 0 to turn off recall. Saved memory is
-            used only in local chat with hosted web search off. Reflection
-            output is also capped by Model connection. Reviewed exchanges,
-            memory text and output share the model's context; larger contexts
-            use more memory. Conversation review characters are shared across
-            the sampled exchanges. A larger daily token allowance permits more
-            work without requiring longer answers.
+            used only in local chat with hosted web search off. Reviewed
+            exchanges, memory text and output share the model's context; larger
+            contexts use more memory. Conversation review characters are shared
+            across the sampled exchanges. A larger daily token allowance permits
+            more work without requiring longer answers.
           </p>
         </details>
         <div className="reflection-actions">

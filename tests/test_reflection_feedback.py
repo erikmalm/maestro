@@ -209,8 +209,6 @@ class FeedbackTests(unittest.TestCase):
     def test_review_that_cannot_fit_abstains_before_second_inference(self):
         self.workspace["work_config"].update(max_output_tokens=512, background_context_tokens=8192)
         self.save()
-        with self.provider.transaction() as state:
-            state["config"].update(ollama_context_tokens=8192, max_output_tokens=512)
         self.pair("long", "A complete answer. " * 75)
         self.drafts = self.notes(1900)
         self.worker.step()
