@@ -332,6 +332,12 @@ async function fixture(page: Page, state = workspace()) {
   return {
     state,
     requests,
+    requestsFor: (path: string, method?: string) =>
+      requests.filter(
+        (request) =>
+          request.path === path &&
+          (method === undefined || request.method === method),
+      ),
     hold,
     held,
     missing,
@@ -344,12 +350,20 @@ async function fixture(page: Page, state = workspace()) {
   };
 }
 
+async function archiveSettings(page: Page, state = workspace()) {
+  const api = await fixture(page, state);
+  await page.getByRole("button", { name: "Settings", exact: true }).click();
+  return {
+    api,
+    card: page.locator(".context-archive-setup"),
+    finder: savedSourceFinder(page),
+  };
+}
+
 test("archive settings save directly, preserve later drafts and rebuild boundedly", async ({
   page,
 }) => {
-  const api = await fixture(page);
-  await page.getByRole("button", { name: "Settings", exact: true }).click();
-  const card = page.locator(".context-archive-setup");
+  const { api, card } = await archiveSettings(page);
   await expect(card.getByText("Archive folder: /archive")).toBeVisible();
   await expect(
     card.getByText(/2 saved source snapshots.*1 missing/),
@@ -472,11 +486,7 @@ for (const change of ["enabled", "scopes"] as const) {
     await expect(hours).toHaveValue("48");
     if (change === "enabled") await expect(enabled).not.toBeChecked();
     else await expect(scopes).toHaveValue("https://docs.example.org/");
-    const saves = () =>
-      api.requests.filter(
-        (request) =>
-          request.method === "PUT" && request.path === "/api/context",
-      );
+    const saves = () => api.requestsFor("/api/context", "PUT");
     expect(saves()).toHaveLength(1);
     await save.click();
     await expect(
@@ -548,11 +558,7 @@ test("pending archive failure and recovery preserve busy state and drafts across
   );
   await save.click();
   await expect(card.getByText("Saved source settings updated.")).toBeVisible();
-  expect(
-    api.requests.filter(
-      (request) => request.method === "PUT" && request.path === "/api/context",
-    ),
-  ).toHaveLength(2);
+  expect(api.requestsFor("/api/context", "PUT")).toHaveLength(2);
   expect(api.state.context_archive!.config).toMatchObject({
     enabled: false,
     reuse_hours: 72,
@@ -563,13 +569,10 @@ test("pending archive failure and recovery preserve busy state and drafts across
 test("source index rebuild runs sequential bounded batches with progress and preserves drafts", async ({
   page,
 }) => {
-  const api = await fixture(page);
-  await page.getByRole("button", { name: "Settings", exact: true }).click();
-  const card = page.locator(".context-archive-setup");
+  const { api, card } = await archiveSettings(page);
   const key = "POST /api/context/rebuild";
   const id = "1".repeat(32);
-  const requests = () =>
-    api.requests.filter((request) => request.path === "/api/context/rebuild");
+  const requests = () => api.requestsFor("/api/context/rebuild");
   api.hold.add(key);
   await card
     .getByRole("button", { name: "Rebuild source index", exact: true })
@@ -625,13 +628,10 @@ test("source index rebuild runs sequential bounded batches with progress and pre
 test("source index rebuild pauses after the current batch, refreshes invalidation errors and restarts safely", async ({
   page,
 }) => {
-  const api = await fixture(page);
-  await page.getByRole("button", { name: "Settings", exact: true }).click();
-  const card = page.locator(".context-archive-setup");
+  const { api, card } = await archiveSettings(page);
   const key = "POST /api/context/rebuild";
   const id = "2".repeat(32);
-  const requests = () =>
-    api.requests.filter((request) => request.path === "/api/context/rebuild");
+  const requests = () => api.requestsFor("/api/context/rebuild");
   api.hold.add(key);
   await card
     .getByRole("button", { name: "Rebuild source index", exact: true })
@@ -727,13 +727,10 @@ for (const invalid of ["stalled", "changed_id", "over_limit"] as const) {
   test(`source index rebuild stops on ${invalid} progress instead of dispatching another batch`, async ({
     page,
   }) => {
-    const api = await fixture(page);
-    await page.getByRole("button", { name: "Settings", exact: true }).click();
-    const card = page.locator(".context-archive-setup");
+    const { api, card } = await archiveSettings(page);
     const key = "POST /api/context/rebuild";
     const id = "4".repeat(32);
-    const requests = () =>
-      api.requests.filter((request) => request.path === "/api/context/rebuild");
+    const requests = () => api.requestsFor("/api/context/rebuild");
     api.hold.add(key);
     await card
       .getByRole("button", { name: "Rebuild source index", exact: true })
@@ -780,9 +777,7 @@ for (const destination of ["Memory", "Workspace"] as const) {
   test(`leaving archive settings for ${destination} pauses rebuild continuation and retains settings drafts`, async ({
     page,
   }) => {
-    const api = await fixture(page);
-    await page.getByRole("button", { name: "Settings", exact: true }).click();
-    const card = page.locator(".context-archive-setup");
+    const { api, card } = await archiveSettings(page);
     const key = "POST /api/context/rebuild";
     api.hold.add(key);
     await card
@@ -805,9 +800,7 @@ for (const destination of ["Memory", "Workspace"] as const) {
     await expect(
       card.getByLabel("Reuse saved searches for (hours)"),
     ).toHaveValue("72");
-    expect(
-      api.requests.filter((request) => request.path === "/api/context/rebuild"),
-    ).toHaveLength(1);
+    expect(api.requestsFor("/api/context/rebuild")).toHaveLength(1);
   });
 }
 
@@ -816,9 +809,7 @@ test("valid byte archive caps remain editable without a whole MiB restriction", 
 }) => {
   const state = workspace();
   state.context_archive!.config.max_bytes = 1048577;
-  const api = await fixture(page, state);
-  await page.getByRole("button", { name: "Settings", exact: true }).click();
-  const card = page.locator(".context-archive-setup");
+  const { api, card } = await archiveSettings(page, state);
   await card.getByLabel("Reuse saved searches for (hours)").fill("48");
   await card.getByRole("button", { name: "Save source settings" }).click();
   await expect(card.getByText("Saved source settings updated.")).toBeVisible();
@@ -843,9 +834,7 @@ test("unavailable archive can be disabled without an editable deployment path", 
     available: false,
     path: null,
   });
-  const api = await fixture(page, state);
-  await page.getByRole("button", { name: "Settings", exact: true }).click();
-  const card = page.locator(".context-archive-setup");
+  const { api, card } = await archiveSettings(page, state);
   await expect(card.getByText("Not configured", { exact: true })).toBeVisible();
   await expect(
     card.getByRole("button", { name: "Rebuild source index" }),
@@ -865,9 +854,7 @@ test("a configured new archive can be enabled before its directory is initialize
   const state = workspace();
   state.context_archive!.available = false;
   state.context_archive!.config.enabled = false;
-  const api = await fixture(page, state);
-  await page.getByRole("button", { name: "Settings", exact: true }).click();
-  const card = page.locator(".context-archive-setup");
+  const { api, card } = await archiveSettings(page, state);
   const enabled = card.getByLabel("Save and reuse public search results");
   await expect(enabled).toBeEnabled();
   await enabled.check();
@@ -879,9 +866,7 @@ test("a configured new archive can be enabled before its directory is initialize
 test("failed archive save refreshes status while retaining the source settings draft", async ({
   page,
 }) => {
-  const api = await fixture(page);
-  await page.getByRole("button", { name: "Settings", exact: true }).click();
-  const card = page.locator(".context-archive-setup");
+  const { api, card } = await archiveSettings(page);
   await card.getByLabel("Reuse saved searches for (hours)").fill("72");
   api.failNextSave();
   await card.getByRole("button", { name: "Save source settings" }).click();
@@ -911,9 +896,7 @@ test("a new public-result archive remains disabled until enabled and needs no ap
     max_bytes: 10 * 1073741824,
     max_items: 200000,
   });
-  const api = await fixture(page, state);
-  await page.getByRole("button", { name: "Settings", exact: true }).click();
-  const card = page.locator(".context-archive-setup");
+  const { api, card } = await archiveSettings(page, state);
   const enabled = card.getByLabel("Save and reuse public search results");
   await expect(enabled).not.toBeChecked();
   await expect(
@@ -953,9 +936,7 @@ test("a new public-result archive remains disabled until enabled and needs no ap
 test("saving policy drafts and hidden approved URLs survive a delayed save", async ({
   page,
 }) => {
-  const api = await fixture(page);
-  await page.getByRole("button", { name: "Settings", exact: true }).click();
-  const card = page.locator(".context-archive-setup");
+  const { api, card } = await archiveSettings(page);
   const policy = card.getByRole("combobox", { name: "Source saving policy" });
   const urls = card.getByLabel("Approved public source URLs (one per line)");
   await expect(policy).toHaveValue("approved_sources");
@@ -1396,9 +1377,7 @@ test("composer refreshes temporary search readiness after a reply without changi
     .getByRole("combobox", { name: "Source mode" })
     .selectOption("refresh");
   await page.clock.runFor(4000);
-  expect(
-    api.requests.filter((entry) => entry.path === "/api/web-search"),
-  ).toHaveLength(0);
+  expect(api.requestsFor("/api/web-search")).toHaveLength(0);
   await page.evaluate(() => {
     Object.defineProperty(document, "hidden", {
       configurable: true,
@@ -1407,9 +1386,7 @@ test("composer refreshes temporary search readiness after a reply without changi
     document.dispatchEvent(new Event("visibilitychange"));
   });
   await page.clock.runFor(10000);
-  expect(
-    api.requests.filter((entry) => entry.path === "/api/web-search"),
-  ).toHaveLength(0);
+  expect(api.requestsFor("/api/web-search")).toHaveLength(0);
   Object.assign(api.state.web_search, {
     ready: true,
     unavailable_reason: null,
@@ -1431,9 +1408,7 @@ test("composer refreshes temporary search readiness after a reply without changi
     page.getByText("Answer from saved sources [1]", { exact: true }),
   ).toBeVisible();
   await page.clock.runFor(60000);
-  expect(
-    api.requests.filter((entry) => entry.path === "/api/web-search"),
-  ).toHaveLength(1);
+  expect(api.requestsFor("/api/web-search")).toHaveLength(1);
 });
 
 test("a delayed readiness refresh cannot restore search disabled in Settings", async ({
@@ -1488,11 +1463,7 @@ test("a delayed readiness refresh cannot restore search disabled in Settings", a
   await expect(
     page.getByText("Earlier local answer.", { exact: true }),
   ).toBeVisible();
-  expect(
-    api.requests.filter(
-      (entry) => entry.path === "/api/web-search" && entry.method === "GET",
-    ),
-  ).toHaveLength(1);
+  expect(api.requestsFor("/api/web-search", "GET")).toHaveLength(1);
   await page.getByRole("button", { name: "Settings", exact: true }).click();
   await expect(
     setup.getByLabel("Let Maestro decide when to search"),
@@ -1727,11 +1698,7 @@ test("saved citations expose original dates and text-only snapshots, with explic
   await page.getByRole("button", { name: "View saved source 1" }).click();
   await expect(viewer.getByText(/Saved source removed/)).toBeVisible();
   expect(
-    api.requests.filter(
-      (request) =>
-        request.method === "GET" &&
-        request.path === "/api/context/sources/capture-one",
-    ),
+    api.requestsFor("/api/context/sources/capture-one", "GET"),
   ).toHaveLength(1);
 });
 
@@ -1777,11 +1744,7 @@ for (const read of ["loaded", "pending"] as const) {
     await viewer.getByRole("button", { name: "Close dialog" }).click();
     await open.click();
     await expect(viewer.getByText(/Saved source removed/)).toBeVisible();
-    expect(
-      api.requests.filter(
-        (request) => request.path === path && request.method === "GET",
-      ),
-    ).toHaveLength(2);
+    expect(api.requestsFor(path, "GET")).toHaveLength(2);
   });
 }
 
@@ -1928,9 +1891,7 @@ test("latest settings refresh retries after archive revocation without older ref
 test("archive actions serialize older status reads and continue after a rejected mutation", async ({
   page,
 }) => {
-  const api = await fixture(page);
-  await page.getByRole("button", { name: "Settings", exact: true }).click();
-  const card = page.locator(".context-archive-setup");
+  const { api, card } = await archiveSettings(page);
   await card.getByLabel("Keywords", { exact: true }).fill("public reference");
   await card
     .getByRole("button", { name: "Search saved sources", exact: true })
@@ -2051,9 +2012,7 @@ for (const change of ["scope", "policy", "enabled"] as const) {
           capture_policy: "all_public",
           public_sources: [],
         });
-      const api = await fixture(page, state);
-      await page.getByRole("button", { name: "Settings", exact: true }).click();
-      const card = page.locator(".context-archive-setup");
+      const { api, card } = await archiveSettings(page, state);
       const keywords = card.getByLabel("Keywords", { exact: true });
       await keywords.fill("keep the saved search draft");
       await keywords.press("Enter");
@@ -2095,9 +2054,7 @@ for (const change of ["scope", "policy", "enabled"] as const) {
         );
         await expect(viewer.locator(".source-snapshot")).toHaveCount(0);
       }
-      const reads = api.requests.filter(
-        (request) => request.path === capturePath && request.method === "GET",
-      );
+      const reads = api.requestsFor(capturePath, "GET");
       expect(reads).toHaveLength(2);
       for (const read of reads) {
         const url = new URL(read.url);
@@ -2115,9 +2072,7 @@ for (const change of ["scope", "policy", "enabled"] as const) {
 test("a saved source viewer stays loaded through non-eligibility saves and later settings drafts", async ({
   page,
 }) => {
-  const api = await fixture(page);
-  await page.getByRole("button", { name: "Settings", exact: true }).click();
-  const card = page.locator(".context-archive-setup");
+  const { api, card } = await archiveSettings(page);
   await card.getByLabel("Keywords", { exact: true }).fill("preserve evidence");
   await card.getByLabel("Keywords", { exact: true }).press("Enter");
   await card.getByLabel("Reuse saved searches for (hours)").fill("48");
@@ -2286,9 +2241,7 @@ for (const digest of ["content_hash", "manifest_hash"] as const) {
 test("finder sends keyword and retrieval filters locally with bounded results and a dated viewer", async ({
   page,
 }) => {
-  const api = await fixture(page);
-  await page.getByRole("button", { name: "Settings", exact: true }).click();
-  const finder = savedSourceFinder(page);
+  const { api, finder } = await archiveSettings(page);
   await expect(
     finder.getByText(/no online search or AI request/),
   ).toBeVisible();
@@ -2452,9 +2405,7 @@ test("finder remains readable without writer availability and clears results whe
 }) => {
   const state = workspace();
   state.context_archive!.available = false;
-  const api = await fixture(page, state);
-  await page.getByRole("button", { name: "Settings", exact: true }).click();
-  const finder = savedSourceFinder(page);
+  const { api, finder } = await archiveSettings(page, state);
   await expect(
     finder.getByRole("button", { name: "Search saved sources", exact: true }),
   ).toBeEnabled();
@@ -2476,18 +2427,13 @@ test("finder remains readable without writer availability and clears results whe
   await expect(finder.getByLabel("Keywords", { exact: true })).toHaveValue(
     "read only",
   );
-  expect(
-    api.requests.filter((entry) => entry.path === "/api/context/search"),
-  ).toHaveLength(1);
+  expect(api.requestsFor("/api/context/search")).toHaveLength(1);
 });
 
 test("finder invalidates changed saved eligibility while preserving drafts and unchanged refresh results", async ({
   page,
 }) => {
-  const api = await fixture(page);
-  await page.getByRole("button", { name: "Settings", exact: true }).click();
-  const card = page.locator(".context-archive-setup");
-  const finder = savedSourceFinder(page);
+  const { api, card, finder } = await archiveSettings(page);
   const query = finder.getByLabel("Keywords", { exact: true });
   await query.fill("saved eligibility");
   await finder.getByLabel("Domain (optional)").fill("docs.example.org");
@@ -2542,10 +2488,7 @@ test("finder discards delayed evidence when the persisted saving policy changes"
     capture_policy: "all_public",
     public_sources: [],
   });
-  const api = await fixture(page, state);
-  await page.getByRole("button", { name: "Settings", exact: true }).click();
-  const card = page.locator(".context-archive-setup");
-  const finder = savedSourceFinder(page);
+  const { api, card, finder } = await archiveSettings(page, state);
   const keywords = finder.getByLabel("Keywords", { exact: true });
   await keywords.fill("retain these keywords");
   await keywords.press("Enter");
@@ -2580,9 +2523,7 @@ test("finder discards delayed evidence when the persisted saving policy changes"
 test("finder ignores out-of-order results after the user changes search drafts", async ({
   page,
 }) => {
-  const api = await fixture(page);
-  await page.getByRole("button", { name: "Settings", exact: true }).click();
-  const finder = savedSourceFinder(page);
+  const { api, finder } = await archiveSettings(page);
   const query = finder.getByLabel("Keywords", { exact: true });
   api.hold.add("POST /api/context/search");
   await query.fill("first");
@@ -2626,9 +2567,7 @@ test("finder ignores out-of-order results after the user changes search drafts",
 test("finder clear and leaving Settings discard delayed responses without overwriting drafts", async ({
   page,
 }) => {
-  const api = await fixture(page);
-  await page.getByRole("button", { name: "Settings", exact: true }).click();
-  const finder = savedSourceFinder(page);
+  const { api, finder } = await archiveSettings(page);
   const query = finder.getByLabel("Keywords", { exact: true });
   async function holdSearch(text: string) {
     api.held.delete("POST /api/context/search");
@@ -2672,9 +2611,7 @@ test("finder clear and leaving Settings discard delayed responses without overwr
 test("finder removes deleted results and cannot restore a known deleted capture", async ({
   page,
 }) => {
-  const api = await fixture(page);
-  await page.getByRole("button", { name: "Settings", exact: true }).click();
-  const finder = savedSourceFinder(page);
+  const { api, finder } = await archiveSettings(page);
   const query = finder.getByLabel("Keywords", { exact: true });
   await query.fill("archived");
   await query.press("Enter");
