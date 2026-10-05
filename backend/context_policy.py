@@ -11,6 +11,11 @@ from backend.web_search import safe_url
 
 
 MAX_ARCHIVE_ITEMS = 200000
+SCHEMA = 1
+SOURCE_BYTES = 8192
+MANIFEST_BYTES = 16384
+ID = re.compile(r"[a-f0-9]{32}\Z")
+HASH = re.compile(r"[a-f0-9]{64}\Z")
 DEFAULT = {"enabled": False, "capture_policy": "all_public", "public_sources": [], "reuse_hours": 24,
            "max_bytes": 10 * 1024 ** 3, "max_items": MAX_ARCHIVE_ITEMS}
 
@@ -153,6 +158,38 @@ def timestamp(value):
 
 def manifest_hash(manifest):
     return hashlib.sha256(json.dumps(manifest, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")).hexdigest()
+
+
+def validate_capture_manifest(data, relative, config):
+    """Validate metadata; callers still check deletion, object bytes and pins."""
+    required = {"schema_version", "capture_id", "source_id", "source_url", "title", "object", "retrieved_at", "content_kind", "completeness", "published_at", "modified_at"}
+    if (not isinstance(relative, str) or not isinstance(data, dict) or set(data) != required
+            or type(data["schema_version"]) is not int or data["schema_version"] != SCHEMA
+            or not isinstance(data["capture_id"], str) or not ID.fullmatch(data["capture_id"])
+            or not eligible(data["source_url"], config)
+            or data["source_id"] != hashlib.sha256(public_url(data["source_url"], allow_query=True, allow_http=True).encode()).hexdigest()
+            or not isinstance(data["title"], str) or len(data["title"]) > 200
+            or data["content_kind"] != "search_excerpt" or data["published_at"] is not None or data["modified_at"] is not None
+            or not isinstance(data["completeness"], dict) or set(data["completeness"]) != {"maestro_truncated", "full_page"}
+            or type(data["completeness"]["maestro_truncated"]) is not bool or data["completeness"]["full_page"] is not False):
+        raise ValueError("Invalid or unavailable source capture.")
+    data["title"].encode("utf-8")
+    if relative != "records/captures/" + timestamp(data["retrieved_at"])[:7] + "/" + data["capture_id"] + ".json":
+        raise ValueError("Invalid capture observation path.")
+    obj = data["object"]
+    if (not isinstance(obj, dict) or set(obj) != {"path", "sha256", "bytes", "encoding"}
+            or not isinstance(obj["sha256"], str) or not HASH.fullmatch(obj["sha256"])
+            or obj["path"] != "objects/sha256/" + obj["sha256"][:2] + "/" + obj["sha256"] + ".txt"
+            or obj["encoding"] != "utf-8" or type(obj["bytes"]) is not int or not 1 <= obj["bytes"] <= SOURCE_BYTES):
+        raise ValueError("Invalid archived source object.")
+    return data
+
+
+def capture_source(manifest, content):
+    """Project an already verified durable capture; perform no storage action."""
+    return {"capture_id": manifest["capture_id"], "title": manifest["title"], "url": manifest["source_url"], "content": content,
+            "content_hash": manifest["object"]["sha256"], "manifest_hash": manifest_hash(manifest), "archive_status": "saved",
+            **{key: manifest[key] for key in ("content_kind", "completeness", "retrieved_at", "published_at", "modified_at")}}
 
 
 def configuration(value):
