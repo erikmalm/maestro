@@ -213,6 +213,7 @@ class ProviderConfig(StrictModel):
     protocol: Literal["responses", "chat_completions", "ollama"] = "responses"
     model: str = Field(default="", max_length=200, pattern=r"^[A-Za-z0-9_./:-]*$")
     orchestrator_model: str = Field(default="", max_length=200, pattern=r"^[A-Za-z0-9_./:-]*$")
+    chat_routing: Literal["direct", "orchestrator"] = "direct"
     input_usd_per_million: float = Field(default=0, ge=0, le=10000, allow_inf_nan=False)
     output_usd_per_million: float = Field(default=0, ge=0, le=10000, allow_inf_nan=False)
     pricing_verified: bool = False

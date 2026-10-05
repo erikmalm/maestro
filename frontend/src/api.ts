@@ -196,6 +196,7 @@ export type ProviderConfig = {
   protocol: "responses" | "chat_completions" | "ollama";
   model: string;
   orchestrator_model: string;
+  chat_routing?: "direct" | "orchestrator";
   input_usd_per_million: number;
   output_usd_per_million: number;
   pricing_verified: boolean;

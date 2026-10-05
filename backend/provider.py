@@ -18,11 +18,17 @@ from backend.web_search import WebSearch, TOOL, SEARCH_INSTRUCTIONS, fit_sources
 from backend.work_config import MAX_BACKGROUND_OUTPUT_TOKENS, config_value, select_model
 
 DEFAULT = {"base_url": "https://api.openai.com/v1", "protocol": "responses", "model": "", "orchestrator_model": "",
+           "chat_routing": "direct",
            "input_usd_per_million": 0.0, "output_usd_per_million": 0.0,
            "pricing_verified": False, "max_output_tokens": 8192,
            "ollama_context_tokens": 32768, "ollama_threads": 0, "ollama_keep_alive_minutes": 5}
 INSTRUCTIONS = "You are Maestro, a helpful personal assistant. Be clear and concise. Do not claim to have performed actions or accessed tools that are not available."
 TITLE_INSTRUCTIONS = "Create a short, specific title for this conversation, using at most six words. Return only the title, without quotes or explanation."
+COORDINATOR_INSTRUCTIONS = (
+    " Coordinate this reply: assess the user's request and use web search when available and needed."
+    " Ground search-assisted answers in the supplied evidence."
+    " Delegation and worker execution are unavailable; do not claim to have assigned work to subagents."
+)
 
 
 class ProviderFailure(ValueError):
@@ -213,12 +219,18 @@ class Provider:
         return {"config": DEFAULT.copy(), "models": [], "tested_at": None, "ledger": []}
 
     def configure(self, config, key, persist):
+        config = {**DEFAULT, **config}
         local = config["protocol"] == "ollama"
+        if config["chat_routing"] not in ("direct", "orchestrator"):
+            raise ValueError("Choose direct or orchestrator chat routing.")
+        if not local and config["chat_routing"] != "direct":
+            raise ValueError("Orchestrator chat routing requires Local Ollama. Remote calls use the configured model and verified prices.")
         config["base_url"] = validate_ollama_url(config["base_url"]) if local else validate_url(config["base_url"])
         if local:
             if key:
                 raise ValueError("Local Ollama does not use an API key. Leave the key empty.")
-            minimum_input = len((INSTRUCTIONS + json.dumps([{"role": "user", "content": "a"}])).encode("utf-8")) + 2048
+            instructions = INSTRUCTIONS + (COORDINATOR_INSTRUCTIONS if config["chat_routing"] == "orchestrator" else "")
+            minimum_input = len((instructions + json.dumps([{"role": "user", "content": "a"}])).encode("utf-8")) + 2048
             if config["ollama_context_tokens"] < minimum_input + config["max_output_tokens"]:
                 raise ValueError("Local context is too small for the output limit and chat prompt. Increase context size or lower maximum output tokens.")
             config.update(input_usd_per_million=0, output_usd_per_million=0, pricing_verified=True)
@@ -429,9 +441,12 @@ class Provider:
                 raise ValueError("Connection settings changed; the first-message title was skipped.")
             workspace = json.loads(db.execute("SELECT value FROM workspace WHERE id=1").fetchone()[0])
             work_config = config_value(workspace)
+            coordinated = bool(local and not title and not context and role == "chat" and not model
+                               and config["chat_routing"] == "orchestrator")
+            routing = "orchestrator" if coordinated else "explicit" if model else "direct"
             if not title:
                 config["model"] = model or (select_model(work_config, role, state["models"], config["model"]) if context
-                                           else (config["orchestrator_model"] if role == "orchestrator" else "") or config["model"])
+                                           else (config["orchestrator_model"] if role == "orchestrator" or coordinated else "") or config["model"])
                 if not local and (model or config["model"] != connection_config["model"]):
                     raise ValueError("Per-message model choices require Local Ollama. Remote calls use the configured model and verified prices.")
             search = None
@@ -445,6 +460,8 @@ class Provider:
             instructions = context["instructions"] if context else TITLE_INSTRUCTIONS if title else INSTRUCTIONS + (SEARCH_INSTRUCTIONS if auto_search else "")
             if not title and role == "orchestrator":
                 instructions += " Help plan and break down tasks. Task execution and delegation are unavailable; provide a plan without claiming to execute it."
+            if coordinated:
+                instructions += COORDINATOR_INSTRUCTIONS
             if auto_search and config["ollama_context_tokens"] < 8192:
                 raise ValueError("Automatic web search needs at least 8192 context tokens. Update Local worker settings or disable search.")
             pending_local = [entry for entry in state["ledger"] if entry["status"] == "reserved"
@@ -518,6 +535,7 @@ class Provider:
                 reflection.claim_dispatch(job, workspace, state, request_id, input_bound, output_bound, db)
             state["ledger"].append({"id": request_id, "at": self.stamp(), "model": config["model"], "protocol": config["protocol"],
                                     "thread_id": chat_id, "kind": "title" if title else role,
+                                    **({"chat_routing": routing} if local and role == "chat" and not title and not context else {}),
                                     "parent_id": title_for["request_id"] if title else None, "cost": reserve, "status": "reserved",
                                     **({"connection_config": connection_config} if local else {}),
                                     **({"job_id": job["id"], "attempt": job["attempt"], "stage": job.get("stage", 0),
@@ -626,6 +644,8 @@ class Provider:
                         chat["messages"].extend([{"id": uuid.uuid4().hex, "role": "user", "kind": role, "text": text, "demo": False,
                                                   "reflection_eligible": eligible},
                             {"id": uuid.uuid4().hex, "role": "assistant", "kind": role, "text": reply, "demo": False, "model": config["model"], "cost": cost, "input_tokens": input_tokens, "output_tokens": output_tokens}])
+                        if local and role == "chat":
+                            chat["messages"][-1]["chat_routing"] = routing
                         chat["updated_at"] = self.stamp()
                         if memories:
                             chat["messages"][-1]["memory_ids"] = [item["id"] for item in memories]

@@ -744,7 +744,11 @@ export default function App() {
   );
   const local = workspace.provider.config.protocol === "ollama";
   const requestedModel = local ? model : "";
-  const defaultModel = workspace.provider.config.model;
+  const defaultModel =
+    local && workspace.provider.config.chat_routing === "orchestrator"
+      ? workspace.provider.config.orchestrator_model ||
+        workspace.provider.config.model
+      : workspace.provider.config.model;
   const selectedModel = requestedModel || defaultModel;
   const unavailableModel =
     local &&

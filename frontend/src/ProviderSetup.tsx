@@ -92,6 +92,7 @@ export default function ProviderSetup({
             : "chat_completions",
       model: "",
       orchestrator_model: "",
+      chat_routing: "direct",
       input_usd_per_million: 0,
       output_usd_per_million: 0,
       pricing_verified: provider === "ollama",
@@ -102,7 +103,9 @@ export default function ProviderSetup({
       isOpenAI && pricesAreCurrent() ? openAIPrices(model) : undefined;
     setConfig({
       model,
-      ...(!isOllama ? { orchestrator_model: "" } : {}),
+      ...(!isOllama
+        ? { orchestrator_model: "", chat_routing: "direct" as const }
+        : {}),
       ...(prices ? { protocol: "responses" as const } : {}),
       input_usd_per_million: prices?.input ?? 0,
       output_usd_per_million: prices?.output ?? 0,
@@ -260,24 +263,45 @@ export default function ProviderSetup({
           </label>
         )}
         {isOllama && (
-          <label>
-            Orchestrator default model
-            <select
-              value={config.orchestrator_model ?? ""}
-              onChange={(event) =>
-                field("orchestrator_model", event.target.value)
-              }
-            >
-              <option value="">Use the chat default</option>
-              {[...new Set([config.orchestrator_model, ...models])]
-                .filter(Boolean)
-                .map((model) => (
-                  <option key={model} value={model}>
-                    {model}
-                  </option>
-                ))}
-            </select>
-          </label>
+          <>
+            <label>
+              Chat routing
+              <select
+                value={config.chat_routing ?? "direct"}
+                onChange={(event) =>
+                  field(
+                    "chat_routing",
+                    event.target.value as "direct" | "orchestrator",
+                  )
+                }
+              >
+                <option value="direct">Chat model</option>
+                <option value="orchestrator">Orchestrator model</option>
+              </select>
+            </label>
+            <p className="reflection-note">
+              Choose the default reply model for local chats. Per-message
+              choices take precedence.
+            </p>
+            <label>
+              Orchestrator default model
+              <select
+                value={config.orchestrator_model ?? ""}
+                onChange={(event) =>
+                  field("orchestrator_model", event.target.value)
+                }
+              >
+                <option value="">Use the chat default</option>
+                {[...new Set([config.orchestrator_model, ...models])]
+                  .filter(Boolean)
+                  .map((model) => (
+                    <option key={model} value={model}>
+                      {model}
+                    </option>
+                  ))}
+              </select>
+            </label>
+          </>
         )}
         {isOllama &&
           sameConnection &&
