@@ -6,6 +6,8 @@ There is one active connection with saved model preferences and per-message loca
 
 ## Product goal
 
+Draft [PR #8](https://github.com/erikmalm/maestro/pull/8) is being extracted into independently reviewed units. Background limits (#9) and local chat defaults (#10) are merged. The [public-source policy foundation](docs/ARCHIVE_POLICY.md) is R8-03a; immutable capture/ownership and mount/API integration are R8-03b. Private retrieval/recovery, chat source acquisition/replay and archive UI follow in dependency order. Archive capture remains unconnected until its storage integration is reviewed.
+
 Build a personal AI coordinator that runs locally and turns conversation and to-dos into useful, bounded work. It should select appropriate local or remote models, delegate selected assignments, review outcomes and keep a useful result or a clear stop reason. Progress, token usage and estimated spend should remain visible.
 
 Keep credentials and personal workspace data outside the public checkout. Private memory should carry provenance and project scope, support user corrections and deletion, and eventually help later tasks without indiscriminate sharing. Integrations should operate only on configured sources and permitted actions. MarketPulse document access and GitHub coding tasks are intended capabilities, with no assumption that either integration already works.
