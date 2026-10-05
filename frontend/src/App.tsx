@@ -824,18 +824,11 @@ function SavedSourceFinder({
               onChange={(event) => edit({ retrieved_to: event.target.value })}
             />
           </label>
-          <label>
-            Maximum results
-            <input
-              required
-              type="number"
-              min={1}
-              max={20}
-              step={1}
-              value={draft.limit}
-              onChange={(event) => edit({ limit: Number(event.target.value) })}
-            />
-          </label>
+          <NumberFields
+            values={draft}
+            fields={[["limit", "Maximum results", 1, 20]]}
+            onChange={(key, value) => edit({ [key]: value })}
+          />
         </div>
         <p className="reflection-note">
           Use an exact hostname without a URL, port or path.
