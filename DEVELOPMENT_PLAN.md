@@ -6,7 +6,7 @@ There is one active connection with saved model preferences and per-message loca
 
 ## Product goal
 
-Draft [PR #8](https://github.com/erikmalm/maestro/pull/8) is being extracted into independently reviewed units. Background limits (#9) and local chat defaults (#10) are merged. The [archive foundation](docs/ARCHIVE_POLICY.md) separates public-source policy (R8-03a) from bounded file access/publication (R8-03b). Ownership/inventory, manifest verification, capture receipts, API setup and mounting follow as separate subjects before retrieval, chat and UI integration. Archive capture remains unconnected until its storage integration is reviewed. Reuse existing modules and direct functions; each extraction should remove its duplicate implementation from the draft.
+Draft [PR #8](https://github.com/erikmalm/maestro/pull/8) is being extracted into independently reviewed units. Background limits (#9) and local chat defaults (#10) are merged. The [archive foundation](docs/ARCHIVE_POLICY.md) separates public-source policy (R8-03a), bounded file access/publication (R8-03b) and local ownership/inventory (R8-03c). Manifest verification, capture receipts, API setup and mounting follow separately before retrieval, chat and UI integration. Archive capture remains unconnected until its storage integration is reviewed. Reuse existing modules and direct functions; each extraction should remove its duplicate implementation from the draft.
 
 Build a personal AI coordinator that runs locally and turns conversation and to-dos into useful, bounded work. It should select appropriate local or remote models, delegate selected assignments, review outcomes and keep a useful result or a clear stop reason. Progress, token usage and estimated spend should remain visible.
 
