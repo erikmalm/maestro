@@ -1,6 +1,6 @@
 # Chat assessment and delegation
 
-Design updated 2026-10-04. Local coordinator-model selection is implemented. The separate assessment, durable progress and specialist workflow below remain proposed.
+Design updated 2026-10-05. Local coordinator-model selection is implemented. The separate assessment, durable progress and specialist workflow below remain proposed.
 
 Each user message should first reach a coordinator that assesses the request and chooses how to handle it. The coordinator can answer directly, ask a necessary clarification, or assign a bounded task to an available specialist. The user sees useful progress as work happens and receives one coherent answer in the original conversation.
 

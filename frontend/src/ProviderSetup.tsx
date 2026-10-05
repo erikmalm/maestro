@@ -282,13 +282,13 @@ export default function ProviderSetup({
             <p className="reflection-note">
               {config.chat_routing === "orchestrator"
                 ? "The orchestrator decides whether to retrieve sources and writes the grounded reply. Delegation to worker agents is not available yet."
-                : "Use the chat model for replies, or choose Orchestrator model to coordinate source retrieval and write the grounded reply."}
+                : "Use the chat model for replies, or choose Orchestrator model to coordinate source retrieval and write the grounded reply."}{" "}
+              Per-message choices take precedence.
             </p>
             <label>
               Orchestrator default model
               <select
                 value={config.orchestrator_model ?? ""}
-                disabled={config.chat_routing !== "orchestrator"}
                 onChange={(event) =>
                   field("orchestrator_model", event.target.value)
                 }

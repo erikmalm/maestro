@@ -14,6 +14,7 @@ from fastapi.testclient import TestClient
 
 from backend import app as backend, credentials
 from backend.provider import DEFAULT, Provider, TITLE_INSTRUCTIONS
+from backend.web_search import ENDPOINT as SEARCH_ENDPOINT, WebSearch
 
 
 class ProviderTests(unittest.TestCase):
@@ -40,9 +41,25 @@ class ProviderTests(unittest.TestCase):
         self.database_patch.stop()
         self.directory.cleanup()
 
-    def setup_provider(self, config=None):
-        result = self.client.put("/api/provider", headers=self.headers, json={"config": config or self.config, "api_key": self.key, "persist": False})
+    def setup_provider(self, config=None, key=None):
+        result = self.client.put("/api/provider", headers=self.headers, json={"config": config or self.config, "api_key": self.key if key is None else key, "persist": False})
         self.assertEqual(result.status_code, 200, result.text)
+
+    def local_config(self, **changes):
+        return {**self.config, "protocol": "ollama", "base_url": "http://127.0.0.1:11434",
+                "model": "synthetic-local:latest", "orchestrator_model": "synthetic-coordinator:latest",
+                "max_output_tokens": 256, **changes}
+
+    def local_provider_http(self, request):
+        self.requests.append(request)
+        self.assertEqual(request.url.host, "127.0.0.1")
+        self.assertNotIn("authorization", request.headers)
+        payload = json.loads(request.content)
+        if request.url.path == "/api/show":
+            return httpx.Response(200, json={"details": {"format": "gguf"}, "capabilities": ["completion", "tools"]})
+        self.assertEqual(request.url.path, "/api/chat")
+        return httpx.Response(200, json={"done": True, "message": {"role": "assistant", "content": "Synthetic local reply"},
+                                         "prompt_eval_count": 37, "eval_count": 11})
 
     def provider_http(self, request):
         self.requests.append(request)
@@ -110,6 +127,155 @@ class ProviderTests(unittest.TestCase):
         self.setup_provider()
         self.assertEqual(self.client.get("/api/provider").json()["models"], [])
         self.assertIsNone(self.client.get("/api/provider").json()["tested_at"])
+
+    def test_local_coordinator_selection_overrides_fallback_titles_and_actual_accounting(self):
+        service = Provider(backend.DATABASE, backend.TIMEZONE)
+        local = self.local_config()
+        for position, (route, coordinator, override, expected, recorded) in enumerate((
+                ("orchestrator", local["orchestrator_model"], "", local["orchestrator_model"], "orchestrator"),
+                ("orchestrator", local["orchestrator_model"], "synthetic-override:latest", "synthetic-override:latest", "explicit"),
+                ("orchestrator", "", "", local["model"], "orchestrator"),
+                ("direct", local["orchestrator_model"], "", local["model"], "direct"))):
+            with self.subTest(route=route, override=override, coordinator=coordinator):
+                self.setup_provider({**local, "chat_routing": route, "orchestrator_model": coordinator}, key="")
+                self.requests.clear()
+                with self.mock_http(self.local_provider_http):
+                    reply = self.client.post("/api/chat", headers=self.headers, json={"text": "Synthetic routing check", "model": override})
+                self.assertEqual(reply.status_code, 200, reply.text)
+                answer = reply.json()["messages"][-1]
+                self.assertEqual((answer["kind"], answer["chat_routing"], answer["model"]), ("chat", recorded, expected))
+                self.assertTrue(reply.json()["messages"][-2]["reflection_eligible"])
+                ledger = service.read_state()["ledger"]
+                entry = next(entry for entry in reversed(ledger) if entry["kind"] == "chat")
+                self.assertEqual((entry["status"], entry["chat_routing"], entry["model"], entry["input_tokens"], entry["output_tokens"]),
+                                 ("settled", recorded, expected, 37, 11))
+                self.assertEqual(entry["connection_config"]["model"], local["model"])
+                payloads = [json.loads(request.content) for request in self.requests]
+                self.assertEqual(len(ledger), position + 2)
+                self.assertEqual(len(payloads), 3 if position == 0 else 2)
+                self.assertTrue(all(payload["model"] == expected for payload in payloads))
+                self.assertEqual("Coordinate this reply" in payloads[1]["messages"][0]["content"], recorded == "orchestrator")
+                if position == 0:
+                    self.assertEqual((ledger[-1]["kind"], ledger[-1]["model"]), ("title", expected))
+                    self.assertNotIn("chat_routing", ledger[-1])
+                    self.assertEqual(payloads[-1]["messages"][0]["content"], TITLE_INSTRUCTIONS)
+
+        with self.mock_http(self.local_provider_http):
+            planned = self.client.post("/api/chat", headers=self.headers, json={"text": "Plan a task", "role": "orchestrator"})
+        self.assertEqual(planned.status_code, 200, planned.text)
+        answer = planned.json()["messages"][-1]
+        self.assertEqual((answer["kind"], answer["model"]), ("orchestrator", local["orchestrator_model"]))
+        self.assertNotIn("chat_routing", answer)
+        self.assertNotIn("chat_routing", service.read_state()["ledger"][-1])
+
+    def test_routing_context_boundary_rejects_before_save_and_accepts_first_reply(self):
+        service = Provider(backend.DATABASE, backend.TIMEZONE)
+        for route, coordinator, minimum in (("direct", "synthetic-coordinator:latest", 2295),
+                                             ("orchestrator", "synthetic-coordinator:latest", 2545),
+                                             ("orchestrator", "", 2545)):
+            with self.subTest(route=route, coordinator=coordinator):
+                config = self.local_config(chat_routing=route, orchestrator_model=coordinator,
+                                           max_output_tokens=64, ollama_context_tokens=minimum)
+                before = service.read_state()
+                with patch("backend.provider.network") as network:
+                    rejected = self.client.put("/api/provider", headers=self.headers, json={
+                        "config": {**config, "ollama_context_tokens": minimum - 1}, "persist": False})
+                    self.assertEqual(rejected.status_code, 409, rejected.text)
+                    self.assertIn("output limit and chat prompt", rejected.json()["detail"])
+                    network.assert_not_called()
+                self.assertEqual(service.read_state(), before)
+                self.setup_provider(config, key="")
+                self.client.post("/api/chats", headers=self.headers)
+                with self.mock_http(self.local_provider_http):
+                    reply = self.client.post("/api/chat", headers=self.headers, json={"text": "a"})
+                self.assertEqual(reply.status_code, 200, reply.text)
+                expected = coordinator or config["model"] if route == "orchestrator" else config["model"]
+                self.assertEqual(reply.json()["messages"][-1]["model"], expected)
+
+    def test_legacy_route_defaults_direct_and_invalid_routes_preserve_state_and_credentials(self):
+        local = self.local_config()
+        self.setup_provider(local, key="")
+        service = Provider(backend.DATABASE, backend.TIMEZONE)
+        with service.transaction() as state:
+            state["config"].pop("chat_routing")
+        self.assertEqual(service.read_state()["config"]["chat_routing"], "direct")
+        with self.mock_http(self.local_provider_http):
+            reply = self.client.post("/api/chat", headers=self.headers, json={"text": "Legacy route"})
+        self.assertEqual(reply.status_code, 200, reply.text)
+        self.assertEqual(reply.json()["messages"][-1]["model"], local["model"])
+        before = service.read_state()
+        for route, status in (("orchestrator", 409), ("delegate", 422)):
+            with self.subTest(route=route), patch.object(credentials, "save") as save:
+                response = self.client.put("/api/provider", headers=self.headers, json={
+                    "config": {**self.config, "chat_routing": route}, "api_key": "synthetic-replacement-key", "persist": False})
+                self.assertEqual(response.status_code, status, response.text)
+                save.assert_not_called()
+                self.assertEqual(service.read_state(), before)
+                self.assertEqual(credentials.read(self.base)[0], self.key)
+        with self.assertRaisesRegex(ValueError, "Choose direct or orchestrator"):
+            service.configure({**local, "chat_routing": "delegate"}, "", False)
+        self.assertEqual(service.read_state(), before)
+
+    def test_coordinator_still_requires_installed_completion_model_before_inference(self):
+        self.setup_provider(self.local_config(chat_routing="orchestrator"), key="")
+        service = Provider(backend.DATABASE, backend.TIMEZONE)
+        with service.transaction() as state:
+            state["models"] = ["synthetic-local:latest"]
+        for status, metadata in ((200, {"details": {"format": "gguf"}, "remote_host": "cloud.invalid", "capabilities": ["completion"]}),
+                                 (200, {"details": {"format": "gguf"}, "capabilities": []}), (404, {"error": "Model not found"})):
+            with self.subTest(metadata=metadata):
+                self.requests.clear()
+                def unavailable(request):
+                    self.local_provider_http(request)
+                    return httpx.Response(status, json=metadata)
+                with self.mock_http(unavailable):
+                    reply = self.client.post("/api/chat", headers=self.headers, json={"text": "Blocked coordinator"})
+                self.assertEqual(reply.status_code, 409, reply.text)
+                self.assertEqual([request.url.path for request in self.requests], ["/api/show"])
+                entry = Provider(backend.DATABASE, backend.TIMEZONE).read_state()["ledger"][-1]
+                self.assertEqual((entry["status"], entry["chat_routing"], entry["model"]),
+                                 ("failed", "orchestrator", "synthetic-coordinator:latest"))
+        # A stale inventory does not override fresh installed-model metadata.
+        with self.mock_http(self.local_provider_http):
+            reply = self.client.post("/api/chat", headers=self.headers, json={"text": "Newly installed coordinator"})
+        self.assertEqual(reply.status_code, 200, reply.text)
+        self.assertEqual(reply.json()["messages"][-1]["model"], "synthetic-coordinator:latest")
+        self.assertEqual(service.read_state()["models"], ["synthetic-local:latest"])
+
+    def test_coordinator_reuses_existing_search_round_and_shared_reply_allowance(self):
+        local = self.local_config(chat_routing="orchestrator")
+        self.setup_provider(local, key="")
+        chat_id = self.client.post("/api/chats", headers=self.headers).json()["active_chat_id"]
+        named = self.client.patch(f"/api/chats/{chat_id}", headers=self.headers, json={"title": "Synthetic search"})
+        self.assertEqual(named.status_code, 200, named.text)
+        credentials.session_keys[SEARCH_ENDPOINT] = "synthetic-routing-search-key"
+        self.addCleanup(credentials.session_keys.pop, SEARCH_ENDPOINT, None)
+        search = WebSearch(backend.DATABASE, backend.TIMEZONE)
+        with search.transaction() as state:
+            state["config"]["enabled"] = True
+            state["tested_at"] = search.now().isoformat()
+        def use_search(request):
+            response = self.local_provider_http(request)
+            payload = json.loads(request.content)
+            if request.url.path == "/api/chat" and "tools" in payload:
+                response = httpx.Response(200, json={"done": True, "message": {"role": "assistant", "content": "", "tool_calls": [{"function": {
+                    "name": "web_search", "arguments": {"query": "public documentation"}}}]}, "prompt_eval_count": 37, "eval_count": 11})
+            return response
+        with self.mock_http(use_search), patch.object(WebSearch, "search", return_value={"query": "public documentation", "at": search.now().isoformat(),
+                "sources": [{"title": "Synthetic source", "url": "https://docs.example.org/guide", "content": "Public documentation."}]}) as hosted:
+            reply = self.client.post("/api/chat", headers=self.headers, json={"text": "Consult public documentation"})
+        self.assertEqual(reply.status_code, 200, reply.text)
+        hosted.assert_called_once_with("public documentation")
+        payloads = [json.loads(request.content) for request in self.requests if request.url.path == "/api/chat"]
+        self.assertEqual([payload["model"] for payload in payloads], [local["orchestrator_model"]] * 2)
+        self.assertEqual(payloads[0]["tools"][0]["function"]["name"], "web_search")
+        self.assertNotIn("tools", payloads[1])
+        self.assertEqual(payloads[1]["options"]["num_predict"], 245)
+        self.assertNotIn(credentials.session_keys[SEARCH_ENDPOINT], json.dumps(payloads))
+        self.assertFalse(reply.json()["messages"][-2]["reflection_eligible"])
+        entry = Provider(backend.DATABASE, backend.TIMEZONE).read_state()["ledger"][-1]
+        self.assertEqual((entry["status"], entry["model_calls"], entry["model"], entry["input_tokens"], entry["output_tokens"]),
+                         ("settled", 2, local["orchestrator_model"], 74, 22))
 
     def test_provider_auth_error_is_redacted_and_does_not_reserve_charge(self):
         with self.mock_http(lambda request: httpx.Response(401, json={"error": self.key})):
