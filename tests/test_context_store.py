@@ -594,6 +594,39 @@ class ContextStoreTests(unittest.TestCase):
         self.store.configure(changed)
         self.assertEqual(self.store.get_capture(saved["capture_id"]), saved)
 
+    def test_unencodable_manifest_titles_are_corrupt_without_blocking_healthy_unicode_evidence(self):
+        self.enable()
+        broken = []
+        for number, title in enumerate(("\ud800", "\udfff")):
+            query = "Malformed title " + str(number)
+            saved = self.capture(query=query)["sources"][0]
+            path = next(path for path in self.manifests() if path.stem == saved["capture_id"])
+            manifest = json.loads(path.read_text(encoding="utf-8"))
+            manifest["title"] = title
+            path.write_text(json.dumps(manifest), encoding="utf-8")
+            broken.append((query, saved))
+        healthy = self.capture(query="Healthy source", sources=[{
+            **self.source, "title": "Healthy \U0001f680 Årsta evidence", "url": self.source["url"] + "/healthy",
+            "content": "Healthy historical evidence."}])["sources"][0]
+        files = {path.relative_to(self.archive): path.read_bytes() for path in self.archive.rglob("*") if path.is_file()}
+        for query, source in broken:
+            with self.subTest(query=query), self.assertRaises(KeyError):
+                self.store.get_capture(source["capture_id"], source["content_hash"], source["manifest_hash"])
+            self.assertIsNone(self.store.lookup(query, 3))
+        self.assertEqual(self.store.search("historical evidence")["sources"], [{**healthy, "stale": False}])
+        previous_index = self.store.index.read_bytes()
+        progress = self.store.rebuild(limit=1)["rebuild_progress"]
+        self.assertFalse(progress["complete"])
+        self.assertEqual(self.store.index.read_bytes(), previous_index)
+        self.assertEqual(self.store.get_capture(healthy["capture_id"], healthy["content_hash"], healthy["manifest_hash"]), healthy)
+        while not progress["complete"]:
+            rebuilt = self.store.rebuild(limit=1, continuation=progress["id"])
+            progress = rebuilt["rebuild_progress"]
+        self.assertEqual((rebuilt["indexed_count"], rebuilt["corrupt_count"]), (1, 2))
+        self.assertEqual(self.store.get_capture(healthy["capture_id"], healthy["content_hash"], healthy["manifest_hash"]), healthy)
+        self.assertEqual(self.store.search("historical evidence")["sources"], [{**healthy, "stale": False}])
+        self.assertEqual({path.relative_to(self.archive): path.read_bytes() for path in self.archive.rglob("*") if path.is_file()}, files)
+
     def test_out_of_range_utc_manifest_times_do_not_block_healthy_sources(self):
         self.enable()
         broken = []

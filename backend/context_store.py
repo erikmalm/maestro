@@ -553,6 +553,7 @@ class ContextStore:
                 or not isinstance(data["completeness"], dict) or set(data["completeness"]) != {"maestro_truncated", "full_page"}
                 or type(data["completeness"]["maestro_truncated"]) is not bool or data["completeness"]["full_page"] is not False):
             raise ValueError("Invalid or unavailable source capture.")
+        data["title"].encode("utf-8")
         if relative != "records/captures/" + timestamp(data["retrieved_at"])[:7] + "/" + data["capture_id"] + ".json":
             raise ValueError("Invalid capture observation path.")
         obj = data["object"]
