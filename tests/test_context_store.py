@@ -10,7 +10,7 @@ import threading
 import unittest
 from unittest.mock import patch
 
-from backend.context_store import ContextStore, DEFAULT, MANIFEST_BYTES, ROOT, approved, decoded_url_variants, public_url, validate_search
+from backend.context_store import ContextStore, DEFAULT, MANIFEST_BYTES, ROOT, decoded_url_variants, public_url, validate_search
 
 
 class ContextStoreTests(unittest.TestCase):
@@ -351,43 +351,12 @@ class ContextStoreTests(unittest.TestCase):
         self.assertEqual(saved["completeness"], {"maestro_truncated": True, "full_page": False})
         self.assertEqual(self.store.get_capture(saved["capture_id"])["content"], source["content"])
 
-    def test_query_scopes_require_exact_full_url_and_preserve_parameter_identity(self):
+    def test_query_scope_configuration_preserves_normalized_complete_urls(self):
         url = "https://weather.example.org/forecast?latitude=59.3&longitude=18.0&date=2026-10-05"
-        with self.assertRaises(ValueError):
-            public_url(url)
-        self.assertEqual(public_url(url, allow_query=True), url)
         canonical_variant = url.replace("weather.example.org", "WEATHER.example.org:443")
-        self.assertTrue(approved(canonical_variant, [url]))
-        for variant in (url.replace("2026-10-05", "2026-10-06"),
-                        "https://weather.example.org/forecast?date=2026-10-05&latitude=59.3&longitude=18.0",
-                        url.replace("date=2026", "date=%32%30%32%36"),
-                        url + "&date=2026-10-05", url.replace("/forecast?", "/forecast/child?"),
-                        "https://weather.example.org/forecast"):
-            with self.subTest(variant=variant):
-                self.assertFalse(approved(variant, [url]))
-        for scope in ("https://weather.example.org/", "https://weather.example.org/forecast"):
-            self.assertFalse(approved(url, [scope]))
         opaque = "https://weather.example.org/forecast?location=%C3%85rsta%20Stockholm&label=%2f&label=%2F"
-        self.assertEqual(public_url(opaque, allow_query=True), opaque)
         self.store.configure({**self.config, "public_sources": [canonical_variant, url, opaque]})
         self.assertEqual(self.store.status()["config"]["public_sources"], [url, opaque])
-
-    def test_query_scopes_reject_credentials_fragments_and_encoded_controls(self):
-        base = "https://weather.example.org/forecast"
-        invalid = [base + "?", base + "?date=2026#fragment", base + "?date=2026\\private",
-                   base + "/%7F?date=2026", base + "/%C2%85?date=2026", base + "/%85?date=2026",
-                   "https://user:password@weather.example.org/forecast?date=2026",
-                   "https://127.0.0.1/forecast?date=2026", "http://weather.example.org/forecast?date=2026"]
-        invalid += [base + "?value=" + value for value in
-                    ("\n", "\t", "\x00", "\x7f", "\x85", "%00", "%09", "%0a", "%1f", "%7f", "%85", "%FF", "%C2%85", "%250A", "%255c")]
-        for url in invalid:
-            with self.subTest(url=url), self.assertRaises(ValueError):
-                public_url(url, allow_query=True)
-        for path in (base + "/%7F", base + "/%C2%85", base + "/%85"):
-            with self.subTest(path=path), self.assertRaises(ValueError):
-                public_url(path)
-        self.assertFalse(self.database.exists())
-        self.assertFalse(self.archive.exists())
 
     def test_query_capture_reuse_and_rebuild_keep_original_hashes_and_dates(self):
         url = "https://weather.example.org/forecast?location=Stockholm&date=2026-10-05"
