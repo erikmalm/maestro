@@ -631,18 +631,19 @@ class Provider:
                     guards.append(current)
         return message(), guards, {"snapshot_at": packet["snapshot_at"], "references": references}
 
-    def check_source_packet(self, packet):
-        if packet is None:
+    def check_source_evidence(self, packet, fitted=()):
+        if packet is None and not fitted:
             return
         try:
             search_key = credentials.read(SEARCH_ENDPOINT)[0]
         except ValueError:
             search_key = None
         secrets = WebSearch(self.database, self.timezone)._source_secrets(search_key)
+        sources = [source for report in packet["previous_searches"] for source in report["sources"]] if packet else []
         if any(contains_source_secret(source[field], secrets)
-               for report in packet["previous_searches"] for source in report["sources"]
+               for source in [*sources, *fitted]
                for field in ("title", "url", "content") if field in source):
-            raise ValueError("Prior source evidence contains configured credentials. No further model call was made.")
+            raise ValueError("Source evidence contains configured credentials. No further model call was made.")
 
     def generate(self, text, chat_id, title_for=None, model="", role="chat", context=None, context_mode="prefer_saved"):
         """Chat, title and explicit context share dispatch, limits and accounting."""
@@ -905,7 +906,7 @@ class Provider:
             dispatched = True
             with self.context_store.evidence_guard(prior_sources) if prior_sources else nullcontext():
                 pass
-            self.check_source_packet(source_packet)
+            self.check_source_evidence(source_packet)
             data = (background_network(config, path, payload, deadline) if job is not None
                     else network(config, key, "POST", path, payload))
             if auto_search:
@@ -1151,7 +1152,7 @@ class Provider:
                 if (final_bound + remaining > config["ollama_context_tokens"]
                         or first_input + first_output + final_bound + remaining > current_limits["max_tokens"]):
                     raise ValueError("The search-assisted answer would exceed your token/context limit. No further model call was made.")
-                self.check_source_packet(source_packet)
+                self.check_source_evidence(source_packet, fitted)
                 next(x for x in state["ledger"] if x["id"] == request_id)["model_calls"] = 2
             final_payload = {**payload, "messages": final_messages, "options": {**payload["options"], "num_predict": remaining}}
             final_payload.pop("tools", None)  # No second search/tool round, regardless of model output.

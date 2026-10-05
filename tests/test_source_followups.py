@@ -1,5 +1,5 @@
 """Local source follow-ups and coordinator routing, with synthetic files and HTTP."""
-from contextlib import closing
+from contextlib import closing, contextmanager
 from datetime import timedelta, timezone
 import hashlib
 import json
@@ -289,7 +289,7 @@ class SourceFollowupTests(unittest.TestCase):
                     self.network = rotated
                     with patch("backend.provider.credentials.save", side_effect=lambda url, value, persist: self.keys.__setitem__(url, value)), \
                             patch("backend.provider.WebSearch.search") as hosted:
-                        with self.assertRaisesRegex(ValueError, "Prior source evidence contains configured credentials"):
+                        with self.assertRaisesRegex(ValueError, "Source evidence contains configured credentials"):
                             self.send("Rewrite that answer and include details from the saved second guide")
                         hosted.assert_not_called()
                     model_calls = int(stage == "planning")
@@ -299,6 +299,67 @@ class SourceFollowupTests(unittest.TestCase):
                     self.assertEqual((entry["status"], entry.get("model_calls", 0), entry.get("input_tokens", 0), entry.get("output_tokens", 0)),
                                      ("failed", model_calls, 37 * model_calls, 11 * model_calls))
                     self.assertEqual(self.store.get_capture(safe["capture_id"], safe["content_hash"], safe["manifest_hash"]), safe)
+                    self.assertEqual(archive_before, {path.relative_to(self.archive): path.read_bytes()
+                                                     for path in self.archive.rglob("*") if path.is_file()})
+        self.network = original
+
+    def test_fitted_saved_and_transient_evidence_is_rescreened_after_final_guard_key_rotation(self):
+        secret = "synthetic-final-preflight-rotated-key"
+        percent = "".join(f"%{ord(char):02X}" for char in secret)
+        original, guard = self.network, self.store.evidence_guard
+        for transient in (False, True):
+            for name, text in (("literal", secret), ("encoded", percent), ("safe", "public documentation")):
+                with self.subTest(transient=transient, body=name):
+                    self.keys[ENDPOINT] = "synthetic-original-key"
+                    self.prime([{"title": "First guide", "url": "https://docs.example.org/first",
+                                 "content": "Safe original guide."}])
+                    query = "guidecheck" + ("transient" if transient else "saved") + name
+                    source = {"title": "Second guide", "url": "https://" + ("other" if transient else "docs")
+                              + ".example.org/" + query, "content": query + ": " + text}
+                    at = self.store.now().isoformat()
+                    if not transient:
+                        self.store.capture(query, at, [source], 3)
+                    service = WebSearch(self.database, timezone.utc)
+                    with service.transaction() as state:
+                        state["config"] = {**SEARCH_DEFAULT, "enabled": transient}
+                        state["tested_at"] = service.now().isoformat()
+                    before = self.workspace()["chats"][0]["messages"]
+                    archive_before = {path.relative_to(self.archive): path.read_bytes()
+                                      for path in self.archive.rglob("*") if path.is_file()}
+                    self.calls.clear()
+                    rotations = []
+                    @contextmanager
+                    def rotate_after_guard(sources):
+                        with guard(sources):
+                            if not rotations and any(item.get("url") == source["url"] for item in sources):
+                                service.configure({**SEARCH_DEFAULT, "enabled": False}, secret, False)
+                                rotations.append(True)
+                            yield
+                    def planning(config, key, method, path, payload=None):
+                        response = original(config, key, method, path, payload)
+                        if path == "/api/chat" and "tools" in payload:
+                            response["message"] = {"role": "assistant", "content": "", "tool_calls": [{"function": {
+                                "name": "search_context", "arguments": {"query": query, "freshness": "stable"}}}]}
+                        return response
+                    self.network = planning
+                    with patch("backend.provider.credentials.save", side_effect=lambda url, value, persist: self.keys.__setitem__(url, value)), \
+                            patch.object(self.store, "evidence_guard", side_effect=rotate_after_guard), \
+                            patch("backend.provider.WebSearch.search", return_value={"query": query, "at": at, "sources": [source]}) as hosted:
+                        prompt = "Use sources for " + query if transient else "Rewrite that answer and include details from the saved guide"
+                        if name == "safe":
+                            result = self.send(prompt)
+                            self.assertEqual((result["input_tokens"], result["output_tokens"]), (74, 22))
+                        else:
+                            with self.assertRaisesRegex(ValueError, "Source evidence contains configured credentials"):
+                                self.send(prompt)
+                            self.assertEqual(self.workspace()["chats"][0]["messages"], before)
+                        self.assertEqual(hosted.call_count, int(transient))
+                    self.assertEqual(rotations, [True])
+                    self.assertEqual(self.keys[ENDPOINT], secret)
+                    self.assertEqual(len([call for call in self.calls if call[1] == "/api/chat"]), 2 if name == "safe" else 1)
+                    entry = self.provider.read_state()["ledger"][-1]
+                    self.assertEqual((entry["status"], entry["model_calls"], entry["input_tokens"], entry["output_tokens"]),
+                                     ("settled", 2, 74, 22) if name == "safe" else ("failed", 1, 37, 11))
                     self.assertEqual(archive_before, {path.relative_to(self.archive): path.read_bytes()
                                                      for path in self.archive.rglob("*") if path.is_file()})
         self.network = original
