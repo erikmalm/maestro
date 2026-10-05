@@ -13,7 +13,7 @@ import unittest
 from unittest.mock import patch
 
 from backend.context_store import ContextStore, DEFAULT, MANIFEST_BYTES, ROOT, decoded_url_variants, public_url, validate_search
-from backend.storage import publish_archive
+from backend.storage import archive_inventory, publish_archive
 
 
 class ContextStoreTests(unittest.TestCase):
@@ -83,7 +83,7 @@ class ContextStoreTests(unittest.TestCase):
         urls = ["http://weather.example.org/forecast?date=2026-10-05",
                 "https://weather.example.org/forecast?date=2026-10-05",
                 "https://weather.example.org/forecast?date=2026-10-06"]
-        with patch.object(self.store, "_inventory", wraps=self.store._inventory) as inventory:
+        with patch("backend.context_store.archive_inventory", wraps=archive_inventory) as inventory:
             captured = self.capture(sources=[{**self.source, "url": url} for url in urls])["sources"]
         self.assertEqual(inventory.call_count, 2, "Capture should scan once before the batch and once after it.")
         self.assertEqual([source["archive_status"] for source in captured], ["saved"] * 3)
@@ -685,7 +685,7 @@ class ContextStoreTests(unittest.TestCase):
             healthy = self.capture(query="Healthy source", sources=[{
                 **self.source, "url": self.source["url"] + "/healthy", "content": "Healthy historical evidence."}])["sources"][0]
             saved = [first, healthy]
-            for number in range(98 - self.store._inventory()[1]):
+            for number in range(98 - archive_inventory(self.archive, 200)[1]):
                 source = self.capture(query="Repeated capture " + str(number))["sources"][0]
                 self.assertEqual(source["archive_status"], "saved")
                 saved.append(source)
@@ -701,9 +701,9 @@ class ContextStoreTests(unittest.TestCase):
             self.assertEqual(measured["last_error"], partial["archive_warning"])
             self.assertEqual((measured["last_capture"]["sources_received"], measured["last_capture"]["sources_saved"]), (3, 2))
             saved.extend(subset)
-            self.assertEqual(self.store._inventory()[1], 100)
+            self.assertEqual(archive_inventory(self.archive, 200)[1], 100)
             self.store.delete_capture(first["capture_id"])
-            measured = self.store._inventory()[:2]
+            measured = archive_inventory(self.archive, 200)[:2]
             status = self.store.status()
             self.assertEqual((status["archive_bytes"], status["archive_items"]), measured)
             self.assertEqual(measured[1], 102)  # One deletion directory and tombstone.
@@ -714,21 +714,21 @@ class ContextStoreTests(unittest.TestCase):
                 for table in ("captures", "captures_fts"):
                     self.assertEqual(db.execute("SELECT COUNT(*) FROM " + table + " WHERE id=?", (first["capture_id"],)).fetchone()[0], 0)
             self.store.delete_capture(first["capture_id"])
-            self.assertEqual(self.store._inventory()[:2], measured)
+            self.assertEqual(archive_inventory(self.archive, 200)[:2], measured)
             self.assertEqual(self.store.rebuild()["indexed_count"], len(saved) - 1)
             self.store.configure({**self.config, "enabled": False})
             self.store.configure(self.config)
             self.assertEqual(self.store.get_capture(healthy["capture_id"], healthy["content_hash"], healthy["manifest_hash"]), healthy)
             for source in saved[1:]:
                 self.store.delete_capture(source["capture_id"])
-            measured = self.store._inventory()[:2]
+            measured = archive_inventory(self.archive, 200)[:2]
             self.assertLessEqual(measured[1], 200)
             self.assertEqual(len(list(self.archive.glob("records/deletions/*.json"))), len(saved))
             for source in saved:
                 self.store.delete_capture(source["capture_id"])
                 with self.assertRaises(KeyError):
                     self.store.get_capture(source["capture_id"])
-            self.assertEqual(self.store._inventory()[:2], measured)
+            self.assertEqual(archive_inventory(self.archive, 200)[:2], measured)
             with closing(sqlite3.connect(self.database)) as db:
                 self.assertEqual(db.execute("SELECT COUNT(*) FROM context_queries").fetchone()[0], 0)
             with closing(sqlite3.connect(self.store.index)) as db:
@@ -737,7 +737,7 @@ class ContextStoreTests(unittest.TestCase):
             self.store.configure(self.config)
             self.assertEqual(self.store.rebuild()["indexed_count"], 0)
             self.assertIn("archive_warning", self.capture(query="New acquisition"))
-            self.assertEqual(self.store._inventory()[:2], measured)
+            self.assertEqual(archive_inventory(self.archive, 200)[:2], measured)
             # Recovery is still bounded when unrelated external residue overfills it.
             for number in range(201 - measured[1]):
                 (self.archive / ("external-" + str(number) + ".tmp")).write_bytes(b"residue")
@@ -759,7 +759,7 @@ class ContextStoreTests(unittest.TestCase):
             for number in range(100):
                 capture_id = format(number, "032x")
                 (path.parent / (capture_id + ".json")).write_text(json.dumps({**template, "capture_id": capture_id}), encoding="utf-8")
-            measured = self.store._inventory()[:2]
+            measured = archive_inventory(self.archive, 400)[:2]
             self.assertGreater(measured[1], 100)
             self.config["max_items"] = 100
             self.store.configure(self.config)
@@ -768,7 +768,7 @@ class ContextStoreTests(unittest.TestCase):
             self.assertEqual((status["archive_bytes"], status["archive_items"]), measured)
             self.assertEqual(self.store.get_capture(saved["capture_id"], saved["content_hash"], saved["manifest_hash"]), saved)
             self.assertIn("archive_warning", self.capture(query="Over the lowered cap"))
-            self.assertEqual(self.store._inventory()[:2], measured)
+            self.assertEqual(archive_inventory(self.archive, 400)[:2], measured)
 
     def test_disabling_or_changing_approved_scope_suppresses_retrieval(self):
         self.enable()
@@ -788,7 +788,7 @@ class ContextStoreTests(unittest.TestCase):
         for metric in ("items", "bytes", "free"):
             with self.subTest(metric=metric):
                 inventory = (self.config["max_bytes"] if metric == "bytes" else 100, self.config["max_items"] if metric == "items" else 5, [])
-                with patch.object(self.store, "_inventory", return_value=inventory), patch("backend.context_store.shutil.disk_usage") as usage:
+                with patch("backend.context_store.archive_inventory", return_value=inventory), patch("backend.context_store.shutil.disk_usage") as usage:
                     usage.return_value.free = 0 if metric == "free" else 10 ** 10
                     result = self.capture(query="New query", sources=[{**self.source, "content": "A fresh version"}])
                 self.assertIn("archive_warning", result)
@@ -844,6 +844,26 @@ class ContextStoreTests(unittest.TestCase):
         self.assertFalse(self.store.status()["available"])
         self.assertNotIn("private exception", self.store.status()["last_error"])
         self.assertEqual(claim.read_text(), "synthetic-stale-owner-token")
+
+    def test_missing_or_tampered_live_claim_reports_unavailable_and_refuses_configure_and_capture(self):
+        self.enable()
+        claim = self.archive / "writer-owner.tmp"
+        with self.store.archive_owner() as owner:
+            self.assertIs(owner, self.store)
+            token = claim.read_bytes()
+            for replacement in (None, b"Synthetic changed claim"):
+                with self.subTest(replacement=replacement):
+                    claim.unlink() if replacement is None else claim.write_bytes(replacement)
+                    self.assertFalse(self.store.status()["available"])
+                    with self.assertRaisesRegex(ValueError, "writer claim changed"):
+                        self.store.configure(self.config)
+                    result = self.capture()
+                    self.assertIn("archive_warning", result)
+                    self.assertNotEqual(result["sources"][0]["archive_status"], "saved")
+                    self.assertEqual(self.store.status()["last_capture"]["sources_saved"], 0)
+                    self.assertEqual(self.manifests(), [])
+                    self.assertEqual(claim.read_bytes() if claim.exists() else None, replacement)
+                    claim.write_bytes(token)
 
     def test_replaced_archive_root_and_ancestor_cannot_claim_or_create_private_storage(self):
         private = self.database.parent

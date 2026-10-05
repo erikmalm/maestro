@@ -19,7 +19,8 @@ from backend.context_policy import (
     DEFAULT, MAX_ARCHIVE_ITEMS, configuration, contains_source_secret, contains_url_secret,
     decoded_url_variants, eligible, manifest_hash, public_url, timestamp,
 )
-from backend.storage import archive_path, publish_archive, read_archive, read_archive_json
+from backend.storage import (archive_available, archive_inventory, archive_owner, archive_path,
+                             publish_archive, read_archive, read_archive_json)
 
 
 SCHEMA = 1
@@ -31,8 +32,6 @@ REBUILD_SECONDS = 5
 ID = re.compile(r"[a-f0-9]{32}\Z")
 HASH = re.compile(r"[a-f0-9]{64}\Z")
 ROOT = Path(__file__).resolve().parent.parent
-_owners = {}
-_owner_lock = threading.RLock()
 
 
 def storage_errors(action):
@@ -187,16 +186,7 @@ class ContextStore:
                     count = db.execute("SELECT COUNT(*) FROM captures").fetchone()[0]
             except sqlite3.Error:
                 state = {**state, "last_error": "The local source index needs rebuilding."}
-        available = bool(self.archive and self.archive.is_dir() and not state.get("write_unavailable"))
-        if available:
-            try:
-                claim = archive_path(self.archive, "writer-owner.tmp")
-                if claim.exists():
-                    with _owner_lock:
-                        available = (_owners.get(os.path.normcase(str(self.archive)), (None,))[0] == self._token
-                                     and read_archive(self.archive, "writer-owner.tmp", 64).decode("ascii") == self._token)
-            except (OSError, ValueError, UnicodeError):
-                available = False
+        available = not state.get("write_unavailable") and archive_available(self.archive, self._token)
         return {"configured": self.archive is not None, "available": available,
                 "path": str(self.archive) if self.archive else None, "config": state["config"], "indexed_count": count,
                 **{field: state[field] for field in ("missing_count", "corrupt_count", "archive_bytes", "archive_items",
@@ -204,49 +194,12 @@ class ContextStore:
 
     @contextmanager
     def archive_owner(self):
-        """Atomic cross-runtime local claim; stale claims require explicit cleanup."""
-        if self.archive is None:
-            raise ValueError("Configure a context archive directory on the server first.")
-        claim = archive_path(self.archive, "writer-owner.tmp")
-        key = os.path.normcase(str(self.archive))
-        with _owner_lock:
-            if key in _owners:
-                if _owners[key][0] != self._token:
-                    raise ValueError("Another Maestro workspace owns this archive. Stop it before enabling a second writer.")
-                _owners[key][1] += 1
-            else:
-                try:
-                    self.archive.mkdir(parents=True, exist_ok=True)
-                except OSError:
-                    raise ValueError("The context archive directory is unavailable or cannot be written.") from None
-                try:
-                    with os.fdopen(os.open(claim, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "w", encoding="ascii") as stream:
-                        stream.write(self._token)
-                        stream.flush()
-                        os.fsync(stream.fileno())
-                except FileExistsError:
-                    raise ValueError("This archive has an existing writer claim. Stop its previous Maestro instance before removing writer-owner.tmp and retrying.") from None
-                except OSError:
-                    raise ValueError("The context archive writer claim could not be created. Check its directory permissions.") from None
-                _owners[key] = [self._token, 1]
-        try:
+        with archive_owner(self.archive, self._token, self._write_lock):
             yield self
-        finally:
-            with self._write_lock, _owner_lock:
-                _owners[key][1] -= 1
-                if not _owners[key][1]:
-                    _owners.pop(key, None)
-                    try:
-                        if read_archive(self.archive, "writer-owner.tmp", 64).decode("ascii") == self._token:
-                            (self.archive / "writer-owner.tmp").unlink()
-                    except (OSError, ValueError, UnicodeError):
-                        pass  # An uncleared claim blocks the next writer safely.
 
     @contextmanager
     def _writer(self):
         with self._write_lock, self.archive_owner():
-            if read_archive(self.archive, "writer-owner.tmp", 64).decode("ascii") != self._token:
-                raise ValueError("The archive writer claim changed. Stop capture and check its ownership.")
             yield
 
     def _format(self):
@@ -267,7 +220,7 @@ class ContextStore:
             if config["enabled"]:
                 self._format()
                 # Saving a lower cap remains possible for an already larger archive.
-                total, items, _ = self._inventory()
+                total, items, _ = archive_inventory(self.archive, MAX_ARCHIVE_ITEMS * 2)
             if config != previous:
                 self._invalidate_rebuild()
             with self._transaction() as (state, db):
@@ -278,31 +231,6 @@ class ContextStore:
                     state.update(last_error=None, write_unavailable=False,
                                  archive_bytes=total, archive_items=items)
         return self.status()
-
-    def _inventory(self, max_items=None):
-        """Recovery allows one tombstone per capture; acquisition passes its cap."""
-        max_items = MAX_ARCHIVE_ITEMS * 2 if max_items is None else max_items
-        count = total = 0
-        captures = []
-        started = time.monotonic()
-        if not self.archive or not self.archive.is_dir():
-            raise ValueError("The context archive is unavailable.")
-        pending = [self.archive]
-        while pending:
-            with os.scandir(pending.pop()) as entries:
-                for entry in entries:
-                    count += 1
-                    if count > max_items or time.monotonic() - started > 10:
-                        raise ValueError("The archive exceeds its item or scan allowance.")
-                    relative = Path(entry.path).relative_to(self.archive).as_posix()
-                    path = archive_path(self.archive, relative)
-                    if entry.is_dir(follow_symlinks=False):
-                        pending.append(path)
-                    else:
-                        total += path.stat().st_size
-                        if re.fullmatch(r"records/captures/\d{4}-\d{2}/[a-f0-9]{32}\.json", relative):
-                            captures.append(relative)
-        return total, count, captures
 
     def _index_connection(self, path=None):
         path = path or self.index
@@ -550,7 +478,7 @@ class ContextStore:
                 if not config["enabled"]:
                     return result
                 self._format()
-                total, items, _ = self._inventory(config["max_items"])
+                total, items, _ = archive_inventory(self.archive, config["max_items"])
                 for clean in result["sources"]:
                     if (not eligible(clean["url"], config)
                             or contains_url_secret(clean["url"], secrets)):
@@ -591,7 +519,7 @@ class ContextStore:
                 with self._transaction() as (state, db):
                     if saved:
                         db.execute("INSERT INTO context_queries VALUES(?,?,?,?) ON CONFLICT(key) DO UPDATE SET query=excluded.query,at=excluded.at,captures=excluded.captures", (key, query, at, json.dumps(saved)))
-                    total, items, _ = self._inventory(config["max_items"])
+                    total, items, _ = archive_inventory(self.archive, config["max_items"])
                     state.update(archive_bytes=total, archive_items=items, last_error=result.get("archive_warning"),
                                  write_unavailable=False, last_capture=measured)
                     if saved:
@@ -600,7 +528,7 @@ class ContextStore:
             result["archive_warning"] = "Some source evidence could not be saved. Existing captures remain unchanged."
             try:
                 try:
-                    total, items, _ = self._inventory(config["max_items"])
+                    total, items, _ = archive_inventory(self.archive, config["max_items"])
                 except (OSError, ValueError):
                     total = items = None
                 with self._write_lock, self._transaction() as (state, _):
@@ -657,7 +585,7 @@ class ContextStore:
             if not self._deleted(capture_id):
                 self.get_capture(capture_id)
                 publish_archive(self.archive, relative, json.dumps({"schema_version": SCHEMA, "capture_id": capture_id}).encode())
-            total, items, _ = self._inventory()
+            total, items, _ = archive_inventory(self.archive, MAX_ARCHIVE_ITEMS * 2)
             with self._transaction() as (state, db):
                 state.update(archive_bytes=total, archive_items=items)
                 for key, raw in db.execute("SELECT key,captures FROM context_queries").fetchall():
@@ -717,7 +645,7 @@ class ContextStore:
             if continuation is not None and (job is None or job["id"] != continuation):
                 raise ValueError("The archive changed during index rebuild. Start or resume a new rebuild.")
             if job is None:
-                total, items, paths = self._inventory()
+                total, items, paths = archive_inventory(self.archive, MAX_ARCHIVE_ITEMS * 2)
                 job = {"id": uuid.uuid4().hex, "config": config, "processed": 0, "total": len(paths),
                        "missing": 0, "corrupt": 0, "inventory_hash": self._capture_inventory_hash(paths)}
                 with closing(self._index_connection(stage)) as db, db:
@@ -749,7 +677,7 @@ class ContextStore:
             progress = {field: job[field] for field in ("id", "processed", "total")}
             progress["complete"] = complete
             if complete:
-                total, items, paths = self._inventory()
+                total, items, paths = archive_inventory(self.archive, MAX_ARCHIVE_ITEMS * 2)
                 if self._capture_inventory_hash(paths) != job["inventory_hash"]:
                     self._invalidate_rebuild()
                     raise ValueError("The archive changed during index rebuild. Start or resume a new rebuild.")
