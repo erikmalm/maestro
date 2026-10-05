@@ -70,11 +70,26 @@ function sourceURL(value: string) {
   }
 }
 
+function sourceLink(url: string, text: string, fallback: ReactNode = text) {
+  const href = sourceURL(url);
+  return href ? (
+    <a href={href} target="_blank" rel="noopener noreferrer">
+      {text}
+    </a>
+  ) : (
+    fallback
+  );
+}
+
 function sourceDate(value: string | null) {
   if (value === null) return "date unknown";
   if (/^\d{4}-\d{2}-\d{2}$/.test(value)) return value;
   const date = new Date(value);
   return Number.isFinite(date.getTime()) ? date.toLocaleString() : value;
+}
+
+function publicationDate(value?: string | null) {
+  return value ? `Published ${sourceDate(value)}` : "Publication date unknown";
 }
 
 function archiveSize(value: number) {
@@ -792,31 +807,24 @@ function SavedSourceFinder({
           />
         </label>
         <div className="archive-search-fields">
-          <label>
-            Domain (optional)
-            <input
-              maxLength={253}
-              placeholder="docs.example.org"
-              value={draft.domain}
-              onChange={(event) => edit({ domain: event.target.value })}
-            />
-          </label>
-          <label>
-            Retrieved from
-            <input
-              type="date"
-              value={draft.retrieved_from}
-              onChange={(event) => edit({ retrieved_from: event.target.value })}
-            />
-          </label>
-          <label>
-            Retrieved to
-            <input
-              type="date"
-              value={draft.retrieved_to}
-              onChange={(event) => edit({ retrieved_to: event.target.value })}
-            />
-          </label>
+          {(
+            [
+              ["domain", "Domain (optional)"],
+              ["retrieved_from", "Retrieved from"],
+              ["retrieved_to", "Retrieved to"],
+            ] as const
+          ).map(([key, label]) => (
+            <label key={key}>
+              {label}
+              <input
+                type={key === "domain" ? "text" : "date"}
+                maxLength={key === "domain" ? 253 : undefined}
+                placeholder={key === "domain" ? "docs.example.org" : undefined}
+                value={draft[key]}
+                onChange={(event) => edit({ [key]: event.target.value })}
+              />
+            </label>
+          ))}
           <NumberFields
             values={draft}
             fields={[["limit", "Maximum results", 1, 20]]}
@@ -883,22 +891,14 @@ function SavedSourceFinder({
                 <li key={source.capture_id}>
                   <h4>{source.title || "Untitled saved source"}</h4>
                   <p className="archive-result-url">
-                    {url ? (
-                      <a href={url} target="_blank" rel="noopener noreferrer">
-                        {source.url}
-                      </a>
-                    ) : (
-                      source.url
-                    )}
+                    {sourceLink(source.url, source.url)}
                   </p>
                   <p className="reflection-note">
                     {domain && `${domain} · `}Search excerpt · Retrieved{" "}
                     {sourceDate(source.retrieved_at)}
                     {source.stale && <> · Older saved evidence</>}
                     <br />
-                    {source.published_at
-                      ? `Published ${sourceDate(source.published_at)}`
-                      : "Publication date unknown"}
+                    {publicationDate(source.published_at)}
                   </p>
                   <p className="archive-result-excerpt">
                     {source.content.slice(0, 360)}
@@ -978,7 +978,6 @@ function SavedSource({
     }
   }
   if (!capture && !error) return <p role="status">Loading saved source…</p>;
-  const url = capture && sourceURL(capture.url);
   return (
     <div className="saved-source-view">
       {error && (
@@ -989,17 +988,11 @@ function SavedSource({
       {capture && (
         <>
           <h3>{capture.title}</h3>
-          {url && (
-            <a href={url} target="_blank" rel="noopener noreferrer">
-              Open live source
-            </a>
-          )}
+          {sourceLink(capture.url, "Open live source", null)}
           <p className="reflection-note">
             Search excerpt · Retrieved {sourceDate(capture.retrieved_at)}
             <br />
-            {capture.published_at
-              ? `Published ${sourceDate(capture.published_at)}`
-              : "Publication date unknown"}
+            {publicationDate(capture.published_at)}
             {capture.modified_at && (
               <>
                 <br />
@@ -2070,21 +2063,14 @@ export default function App() {
                             ...(message.web_search?.sources ?? []),
                             ...(message.source_context?.citations ?? []),
                           ].map((source, index) => {
-                            const url = sourceURL(source.url);
                             const lookup =
                               index < (message.web_search?.sources.length ?? 0);
                             return (
                               <li key={index}>
-                                {url ? (
-                                  <a
-                                    href={url}
-                                    target="_blank"
-                                    rel="noopener noreferrer"
-                                  >
-                                    {source.title || source.url}
-                                  </a>
-                                ) : (
-                                  source.title
+                                {sourceLink(
+                                  source.url,
+                                  source.title || source.url,
+                                  source.title,
                                 )}
                                 <div className="source-details">
                                   <span>
@@ -2102,9 +2088,7 @@ export default function App() {
                                     )}
                                   </span>
                                   <span>
-                                    {source.published_at
-                                      ? `Published ${sourceDate(source.published_at)}`
-                                      : "Publication date unknown"}
+                                    {publicationDate(source.published_at)}
                                   </span>
                                   {source.modified_at && (
                                     <span>
