@@ -252,6 +252,84 @@ class SourceFollowupTests(unittest.TestCase):
                 self.assertEqual(archive_before, {path.relative_to(self.archive): path.read_bytes()
                                                  for path in self.archive.rglob("*") if path.is_file()})
 
+    def test_credential_rotation_rescreens_only_server_evidence_before_each_inference(self):
+        secret = "synthetic-rotated-key"
+        percent = "".join(f"%{ord(char):02X}" for char in secret)
+        entities = "".join(f"&#x{ord(char):x};" for char in secret)
+        original = self.network
+        for stage in ("metadata", "planning"):
+            for field, key, text, transient in (("content", secret, secret, False),
+                    ("content", secret, percent.replace("%", "%25"), False),
+                    ("content", secret, entities.replace("&", "%26"), True),
+                    ("content", 'synthetic-"\\-key', 'synthetic-"\\-key', False),
+                    ("url", secret, percent, False), ("title", secret, entities, True)):
+                with self.subTest(stage=stage, field=field, transient=transient, text=text):
+                    self.keys.clear()
+                    self.keys[ENDPOINT] = "synthetic-original-key"
+                    source = {"title": "First guide", "url": "https://other.example.org/first" if transient
+                              else "https://docs.example.org/first", "content": "First guide: alpha is enabled."}
+                    source[field] = source[field] + "/" + text if field == "url" else source[field] + " " + text
+                    self.prime([source])
+                    safe = self.store.capture("second guide", self.store.now().isoformat(), [
+                        {"title": "Second guide", "url": "https://docs.example.org/second",
+                         "content": "Second guide: beta is disabled."}], 3)["sources"][0]
+                    before = self.workspace()["chats"][0]["messages"]
+                    archive_before = {path.relative_to(self.archive): path.read_bytes()
+                                      for path in self.archive.rglob("*") if path.is_file()}
+                    self.calls.clear()
+                    def rotated(config, credential, method, path, payload=None):
+                        response = original(config, credential, method, path, payload)
+                        if path == ("/api/show" if stage == "metadata" else "/api/chat"):
+                            WebSearch(self.database, timezone.utc).configure(
+                                {**SEARCH_DEFAULT, "enabled": False}, key, False)
+                        if path == "/api/chat":
+                            response["message"] = {"role": "assistant", "content": "", "tool_calls": [{"function": {
+                                "name": "search_context", "arguments": {"query": "second guide", "freshness": "stable"}}}]}
+                        return response
+                    self.network = rotated
+                    with patch("backend.provider.credentials.save", side_effect=lambda url, value, persist: self.keys.__setitem__(url, value)), \
+                            patch("backend.provider.WebSearch.search") as hosted:
+                        with self.assertRaisesRegex(ValueError, "Prior source evidence contains configured credentials"):
+                            self.send("Rewrite that answer and include details from the saved second guide")
+                        hosted.assert_not_called()
+                    model_calls = int(stage == "planning")
+                    self.assertEqual(len([call for call in self.calls if call[1] == "/api/chat"]), model_calls)
+                    self.assertEqual(self.workspace()["chats"][0]["messages"], before)
+                    entry = self.provider.read_state()["ledger"][-1]
+                    self.assertEqual((entry["status"], entry.get("model_calls", 0), entry.get("input_tokens", 0), entry.get("output_tokens", 0)),
+                                     ("failed", model_calls, 37 * model_calls, 11 * model_calls))
+                    self.assertEqual(self.store.get_capture(safe["capture_id"], safe["content_hash"], safe["manifest_hash"]), safe)
+                    self.assertEqual(archive_before, {path.relative_to(self.archive): path.read_bytes()
+                                                     for path in self.archive.rglob("*") if path.is_file()})
+        self.network = original
+
+    def test_user_source_record_prefix_does_not_become_server_evidence_during_key_rotation(self):
+        self.prime([{"title": "First guide", "url": "https://docs.example.org/first", "content": "Safe first guide."}])
+        self.store.capture("second guide", self.store.now().isoformat(), [
+            {"title": "Second guide", "url": "https://docs.example.org/second", "content": "Safe second guide."}], 3)
+        secret = "synthetic-user-provided-key"
+        ordinary_text = SOURCE_RECORD_PREFIX + "ordinary user text, not JSON: " + secret
+        state = self.workspace()
+        state["chats"][0]["messages"].insert(0, {"id": "ordinary-user", "role": "user", "text": ordinary_text})
+        self.save_workspace(state)
+        original = self.network
+        def rotated(config, credential, method, path, payload=None):
+            response = original(config, credential, method, path, payload)
+            if path == "/api/chat" and "tools" in payload:
+                WebSearch(self.database, timezone.utc).configure({**SEARCH_DEFAULT, "enabled": False}, secret, False)
+                response["message"] = {"role": "assistant", "content": "", "tool_calls": [{"function": {
+                    "name": "search_context", "arguments": {"query": "second guide", "freshness": "stable"}}}]}
+            return response
+        self.network = rotated
+        with patch("backend.provider.credentials.save", side_effect=lambda url, value, persist: self.keys.__setitem__(url, value)), \
+                patch("backend.provider.WebSearch.search") as hosted:
+            result = self.send("Rewrite that answer and include details from the saved second guide")
+            hosted.assert_not_called()
+        self.assertEqual((result["input_tokens"], result["output_tokens"]), (74, 22))
+        self.assertEqual(len([call for call in self.calls if call[1] == "/api/chat"]), 2)
+        self.assertTrue(any(message["content"] == ordinary_text for message in self.calls[-1][2]["messages"]))
+        self.assertEqual(self.provider.read_state()["ledger"][-1]["status"], "settled")
+
     def test_saved_exact_and_keyword_credentials_are_rejected_before_final_synthesis(self):
         secret = "synthetic-newly-known-search-key"
         encoded = "".join(f"%{ord(char):02X}" for char in secret)

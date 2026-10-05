@@ -631,6 +631,19 @@ class Provider:
                     guards.append(current)
         return message(), guards, {"snapshot_at": packet["snapshot_at"], "references": references}
 
+    def check_source_packet(self, packet):
+        if packet is None:
+            return
+        try:
+            search_key = credentials.read(SEARCH_ENDPOINT)[0]
+        except ValueError:
+            search_key = None
+        secrets = WebSearch(self.database, self.timezone)._source_secrets(search_key)
+        if any(contains_source_secret(source[field], secrets)
+               for report in packet["previous_searches"] for source in report["sources"]
+               for field in ("title", "url", "content") if field in source):
+            raise ValueError("Prior source evidence contains configured credentials. No further model call was made.")
+
     def generate(self, text, chat_id, title_for=None, model="", role="chat", context=None, context_mode="prefer_saved"):
         """Chat, title and explicit context share dispatch, limits and accounting."""
         if context_mode not in ("prefer_saved", "refresh", "saved_only"):
@@ -760,6 +773,7 @@ class Provider:
             required_source_instructions = " This request requires source evidence. You must request the available source tool before answering; do not answer from unsupported recollection."
             memories = []
             prior_sources, source_context = [], None
+            source_packet = None
             if context:
                 history = context["messages"]
             elif title:
@@ -785,6 +799,7 @@ class Provider:
                     record, prior_sources, source_context = self.source_record(chat["messages"], archive_status, allowance,
                         include_content=bool(include_content), secrets=tuple(secret for secret in (search_key, key) if secret),
                         required_dates=search_dates if include_content else ())
+                    source_packet = json.loads(record["content"][len(SOURCE_RECORD_PREFIX):])
                     history.insert(0, record)
                     if previous_search and (include_content or possible_replay and status_question):
                         allow_hosted = False
@@ -895,13 +910,14 @@ class Provider:
             dispatched = True
             with self.context_store.evidence_guard(prior_sources) if prior_sources else nullcontext():
                 pass
+            self.check_source_packet(source_packet)
             data = (background_network(config, path, payload, deadline) if job is not None
                     else network(config, key, "POST", path, payload))
             if auto_search:
                 data, search_result = self.search_turn(config, payload, data, request_id, workspace["limits"],
                                                        archive_enabled=archive_enabled, allow_hosted=allow_hosted,
                                                        context_mode=context_mode, user_text=text, require_sources=require_sources,
-                                                       search_dates=search_dates, prior_sources=prior_sources)
+                                                       search_dates=search_dates, prior_sources=prior_sources, source_packet=source_packet)
             if local:
                 if job is not None and data.get("done") is not True:
                     raise BackgroundUncertain("Ollama did not confirm background completion. Restart the original Ollama server, then confirm the restart in Usage & limits.", False)
@@ -997,7 +1013,7 @@ class Provider:
             raise ValueError("Provider returned an unusable response. Check usage before retrying.") from None
 
     def search_turn(self, config, payload, data, request_id, limits, *, archive_enabled=False,
-                    allow_hosted=True, context_mode="prefer_saved", user_text="", require_sources=False, search_dates=(), prior_sources=()):
+                    allow_hosted=True, context_mode="prefer_saved", user_text="", require_sources=False, search_dates=(), prior_sources=(), source_packet=None):
         first_input, first_output = local_usage(data)
         with self.transaction() as state:
             entry = next(x for x in state["ledger"] if x["id"] == request_id)
@@ -1140,6 +1156,7 @@ class Provider:
                 if (final_bound + remaining > config["ollama_context_tokens"]
                         or first_input + first_output + final_bound + remaining > current_limits["max_tokens"]):
                     raise ValueError("The search-assisted answer would exceed your token/context limit. No further model call was made.")
+                self.check_source_packet(source_packet)
                 next(x for x in state["ledger"] if x["id"] == request_id)["model_calls"] = 2
             final_payload = {**payload, "messages": final_messages, "options": {**payload["options"], "num_predict": remaining}}
             final_payload.pop("tools", None)  # No second search/tool round, regardless of model output.
