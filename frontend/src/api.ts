@@ -384,10 +384,7 @@ export async function rebuildContextArchive(
         throw new Error(
           "Source index rebuild progress changed. Refresh the archive status and retry.",
         );
-      onProgress?.(status);
-      return status;
-    }
-    if (
+    } else if (
       typeof progress.id !== "string" ||
       !/^[a-f0-9]{32}$/.test(progress.id) ||
       !Number.isInteger(progress.processed) ||
@@ -408,7 +405,7 @@ export async function rebuildContextArchive(
         "Source index rebuild did not make valid progress. Refresh the archive status and retry.",
       );
     const proceed = onProgress?.(status);
-    if (progress.complete || proceed === false) return status;
+    if (!progress || progress.complete || proceed === false) return status;
     previous = progress;
   }
 }

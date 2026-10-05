@@ -392,7 +392,7 @@ class ContextStore:
                         observed = datetime.fromisoformat(timestamp(source["retrieved_at"]))
                         stale = observed < earliest
                         if (observed > now or stale and not allow_stale
-                                or filters["domain"] and urlsplit(public_url(source["url"], allow_query=True, allow_http=True)).hostname != filters["domain"]
+                                or filters["domain"] and urlsplit(canonical_url).hostname != filters["domain"]
                                 or filters["retrieved_from"] and observed.date().isoformat() < filters["retrieved_from"]
                                 or filters["retrieved_to"] and observed.date().isoformat() > filters["retrieved_to"]):
                             continue
@@ -568,9 +568,8 @@ class ContextStore:
 
     def _invalidate_rebuild(self):
         """A replacement cannot discard changes made after its snapshot."""
-        for suffix in ("-journal", "-wal", "-shm"):
+        for suffix in ("-journal", "-wal", "-shm", ""):
             self._rebuild_path.with_name(self._rebuild_path.name + suffix).unlink(missing_ok=True)
-        self._rebuild_path.unlink(missing_ok=True)
         if self._state()["rebuild_progress"] is not None:
             with self._transaction() as (state, _):
                 state["rebuild_progress"] = None
@@ -594,7 +593,6 @@ class ContextStore:
             if not config["enabled"]:
                 raise ValueError("Enable the configured source archive before rebuilding.")
             self._format()
-            self.index.parent.mkdir(parents=True, exist_ok=True)
             stage = self._rebuild_path
             job = None
             if stage.is_file():

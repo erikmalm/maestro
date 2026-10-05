@@ -63,6 +63,14 @@ function savedSourceFinder(page: Page) {
   return page.getByRole("region", { name: "Find saved sources", exact: true });
 }
 
+async function expectFitsViewport(page: Page) {
+  expect(
+    await page.evaluate(
+      () => document.documentElement.scrollWidth <= window.innerWidth,
+    ),
+  ).toBe(true);
+}
+
 function workspace(messages: Message[] = []): Workspace {
   return {
     tasks: [],
@@ -338,6 +346,10 @@ async function fixture(page: Page, state = workspace()) {
           request.path === path &&
           (method === undefined || request.method === method),
       ),
+    rebuildStatus: (id: string, processed: number, total: number) => ({
+      ...state.context_archive!,
+      rebuild_progress: { id, processed, total, complete: false },
+    }),
     hold,
     held,
     missing,
@@ -581,10 +593,7 @@ test("source index rebuild runs sequential bounded batches with progress and pre
   const first = api.held.get(key)!;
   api.hold.add(key);
   await first.fulfill({
-    json: {
-      ...api.state.context_archive,
-      rebuild_progress: { id, processed: 1000, total: 2500, complete: false },
-    },
+    json: api.rebuildStatus(id, 1000, 2500),
   });
   await expect.poll(() => requests().length).toBe(2);
   await expect(
@@ -597,10 +606,7 @@ test("source index rebuild runs sequential bounded batches with progress and pre
   const second = api.held.get(key)!;
   api.hold.add(key);
   await second.fulfill({
-    json: {
-      ...api.state.context_archive,
-      rebuild_progress: { id, processed: 2000, total: 2500, complete: false },
-    },
+    json: api.rebuildStatus(id, 2000, 2500),
   });
   await expect.poll(() => requests().length).toBe(3);
   api.state.context_archive = {
@@ -640,10 +646,7 @@ test("source index rebuild pauses after the current batch, refreshes invalidatio
   const first = api.held.get(key)!;
   api.hold.add(key);
   await first.fulfill({
-    json: {
-      ...api.state.context_archive,
-      rebuild_progress: { id, processed: 1000, total: 3000, complete: false },
-    },
+    json: api.rebuildStatus(id, 1000, 3000),
   });
   await expect.poll(() => requests().length).toBe(2);
   await card.getByRole("button", { name: "Pause after current batch" }).click();
@@ -651,10 +654,7 @@ test("source index rebuild pauses after the current batch, refreshes invalidatio
     card.getByRole("button", { name: "Pausing after this batch…" }),
   ).toBeDisabled();
   await card.getByLabel("Reuse saved searches for (hours)").fill("72");
-  api.state.context_archive = {
-    ...api.state.context_archive!,
-    rebuild_progress: { id, processed: 1500, total: 3000, complete: false },
-  };
+  api.state.context_archive = api.rebuildStatus(id, 1500, 3000);
   await api.held.get(key)!.fulfill({ json: api.state.context_archive });
   await expect(
     card.getByText(
@@ -673,10 +673,7 @@ test("source index rebuild pauses after the current batch, refreshes invalidatio
   const resumed = api.held.get(key)!;
   api.hold.add(key);
   await resumed.fulfill({
-    json: {
-      ...api.state.context_archive,
-      rebuild_progress: { id, processed: 2200, total: 3000, complete: false },
-    },
+    json: api.rebuildStatus(id, 2200, 3000),
   });
   await expect.poll(() => requests().length).toBe(4);
   api.state.context_archive!.rebuild_progress = null;
@@ -1044,11 +1041,7 @@ test("settings and compact menu report actual archive usage and last retrieval s
   expect(bounds!.y).toBeGreaterThanOrEqual(0);
   expect(bounds!.x + bounds!.width).toBeLessThanOrEqual(375);
   expect(bounds!.y + bounds!.height).toBeLessThanOrEqual(812);
-  expect(
-    await page.evaluate(
-      () => document.documentElement.scrollWidth <= window.innerWidth,
-    ),
-  ).toBe(true);
+  await expectFitsViewport(page);
 });
 
 for (const mode of ["prefer_saved", "refresh", "saved_only"] as const) {
@@ -1567,11 +1560,7 @@ test("composer search readiness preserves history and later draft edits when sta
   expect(
     api.requests.map((request) => `${request.method} ${request.path}`),
   ).toEqual(["POST /api/chats"]);
-  expect(
-    await page.evaluate(
-      () => document.documentElement.scrollWidth <= window.innerWidth,
-    ),
-  ).toBe(true);
+  await expectFitsViewport(page);
 });
 
 test("composer search readiness stays hidden for a paid model provider", async ({
@@ -2678,11 +2667,7 @@ test("finder result excerpts remain bounded plaintext and keyboard usable on a n
   await expect(
     results.getByText("Publication date unknown", { exact: false }),
   ).toBeVisible();
-  expect(
-    await page.evaluate(
-      () => document.documentElement.scrollWidth <= window.innerWidth,
-    ),
-  ).toBe(true);
+  await expectFitsViewport(page);
   const open = results.getByRole("button", { name: "View saved result 1" });
   await open.focus();
   await open.press("Enter");
@@ -2706,19 +2691,11 @@ test("source mode and the text snapshot viewer fit a narrow screen", async ({
   await expect(
     page.getByRole("combobox", { name: "Source mode" }),
   ).toBeVisible();
-  expect(
-    await page.evaluate(
-      () => document.documentElement.scrollWidth <= window.innerWidth,
-    ),
-  ).toBe(true);
+  await expectFitsViewport(page);
   await page.getByRole("button", { name: "Close search options" }).click();
   await page.getByRole("button", { name: "View saved source 1" }).click();
   await expect(
     page.getByRole("dialog").getByLabel("Saved source text"),
   ).toBeVisible();
-  expect(
-    await page.evaluate(
-      () => document.documentElement.scrollWidth <= window.innerWidth,
-    ),
-  ).toBe(true);
+  await expectFitsViewport(page);
 });

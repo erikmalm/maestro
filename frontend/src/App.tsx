@@ -1356,6 +1356,7 @@ export default function App() {
   const archiveQueue = useRef(Promise.resolve());
   const reflectionPolling = useRef(false);
   const [reflectionActions, setReflectionActions] = useState(0);
+  const pollingAllowed = !busy && !feedbackSaving && !reflectionActions;
   const reflectionVisible = page === "settings" || page === "memory";
   const reflectionEnabled = workspace?.work?.config.enabled;
   const reflectionPending =
@@ -1388,9 +1389,7 @@ export default function App() {
     if (
       page !== "workspace" ||
       workspace?.provider.config.protocol !== "ollama" ||
-      busy ||
-      feedbackSaving ||
-      reflectionActions ||
+      !pollingAllowed ||
       !original?.config.enabled ||
       !original.credentials_present ||
       !original.tested_at ||
@@ -1449,18 +1448,10 @@ export default function App() {
     workspace?.web_search,
     workspace?.provider.config.protocol,
     page,
-    busy,
-    feedbackSaving,
-    reflectionActions,
+    pollingAllowed,
   ]);
   useEffect(() => {
-    if (
-      busy ||
-      feedbackSaving ||
-      reflectionActions ||
-      !(reflectionEnabled || reflectionPending)
-    )
-      return;
+    if (!pollingAllowed || !(reflectionEnabled || reflectionPending)) return;
     let active = true;
     async function poll() {
       if (!active || document.hidden || reflectionPolling.current) return;
@@ -1491,13 +1482,7 @@ export default function App() {
       window.clearInterval(timer);
       document.removeEventListener("visibilitychange", poll);
     };
-  }, [
-    busy,
-    feedbackSaving,
-    reflectionActions,
-    reflectionEnabled,
-    reflectionPending,
-  ]);
+  }, [pollingAllowed, reflectionEnabled, reflectionPending]);
   useEffect(() => {
     if (!mobileNav) return;
     const mobile = window.matchMedia("(max-width: 760px)");
