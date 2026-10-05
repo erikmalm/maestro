@@ -492,10 +492,10 @@ class SearchContextTests(unittest.TestCase):
         with patch("backend.provider.datetime", wraps=datetime) as clock:
             clock.now.return_value = datetime(2026, 10, 4, 10, tzinfo=backend.TIMEZONE)
             rejected = self.send("Use search to check tomorrow's weather in Stockholm")
+            workspace = self.client.get("/api/workspace").json()
         self.assertEqual(rejected.status_code, 409, rejected.text)
         self.assertIn("after adding its requested dates", rejected.json()["detail"])
         self.assertEqual(self.hosted_requests(), [])
-        workspace = self.client.get("/api/workspace").json()
         self.assertEqual(workspace["messages"], [])
         self.assertEqual(workspace["usage"]["calls"], 1)
         self.assertEqual(workspace["usage"]["input_tokens"], 100)
