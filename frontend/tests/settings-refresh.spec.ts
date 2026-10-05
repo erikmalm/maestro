@@ -44,6 +44,8 @@ const initial: Workspace = {
     credentials_present: true,
     credential_source: "session",
     tested_at: "2026-10-01T00:00:00Z",
+    ready: true,
+    unavailable_reason: null,
   },
   capabilities: {
     mode: "local",

@@ -277,8 +277,8 @@ export type WebSearchStatus = CredentialStatus & {
   remaining_today: number;
   paused_until: string | null;
   tested_at: string | null;
-  ready?: boolean;
-  unavailable_reason?: string | null;
+  ready: boolean;
+  unavailable_reason: string | null;
 };
 export const loadWebSearch = () => request<WebSearchStatus>("/web-search");
 export const saveWebSearch = (

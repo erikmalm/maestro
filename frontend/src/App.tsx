@@ -128,30 +128,6 @@ function ArchiveAccounting({
   );
 }
 
-function onlineSearchReadiness(status: WebSearchStatus) {
-  let reason: string | null = null;
-  if (!status.credentials_present)
-    reason = "Add and test an Ollama search API key in Settings.";
-  else if (!status.config.enabled)
-    reason = "Enable Optional web search in Settings.";
-  else if (!status.tested_at)
-    reason = "Test the search key in Settings before using online search.";
-  else if (status.remaining_today <= 0)
-    reason =
-      "The daily online search allowance is used up. Adjust the allowance in Settings or wait until tomorrow.";
-  else if (status.paused_until && Date.parse(status.paused_until) > Date.now())
-    reason = `Online search is paused after a rate limit until ${sourceDate(status.paused_until)}.`;
-  const ready = status.ready ?? reason === null;
-  return {
-    ready,
-    reason: ready
-      ? null
-      : (status.unavailable_reason ??
-        reason ??
-        "Online search is unavailable. Open Settings to check the search setup."),
-  };
-}
-
 function SearchOptions({
   status,
   archive,
@@ -176,7 +152,6 @@ function SearchOptions({
   const popup = useRef<HTMLDivElement>(null);
   const trigger = useRef<HTMLButtonElement>(null);
   const [expanded, setExpanded] = useState(false);
-  const online = onlineSearchReadiness(status);
   const savedAvailable = !!archive?.configured && archive.config.enabled;
   const publicPolicy = archive?.config.capture_policy === "all_public";
   const modeLabel =
@@ -189,13 +164,13 @@ function SearchOptions({
     ? "online search blocked in this chat"
     : mode === "saved_only"
       ? "online search off"
-      : online.ready
+      : status.ready
         ? "online search ready"
         : "online search unavailable";
   const indicator =
     mode === "saved_only"
       ? "saved"
-      : memoryDerived || !online.ready
+      : memoryDerived || !status.ready
         ? "unavailable"
         : "ready";
   const saving = !archive?.configured
@@ -292,7 +267,7 @@ function SearchOptions({
                 ? "Online search is blocked in this chat."
                 : mode === "saved_only"
                   ? "Saved only keeps online search off."
-                  : online.ready
+                  : status.ready
                     ? "Online search is ready."
                     : "Online search is unavailable."}
             </strong>
@@ -303,19 +278,19 @@ function SearchOptions({
               online search.
             </p>
           )}
-          {!online.ready && <p>{online.reason}</p>}
-          {!online.ready &&
+          {!status.ready && <p>{status.unavailable_reason}</p>}
+          {!status.ready &&
             status.paused_until &&
             Date.parse(status.paused_until) > Date.now() && (
               <p>Cooldown ends {sourceDate(status.paused_until)}.</p>
             )}
-          {online.ready && (memoryDerived || mode === "saved_only") && (
+          {status.ready && (memoryDerived || mode === "saved_only") && (
             <p>
               The online search setup is ready for a chat and source mode that
               permit it.
             </p>
           )}
-          {savedAvailable && (!online.ready || memoryDerived) && (
+          {savedAvailable && (!status.ready || memoryDerived) && (
             <p>
               {mode === "refresh"
                 ? "Choose Prefer saved or Saved only to use saved public sources locally."
@@ -759,11 +734,7 @@ function SavedSourceFinder({
     setSearching(false);
   }
   function clear() {
-    revision.current += 1;
-    setDraft(emptyDraft());
-    setResult(null);
-    setError("");
-    setSearching(false);
+    edit(emptyDraft());
     keywords.current?.focus();
   }
   async function search(event: FormEvent<HTMLFormElement>) {

@@ -812,10 +812,6 @@ textarea {
 }
 .search-readiness p {
   margin: 0 0 6px;
-  overflow-wrap: anywhere;
-}
-.search-readiness strong {
-  color: #292d35;
 }
 .search-readiness-actions {
   display: flex;

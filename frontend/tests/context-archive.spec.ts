@@ -39,7 +39,31 @@ function savedResult(
   };
 }
 
-function workspace(): Workspace {
+function sourcedAnswer(
+  provenance: Partial<NonNullable<Message["web_search"]>> = {},
+): Message {
+  return {
+    id: "answer",
+    role: "assistant",
+    text: "Sourced answer",
+    web_search: {
+      query: "public reference",
+      at: retrieved,
+      sources: [source],
+      ...provenance,
+    },
+  };
+}
+
+function sourceViewer(page: Page) {
+  return page.getByRole("dialog", { name: "Saved source", exact: true });
+}
+
+function savedSourceFinder(page: Page) {
+  return page.getByRole("region", { name: "Find saved sources", exact: true });
+}
+
+function workspace(messages: Message[] = []): Workspace {
   return {
     tasks: [],
     chats: [
@@ -51,7 +75,7 @@ function workspace(): Workspace {
       },
     ],
     active_chat_id: "archive-chat",
-    messages: [],
+    messages,
     memories: [],
     limits: { run_usd: 1, daily_usd: 5, monthly_usd: 50, max_tokens: 100000 },
     usage: {
@@ -91,6 +115,8 @@ function workspace(): Workspace {
       credentials_present: false,
       credential_source: "missing",
       tested_at: null,
+      ready: false,
+      unavailable_reason: "Add and test an Ollama search API key in Settings.",
     },
     context_archive: {
       configured: true,
@@ -285,17 +311,14 @@ async function fixture(page: Page, state = workspace()) {
       state.messages = [
         { id: "request", role: "user", text: body.text },
         {
-          id: "reply",
-          role: "assistant",
-          text: "Answer from saved sources [1]",
-          model: "synthetic-local",
-          web_search: {
-            query: "public reference",
+          ...sourcedAnswer({
             at: "2026-10-04T12:00:00Z",
             from_cache: true,
-            sources: [source],
             ...chatProvenance,
-          },
+          }),
+          id: "reply",
+          text: "Answer from saved sources [1]",
+          model: "synthetic-local",
         },
       ];
       return route.fulfill({ json: state });
@@ -1099,48 +1122,46 @@ for (const mode of ["prefer_saved", "refresh", "saved_only"] as const) {
 const readinessCases: {
   name: string;
   status: Partial<WebSearchStatus>;
-  expected: RegExp;
+  reason: string | null;
   noArchive?: boolean;
 }[] = [
   {
     name: "missing key",
     status: { credentials_present: false, tested_at: null },
-    expected: /Add and test an Ollama search API key/,
+    reason: "Add and test an Ollama search API key in Settings.",
     noArchive: true,
   },
   {
     name: "disabled search",
     status: { config: { enabled: false, daily_limit: 20, max_results: 3 } },
-    expected: /Enable Optional web search/,
+    reason: "Enable Optional web search in Settings.",
   },
   {
     name: "untested key",
     status: { tested_at: null },
-    expected: /Test the search key/,
+    reason: "Test the Ollama search key in Settings before using web search.",
   },
   {
     name: "exhausted allowance",
     status: { remaining_today: 0 },
-    expected: /daily online search allowance is used up/,
+    reason:
+      "Daily web search limit reached. Adjust the search allowance in Settings.",
   },
   {
     name: "cooldown",
     status: { paused_until: "2050-10-04T12:00:00Z" },
-    expected: /paused after a rate limit/,
+    reason:
+      "Ollama search is paused after a rate limit. Wait until the cooldown ends.",
   },
   {
     name: "server unavailable reason",
-    status: {
-      ready: false,
-      unavailable_reason:
-        "A web search is already running. Wait for it to finish.",
-    },
-    expected: /A web search is already running/,
+    status: {},
+    reason: "A web search is already running. Wait for it to finish.",
   },
   {
     name: "ready search",
-    status: { ready: true, unavailable_reason: null },
-    expected: /Online search is ready\./,
+    status: {},
+    reason: null,
   },
 ];
 
@@ -1283,6 +1304,10 @@ for (const scenario of readinessCases) {
         remaining_today: 19,
       },
       scenario.status,
+      {
+        ready: scenario.reason === null,
+        unavailable_reason: scenario.reason,
+      },
     );
     if (scenario.noArchive) delete state.context_archive;
     state.messages = [
@@ -1300,7 +1325,9 @@ for (const scenario of readinessCases) {
       name: "Online search readiness",
       exact: true,
     });
-    await expect(notice).toContainText(scenario.expected);
+    await expect(notice).toContainText(
+      scenario.reason ?? "Online search is ready.",
+    );
     await expect(
       notice.getByRole("button", { name: "Open Settings", exact: true }),
     ).toBeVisible();
@@ -1649,29 +1676,21 @@ test("chat discloses a partial saved lookup for keyword evidence and fresh fallb
 test("saved citations expose original dates and text-only snapshots, with explicit removal", async ({
   page,
 }) => {
-  const state = workspace();
-  state.messages = [
+  const state = workspace([
     {
-      id: "answer",
-      role: "assistant",
-      text: "Sourced answer [1]",
-      web_search: {
-        query: "public reference",
+      ...sourcedAnswer({
         at: "2026-10-04T12:00:00Z",
         from_cache: true,
-        sources: [source],
-      },
+      }),
+      text: "Sourced answer [1]",
     },
-  ];
+  ]);
   const api = await fixture(page, state);
   await expect(
     page.getByText(`Published ${publication}`, { exact: true }),
   ).toBeVisible();
   await page.getByRole("button", { name: "View saved source 1" }).click();
-  const viewer = page.getByRole("dialog", {
-    name: "Saved source",
-    exact: true,
-  });
+  const viewer = sourceViewer(page);
   await expect(viewer.locator(".source-snapshot")).toHaveText(source.content);
   await expect(viewer.locator("script, img")).toHaveCount(0);
   expect(
@@ -1720,26 +1739,11 @@ for (const read of ["loaded", "pending"] as const) {
   test(`a reopened ${read} viewer cannot retain evidence after its earlier deletion completes`, async ({
     page,
   }) => {
-    const state = workspace();
-    state.messages = [
-      {
-        id: "answer",
-        role: "assistant",
-        text: "Sourced answer",
-        web_search: {
-          query: "public reference",
-          at: retrieved,
-          sources: [source],
-        },
-      },
-    ];
+    const state = workspace([sourcedAnswer()]);
     const api = await fixture(page, state);
     const path = `/api/context/sources/${source.capture_id}`;
     const open = page.getByRole("button", { name: "View saved source 1" });
-    const viewer = page.getByRole("dialog", {
-      name: "Saved source",
-      exact: true,
-    });
+    const viewer = sourceViewer(page);
     await open.click();
     await expect(viewer.getByLabel("Saved source text")).toHaveText(
       source.content,
@@ -1819,10 +1823,7 @@ for (const refresh of ["failed", "stale"] as const) {
     await page.getByRole("button", { name: "Connect and load models" }).click();
     await expect.poll(() => refreshes).toBe(1);
     await card.getByRole("button", { name: "View saved result 1" }).click();
-    const viewer = page.getByRole("dialog", {
-      name: "Saved source",
-      exact: true,
-    });
+    const viewer = sourceViewer(page);
     await expect(viewer.getByLabel("Saved source text")).toHaveText(
       source.content,
     );
@@ -1871,10 +1872,7 @@ test("archive actions serialize older status reads and continue after a rejected
   await card.getByRole("button", { name: "Refresh archive status" }).click();
   await expect.poll(() => api.held.has("GET /api/context")).toBe(true);
   await card.getByRole("button", { name: "View saved result 1" }).click();
-  const viewer = page.getByRole("dialog", {
-    name: "Saved source",
-    exact: true,
-  });
+  const viewer = sourceViewer(page);
   await expect(viewer.getByLabel("Saved source text")).toHaveText(
     source.content,
   );
@@ -1923,31 +1921,24 @@ test("archive actions serialize older status reads and continue after a rejected
 test("unsaved evidence keeps live provenance and late snapshot reads cannot replace another source", async ({
   page,
 }) => {
-  const state = workspace();
-  state.messages = [
-    {
-      id: "answer",
-      role: "assistant",
-      text: "Sourced answer",
-      web_search: {
-        query: "public reference",
-        at: "2026-10-04T12:00:00Z",
-        archive_warning: "The archive could not save one source.",
-        sources: [
-          source,
-          { ...source, capture_id: "capture-two", title: "Second source" },
-          {
-            title: "Transient source",
-            url: "https://public.example.org/",
-            archive_status: "not_saved",
-            retrieved_at: retrieved,
-            content_kind: "search_excerpt",
-            published_at: null,
-          },
-        ],
-      },
-    },
-  ];
+  const state = workspace([
+    sourcedAnswer({
+      at: "2026-10-04T12:00:00Z",
+      archive_warning: "The archive could not save one source.",
+      sources: [
+        source,
+        { ...source, capture_id: "capture-two", title: "Second source" },
+        {
+          title: "Transient source",
+          url: "https://public.example.org/",
+          archive_status: "not_saved",
+          retrieved_at: retrieved,
+          content_kind: "search_excerpt",
+          published_at: null,
+        },
+      ],
+    }),
+  ]);
   const api = await fixture(page, state);
   await expect(
     page.getByText("Source was not saved", { exact: true }),
@@ -2012,10 +2003,7 @@ for (const change of ["scope", "policy", "enabled"] as const) {
       const capturePath = `/api/context/sources/${source.capture_id}`;
       if (response === "pending") api.hold.add(`GET ${capturePath}`);
       await card.getByRole("button", { name: "View saved result 1" }).click();
-      const viewer = page.getByRole("dialog", {
-        name: "Saved source",
-        exact: true,
-      });
+      const viewer = sourceViewer(page);
       if (response === "pending")
         await expect.poll(() => api.held.has(`GET ${capturePath}`)).toBe(true);
       else
@@ -2070,10 +2058,7 @@ test("a saved source viewer stays loaded through non-eligibility saves and later
     .getByLabel("Approved public source URLs (one per line)")
     .fill("https://unsaved.example.org/");
   await card.getByRole("button", { name: "View saved result 1" }).click();
-  const viewer = page.getByRole("dialog", {
-    name: "Saved source",
-    exact: true,
-  });
+  const viewer = sourceViewer(page);
   await expect(viewer.locator(".source-snapshot")).toHaveText(source.content);
   const save = api.held.get("PUT /api/context")!;
   api.state.context_archive!.config = save.request().postDataJSON();
@@ -2098,21 +2083,19 @@ test("a saved source viewer stays loaded through non-eligibility saves and later
 test("older saved citations keep their original retrieval date and request both cited hashes", async ({
   page,
 }) => {
-  const state = workspace();
-  state.messages = [
+  const state = workspace([
     {
-      id: "older-answer",
-      role: "assistant",
-      text: "Answer from older saved evidence",
-      web_search: {
+      ...sourcedAnswer({
         query: "older public reference",
         at: "2026-11-04T12:00:00Z",
         from_cache: true,
         stale: true,
         sources: [{ ...source, retrieved_at: "2026-10-02", stale: true }],
-      },
+      }),
+      id: "older-answer",
+      text: "Answer from older saved evidence",
     },
-  ];
+  ]);
   const api = await fixture(page, state);
   await expect(
     page.getByText("Older saved evidence", { exact: true }),
@@ -2144,26 +2127,19 @@ for (const digest of ["content_hash", "manifest_hash"] as const) {
   test(`a changed saved capture ${digest} shows an unavailable error instead of replacement evidence`, async ({
     page,
   }) => {
-    const state = workspace();
-    state.messages = [
+    const state = workspace([
       {
-        id: "historical-answer",
-        role: "assistant",
-        text: "Historical answer",
-        web_search: {
-          query: "public reference",
-          at: retrieved,
+        ...sourcedAnswer({
           from_cache: true,
           sources: [{ ...source, [digest]: "b".repeat(64) }],
-        },
+        }),
+        id: "historical-answer",
+        text: "Historical answer",
       },
-    ];
+    ]);
     const api = await fixture(page, state);
     await page.getByRole("button", { name: "View saved source 1" }).click();
-    const viewer = page.getByRole("dialog", {
-      name: "Saved source",
-      exact: true,
-    });
+    const viewer = sourceViewer(page);
     await expect(viewer.getByRole("alert")).toHaveText(
       "This saved source is unavailable.",
     );
@@ -2184,10 +2160,7 @@ test("finder sends keyword and retrieval filters locally with bounded results an
 }) => {
   const api = await fixture(page);
   await page.getByRole("button", { name: "Settings", exact: true }).click();
-  const finder = page.getByRole("region", {
-    name: "Find saved sources",
-    exact: true,
-  });
+  const finder = savedSourceFinder(page);
   await expect(
     finder.getByText(/no online search or AI request/),
   ).toBeVisible();
@@ -2232,10 +2205,7 @@ test("finder sends keyword and retrieval filters locally with bounded results an
     api.requests.every((request) => request.path === "/api/context/search"),
   ).toBe(true);
   await results.getByRole("button", { name: "View saved result 1" }).click();
-  const viewer = page.getByRole("dialog", {
-    name: "Saved source",
-    exact: true,
-  });
+  const viewer = sourceViewer(page);
   await expect(viewer.getByLabel("Saved source text")).toHaveText(
     source.content,
   );
@@ -2272,10 +2242,7 @@ test("finder distinguishes no matches and filter or availability errors while re
     json: { detail: "The saved-source archive directory is unavailable." },
   });
   await page.getByRole("button", { name: "Settings", exact: true }).click();
-  const finder = page.getByRole("region", {
-    name: "Find saved sources",
-    exact: true,
-  });
+  const finder = savedSourceFinder(page);
   const query = finder.getByLabel("Keywords", { exact: true });
   await query.fill("nothing");
   await finder.getByLabel("Include older saved evidence").uncheck();
@@ -2328,10 +2295,7 @@ test("finder makes an empty bounded search visible without claiming an exhaustiv
     json: { ...savedResult("broad topic", []), search_limited: true },
   });
   await page.getByRole("button", { name: "Settings", exact: true }).click();
-  const finder = page.getByRole("region", {
-    name: "Find saved sources",
-    exact: true,
-  });
+  const finder = savedSourceFinder(page);
   await finder.getByLabel("Keywords", { exact: true }).fill("broad topic");
   await finder.getByLabel("Keywords", { exact: true }).press("Enter");
   await expect(
@@ -2362,10 +2326,7 @@ test("finder remains readable without writer availability and clears results whe
   state.context_archive!.available = false;
   const api = await fixture(page, state);
   await page.getByRole("button", { name: "Settings", exact: true }).click();
-  const finder = page.getByRole("region", {
-    name: "Find saved sources",
-    exact: true,
-  });
+  const finder = savedSourceFinder(page);
   await expect(
     finder.getByRole("button", { name: "Search saved sources", exact: true }),
   ).toBeEnabled();
@@ -2398,10 +2359,7 @@ test("finder invalidates changed saved eligibility while preserving drafts and u
   const api = await fixture(page);
   await page.getByRole("button", { name: "Settings", exact: true }).click();
   const card = page.locator(".context-archive-setup");
-  const finder = page.getByRole("region", {
-    name: "Find saved sources",
-    exact: true,
-  });
+  const finder = savedSourceFinder(page);
   const query = finder.getByLabel("Keywords", { exact: true });
   await query.fill("saved eligibility");
   await finder.getByLabel("Domain (optional)").fill("docs.example.org");
@@ -2459,10 +2417,7 @@ test("finder discards delayed evidence when the persisted saving policy changes"
   const api = await fixture(page, state);
   await page.getByRole("button", { name: "Settings", exact: true }).click();
   const card = page.locator(".context-archive-setup");
-  const finder = page.getByRole("region", {
-    name: "Find saved sources",
-    exact: true,
-  });
+  const finder = savedSourceFinder(page);
   const keywords = finder.getByLabel("Keywords", { exact: true });
   await keywords.fill("retain these keywords");
   await keywords.press("Enter");
@@ -2499,10 +2454,7 @@ test("finder ignores out-of-order results after the user changes search drafts",
 }) => {
   const api = await fixture(page);
   await page.getByRole("button", { name: "Settings", exact: true }).click();
-  const finder = page.getByRole("region", {
-    name: "Find saved sources",
-    exact: true,
-  });
+  const finder = savedSourceFinder(page);
   const query = finder.getByLabel("Keywords", { exact: true });
   api.hold.add("POST /api/context/search");
   await query.fill("first");
@@ -2548,10 +2500,7 @@ test("finder clear and leaving Settings discard delayed responses without overwr
 }) => {
   const api = await fixture(page);
   await page.getByRole("button", { name: "Settings", exact: true }).click();
-  const finder = page.getByRole("region", {
-    name: "Find saved sources",
-    exact: true,
-  });
+  const finder = savedSourceFinder(page);
   const query = finder.getByLabel("Keywords", { exact: true });
   async function holdSearch(text: string) {
     api.held.delete("POST /api/context/search");
@@ -2597,18 +2546,12 @@ test("finder removes deleted results and cannot restore a known deleted capture"
 }) => {
   const api = await fixture(page);
   await page.getByRole("button", { name: "Settings", exact: true }).click();
-  const finder = page.getByRole("region", {
-    name: "Find saved sources",
-    exact: true,
-  });
+  const finder = savedSourceFinder(page);
   const query = finder.getByLabel("Keywords", { exact: true });
   await query.fill("archived");
   await query.press("Enter");
   await finder.getByRole("button", { name: "View saved result 1" }).click();
-  const viewer = page.getByRole("dialog", {
-    name: "Saved source",
-    exact: true,
-  });
+  const viewer = sourceViewer(page);
   await expect(viewer.getByLabel("Saved source text")).toHaveText(
     source.content,
   );
@@ -2656,10 +2599,7 @@ test("finder result excerpts remain bounded plaintext and keyboard usable on a n
   });
   await page.getByRole("button", { name: "Open navigation" }).click();
   await page.getByRole("button", { name: "Settings", exact: true }).click();
-  const finder = page.getByRole("region", {
-    name: "Find saved sources",
-    exact: true,
-  });
+  const finder = savedSourceFinder(page);
   await finder.getByLabel("Keywords", { exact: true }).fill("long reference");
   await finder.getByLabel("Keywords", { exact: true }).press("Enter");
   const results = finder.getByRole("region", { name: "Saved source results" });
@@ -2693,21 +2633,9 @@ test("source mode and the text snapshot viewer fit a narrow screen", async ({
   page,
 }) => {
   await page.setViewportSize({ width: 375, height: 812 });
-  const state = workspace();
+  const state = workspace([sourcedAnswer()]);
   state.provider.config.model = "synthetic-local-" + "model".repeat(35);
   state.provider.models = [state.provider.config.model];
-  state.messages = [
-    {
-      id: "answer",
-      role: "assistant",
-      text: "Sourced answer",
-      web_search: {
-        query: "public reference",
-        at: retrieved,
-        sources: [source],
-      },
-    },
-  ];
   await fixture(page, state);
   await openSearchOptions(page);
   await expect(
