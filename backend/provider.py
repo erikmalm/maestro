@@ -422,7 +422,8 @@ class Provider:
             if context:
                 config["ollama_keep_alive_minutes"] = 0
             if job is not None:
-                config["ollama_context_tokens"] = min(config["ollama_context_tokens"], job["work_config"]["background_context_tokens"])
+                config["ollama_context_tokens"] = job["work_config"]["background_context_tokens"]
+                config["max_output_tokens"] = job["work_config"]["max_output_tokens"]
             key = None if local else credentials.read(config["base_url"])[0]
             if title and (state["config"] != connection_config or key != title_for["key"]):
                 raise ValueError("Connection settings changed; the first-message title was skipped.")
@@ -497,7 +498,7 @@ class Provider:
             input_bound = len((instructions + json.dumps(history) + (json.dumps(TOOL) if auto_search else "")
                                + (json.dumps(output_schema) if job is not None else "")).encode("utf-8")) + 2048
             if context:
-                work_cap = work_config["max_output_tokens"]
+                work_cap = (job["work_config"] if job is not None else work_config)["max_output_tokens"]
                 output_bound = min(context["max_output_tokens"] or work_cap, work_cap, config["max_output_tokens"])
             else:
                 output_bound = min(64, config["max_output_tokens"] - title_for["output_tokens"]) if title else config["max_output_tokens"]

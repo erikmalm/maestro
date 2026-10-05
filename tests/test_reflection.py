@@ -286,6 +286,22 @@ class ReflectionTests(unittest.TestCase):
         self.assertEqual(self.store.status()["today_jobs"], 0)
         self.assertEqual(self.store.status()["queued"], 1)
 
+    def test_daily_reservation_uses_work_output_limit_even_when_foreground_limit_is_smaller(self):
+        self.workspace["work_config"].update(background_context_tokens=65536, max_output_tokens=8192)
+        self.provider.configure({**self.provider.read_state()["config"], "ollama_context_tokens": 16384,
+                                 "max_output_tokens": 1024}, "", False)
+        self.queue()
+        prepared = self.store.prepare()
+        expected = len((prepared["instructions"] + json.dumps(prepared["messages"]) + json.dumps(prepared["schema"])).encode()) + 2048 + 8192
+        self.store.recover()
+        self.workspace["work_config"]["max_tokens_per_day"] = expected - 1
+        self.save()
+        self.assertIsNone(self.store.prepare())
+        self.assertIn("Daily reflection budget", self.store.status()["last_stop_reason"])
+        self.assertEqual(self.store.status()["today_jobs"], 0)
+        self.assertEqual(self.provider.read_state()["ledger"], [])
+        self.assertEqual(self.calls, [])
+
     def test_job_that_exceeds_remaining_budget_does_not_block_smaller_ready_job(self):
         self.workspace["work_config"]["max_tokens_per_day"] = 10000
         with self.provider.transaction() as state:
@@ -406,12 +422,13 @@ class ReflectionTests(unittest.TestCase):
             self.store.complete(job, result, lambda text: text)
         self.assertEqual(self.store.status()["candidates"], [])
 
-    def test_default_context_trims_unicode_sources_within_conservative_allowance(self):
+    def test_work_context_trims_unicode_sources_within_conservative_allowance(self):
+        self.workspace["work_config"]["background_context_tokens"] = 8192
         self.queue("I prefer concise code. " + "\u00e5\u4f8b" * 1500)
         prepared = self.store.prepare()
         self.assertIsNotNone(prepared)
         bound = len((INSTRUCTIONS + json.dumps(prepared["messages"]) + json.dumps(OUTPUT_SCHEMA)).encode("utf-8")) + 2048 + 512
-        self.assertLessEqual(bound, 4096)
+        self.assertLessEqual(bound, 8192)
         self.assertLess(len(json.loads(prepared["messages"][0]["content"])[0]["text"]), 3023)
         self.assertNotIn("content", prepared["job"]["sources"][0])
 

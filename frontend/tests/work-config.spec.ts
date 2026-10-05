@@ -56,7 +56,7 @@ test("task models and work limits persist without starting inference", async ({
     ["Background context tokens", "32768"],
     ["Exchanges per periodic review", "8"],
     ["Conversation review characters", "24000"],
-    ["Reflection output tokens", "256"],
+    ["Reflection output tokens", "1024"],
     ["Daily reflection jobs", "4"],
     ["Daily reflection tokens", "3000"],
     ["Debounce (seconds)", "90"],
@@ -80,6 +80,8 @@ test("task models and work limits persist without starting inference", async ({
             input_usd_per_million: 0,
             output_usd_per_million: 0,
             pricing_verified: true,
+            ollama_context_tokens: 4096,
+            max_output_tokens: 256,
           },
           api_key: "",
           persist: false,
@@ -97,6 +99,7 @@ test("task models and work limits persist without starting inference", async ({
     section.getByLabel("Enable background reflection"),
   ).toBeEnabled();
   await section.getByLabel("Enable background reflection").check();
+  await section.getByLabel("AI curates memory automatically").check();
   await expect(section.getByText("Paused", { exact: true })).toBeVisible();
   await expect(section.getByText(/Unsaved changes/)).toBeVisible();
   for (const [label, model] of selections)
@@ -126,6 +129,9 @@ test("task models and work limits persist without starting inference", async ({
     await expect(section.getByLabel(label, { exact: true })).toHaveValue(value);
   const after = await (await page.request.get("/api/workspace")).json();
   expect(after.work.config.enabled).toBe(true);
+  expect(after.work.config.auto_curate).toBe(true);
+  expect(after.provider.config.ollama_context_tokens).toBe(4096);
+  expect(after.provider.config.max_output_tokens).toBe(256);
   expect(after.work.worker_available).toBe(true);
   expect(after.usage).toEqual(initial.usage);
   expect(after.chats).toEqual(initial.chats);
