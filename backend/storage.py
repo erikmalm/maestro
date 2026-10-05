@@ -1,8 +1,11 @@
-"""Exclusive runtime ownership and consistent private SQLite snapshots."""
+"""Runtime ownership, private SQLite snapshots and bounded archive file access."""
 from contextlib import closing, contextmanager
+import json
+import ntpath
 import os
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 import sqlite3
+import uuid
 
 
 @contextmanager
@@ -44,6 +47,61 @@ def backup_database(source, destination):
     except Exception:
         destination.unlink()
         raise
+
+
+def archive_path(root, relative):
+    if root is None or not isinstance(relative, str):
+        raise ValueError("The source archive is unavailable.")
+    root, parts = Path(root), Path(relative)
+    reserved = getattr(ntpath, "isreserved", lambda part: PureWindowsPath(part).is_reserved())
+    if (parts.is_absolute() or ".." in parts.parts or "\\" in relative or ":" in relative
+            or any(part.endswith((".", " ")) or reserved(part) for part in parts.parts)):
+        raise ValueError("Invalid archived source path.")
+    path = root / parts
+    for parent in (path, *path.parents):
+        if parent.is_symlink() or getattr(parent, "is_junction", lambda: False)():
+            raise ValueError("Archived source links are not supported.")
+    if root not in path.resolve().parents:
+        raise ValueError("Invalid archived source path.")
+    return path
+
+
+def read_archive(root, relative, limit):
+    if type(limit) is not int or limit < 0:
+        raise ValueError("Use a non-negative archive read limit.")
+    with archive_path(root, relative).open("rb") as stream:
+        data = stream.read(limit + 1)
+    if len(data) > limit:
+        raise ValueError("An archived source exceeds its supported size.")
+    return data
+
+
+def read_archive_json(root, relative, limit):
+    try:
+        return json.loads(read_archive(root, relative, limit))
+    except RecursionError:
+        raise ValueError("An archived JSON document is too deeply nested.") from None
+
+
+def publish_archive(root, relative, data):
+    """Publish flushed bytes without replacement; the caller owns the archive."""
+    path = archive_path(root, relative)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.exists():
+        if read_archive(root, relative, len(data)) != data:
+            raise ValueError("Existing archive content does not match its hash.")
+        return False
+    temporary = path.with_name(path.name + "." + uuid.uuid4().hex + ".tmp")
+    stream = temporary.open("xb")
+    try:
+        with stream:
+            stream.write(data)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.link(temporary, path)
+        return True
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 if __name__ == "__main__":
