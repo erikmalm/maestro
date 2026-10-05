@@ -160,6 +160,38 @@ class ProviderTests(unittest.TestCase):
                     self.assertNotIn("chat_routing", ledger[-1])
                     self.assertEqual(payloads[-1]["messages"][0]["content"], TITLE_INSTRUCTIONS)
 
+        with self.mock_http(self.local_provider_http):
+            planned = self.client.post("/api/chat", headers=self.headers, json={"text": "Plan a task", "role": "orchestrator"})
+        self.assertEqual(planned.status_code, 200, planned.text)
+        answer = planned.json()["messages"][-1]
+        self.assertEqual((answer["kind"], answer["model"]), ("orchestrator", local["orchestrator_model"]))
+        self.assertNotIn("chat_routing", answer)
+        self.assertNotIn("chat_routing", service.read_state()["ledger"][-1])
+
+    def test_routing_context_boundary_rejects_before_save_and_accepts_first_reply(self):
+        service = Provider(backend.DATABASE, backend.TIMEZONE)
+        for route, coordinator, minimum in (("direct", "synthetic-coordinator:latest", 2295),
+                                             ("orchestrator", "synthetic-coordinator:latest", 2545),
+                                             ("orchestrator", "", 2545)):
+            with self.subTest(route=route, coordinator=coordinator):
+                config = self.local_config(chat_routing=route, orchestrator_model=coordinator,
+                                           max_output_tokens=64, ollama_context_tokens=minimum)
+                before = service.read_state()
+                with patch("backend.provider.network") as network:
+                    rejected = self.client.put("/api/provider", headers=self.headers, json={
+                        "config": {**config, "ollama_context_tokens": minimum - 1}, "persist": False})
+                    self.assertEqual(rejected.status_code, 409, rejected.text)
+                    self.assertIn("output limit and chat prompt", rejected.json()["detail"])
+                    network.assert_not_called()
+                self.assertEqual(service.read_state(), before)
+                self.setup_provider(config, key="")
+                self.client.post("/api/chats", headers=self.headers)
+                with self.mock_http(self.local_provider_http):
+                    reply = self.client.post("/api/chat", headers=self.headers, json={"text": "a"})
+                self.assertEqual(reply.status_code, 200, reply.text)
+                expected = coordinator or config["model"] if route == "orchestrator" else config["model"]
+                self.assertEqual(reply.json()["messages"][-1]["model"], expected)
+
     def test_legacy_route_defaults_direct_and_invalid_routes_preserve_state_and_credentials(self):
         local = self.local_config()
         self.setup_provider(local, key="")

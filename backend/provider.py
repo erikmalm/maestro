@@ -229,7 +229,8 @@ class Provider:
         if local:
             if key:
                 raise ValueError("Local Ollama does not use an API key. Leave the key empty.")
-            minimum_input = len((INSTRUCTIONS + json.dumps([{"role": "user", "content": "a"}])).encode("utf-8")) + 2048
+            instructions = INSTRUCTIONS + (COORDINATOR_INSTRUCTIONS if config["chat_routing"] == "orchestrator" else "")
+            minimum_input = len((instructions + json.dumps([{"role": "user", "content": "a"}])).encode("utf-8")) + 2048
             if config["ollama_context_tokens"] < minimum_input + config["max_output_tokens"]:
                 raise ValueError("Local context is too small for the output limit and chat prompt. Increase context size or lower maximum output tokens.")
             config.update(input_usd_per_million=0, output_usd_per_million=0, pricing_verified=True)
@@ -534,7 +535,7 @@ class Provider:
                 reflection.claim_dispatch(job, workspace, state, request_id, input_bound, output_bound, db)
             state["ledger"].append({"id": request_id, "at": self.stamp(), "model": config["model"], "protocol": config["protocol"],
                                     "thread_id": chat_id, "kind": "title" if title else role,
-                                    **({"chat_routing": routing} if local and not title and not context else {}),
+                                    **({"chat_routing": routing} if local and role == "chat" and not title and not context else {}),
                                     "parent_id": title_for["request_id"] if title else None, "cost": reserve, "status": "reserved",
                                     **({"connection_config": connection_config} if local else {}),
                                     **({"job_id": job["id"], "attempt": job["attempt"], "stage": job.get("stage", 0),
@@ -643,7 +644,7 @@ class Provider:
                         chat["messages"].extend([{"id": uuid.uuid4().hex, "role": "user", "kind": role, "text": text, "demo": False,
                                                   "reflection_eligible": eligible},
                             {"id": uuid.uuid4().hex, "role": "assistant", "kind": role, "text": reply, "demo": False, "model": config["model"], "cost": cost, "input_tokens": input_tokens, "output_tokens": output_tokens}])
-                        if local:
+                        if local and role == "chat":
                             chat["messages"][-1]["chat_routing"] = routing
                         chat["updated_at"] = self.stamp()
                         if memories:
