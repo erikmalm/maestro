@@ -1,6 +1,6 @@
 # Public-source archive policy
 
-This is the archive foundation extracted from draft PR #8. `backend/context_policy.py` contains pure source-policy validation (R8-03a) and capture-manifest validation/projection (R8-03d); `backend/storage.py` adds bounded file access/publication (R8-03b). Ownership, capture/index integration, saved lookup and chat/UI integration follow in separate review units.
+This is the archive foundation extracted from draft PR #8. `backend/context_policy.py` contains pure source-policy validation (R8-03a) and capture-manifest validation/projection (R8-03d); `backend/storage.py` provides bounded file access/publication (R8-03b) and local ownership/inventory (R8-03c). Capture/index integration, saved lookup and chat/UI integration follow in separate review units.
 
 New archive settings propose `all_public` with capture disabled, a 24-hour reuse window, 10 GiB and at most 200,000 files/directories. Legacy settings that omit the policy retain `approved_sources`; they require an approved HTTPS scope before enabling capture. Validation accepts byte caps up to 100 GiB and reuse windows from one to 168 hours.
 
@@ -26,4 +26,12 @@ Callers supply a resolved archive root, enforce ownership/capacity and choose re
 
 Publication writes an exclusive staging file, flushes and syncs its bytes, then uses an atomic hard link to create the destination without replacing it. Identical existing content is reused; conflicting content or a publication race raises an error. Owned staging files are removed after success or failure; unrelated staging collisions remain untouched.
 
-The destination filesystem must support hard links. Unsupported publication fails without a replacement fallback. These helpers do not claim protection against hostile concurrent directory replacement, enforce archive ownership, validate manifests or connect capture to chat. Existing workspace locking and SQLite snapshots retain their behavior.
+The destination filesystem must support hard links. Unsupported publication fails without a replacement fallback. File helpers do not validate manifests or connect capture to chat; callers obtain ownership separately. Existing workspace locking and SQLite snapshots retain their behavior.
+
+## Local ownership and inventory
+
+Archive ownership uses an exclusive, synced `writer-owner.tmp` claim and one process-local token/count map. Nested and overlapping lifetimes for the same owner retain the claim until their last exit, and each reentrant entry verifies its current claim. Other owners are refused. Entry guards the archive path before creating directories; release verifies the token and waits for the caller's write lock before removing its claim. No thread lock remains held across the ownership context's body.
+
+A stale, missing or changed live claim blocks further writes; stale/changed claims are preserved for explicit cleanup after their previous runtime has stopped. Readiness inspects the guarded path, registry and current token without creating storage. This is local filesystem ownership for the supported Windows/container setup, not a cross-machine lease over synced copies.
+
+Inventory accepts an explicit item cap, checking a ten-second scan allowance during traversal and after every directory, including empty ones. Filesystem calls are synchronous. It counts directories and files, measures logical file bytes and returns capture-manifest paths without parsing content or initializing an index. Capture and recovery callers choose their existing caps; inventory itself neither changes configuration nor prunes data. These helpers do not claim protection against hostile concurrent directory replacement.
