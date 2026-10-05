@@ -889,17 +889,12 @@ class Provider:
                     raise ProviderFailure("Choose an installed local chat model. Ollama cloud models are disabled in local mode.", False)
                 if auto_search and "tools" not in metadata["capabilities"]:
                     raise ProviderFailure("This local model does not support automatic search tools. Choose a tool-capable model or disable search.", False)
-                if not context:
+                if not context or job is not None:
                     thinking = metadata.get("thinking", {})
                     values = thinking.get("values", []) if isinstance(thinking, dict) else []
                     if "low" in values or metadata.get("details", {}).get("family") == "gptoss":
                         payload["think"] = "low"
-                if job is not None:
-                    thinking = metadata.get("thinking", {})
-                    values = thinking.get("values", []) if isinstance(thinking, dict) else []
-                    if "low" in values or metadata.get("details", {}).get("family") == "gptoss":
-                        payload["think"] = "low"
-                    elif False in values:
+                    elif job is not None and False in values:
                         payload["think"] = False
             if job is not None:
                 with self.transaction(with_db=True) as (state, db):
