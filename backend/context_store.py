@@ -473,24 +473,21 @@ class ContextStore:
     @storage_errors
     def configure(self, config):
         config = configuration(config)
-        if config["enabled"]:
-            with self._writer():
+        with (self._writer() if config["enabled"] else self._write_lock):
+            previous = self._state()["config"]
+            if config["enabled"]:
                 self._format()
-                if config != self._state()["config"]:
-                    self._invalidate_rebuild()
                 # Saving a lower cap remains possible for an already larger archive.
                 total, items, _ = self._inventory()
-                with self._transaction() as (state, db):
-                    state.update(config=config, last_error=None, write_unavailable=False,
+            if config != previous:
+                self._invalidate_rebuild()
+            with self._transaction() as (state, db):
+                if any(config[field] != previous[field] for field in ("enabled", "capture_policy", "public_sources")):
+                    db.execute("DELETE FROM context_queries")
+                state["config"] = config
+                if config["enabled"]:
+                    state.update(last_error=None, write_unavailable=False,
                                  archive_bytes=total, archive_items=items)
-                    db.execute("DELETE FROM context_queries")
-        else:
-            with self._write_lock:
-                if config != self._state()["config"]:
-                    self._invalidate_rebuild()
-                with self._transaction() as (state, db):
-                    state["config"] = config
-                    db.execute("DELETE FROM context_queries")
         return self.status()
 
     def _inventory(self, max_items=None):

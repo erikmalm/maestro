@@ -177,6 +177,63 @@ class ContextStoreTests(unittest.TestCase):
             self.assertEqual(status["last_capture"], last_capture)
             self.assertIsNone(self.store.lookup(self.query, 3))
 
+    def test_noop_and_numeric_settings_saves_preserve_exact_reuse_and_immutable_files(self):
+        with self.store.archive_owner():
+            self.enable()
+            saved = self.capture()["sources"][0]
+            self.assertEqual(self.store.search(self.query)["sources"], [])
+            files = {path.relative_to(self.archive): path.read_bytes() for path in self.archive.rglob("*") if path.is_file()}
+            for change in ({}, {"max_bytes": 1048576}, {"max_items": 100}, {"reuse_hours": 48}):
+                with self.subTest(change=change):
+                    self.config.update(change)
+                    self.store.configure(self.config)
+                    reused = self.store.lookup(self.query, 3)
+                    self.assertTrue(reused["from_cache"])
+                    self.assertFalse(reused["stale"])
+                    self.assertEqual(reused["sources"], [{**saved, "stale": False}])
+                    self.assertEqual(reused["at"], saved["retrieved_at"])
+                    self.assertEqual({path.relative_to(self.archive): path.read_bytes() for path in self.archive.rglob("*") if path.is_file()}, files)
+
+    def test_shortening_reuse_window_expires_retained_mapping_without_rewriting_evidence(self):
+        now = datetime(2026, 10, 4, 12, tzinfo=timezone.utc)
+        with patch.object(self.store, "now", return_value=now):
+            self.enable()
+            saved = self.capture(at=(now - timedelta(hours=12)).isoformat())["sources"][0]
+            self.assertFalse(self.store.lookup(self.query, 3)["stale"])
+            self.store.configure({**self.config, "reuse_hours": 6})
+            self.assertIsNone(self.store.lookup(self.query, 3))
+            historical = self.store.lookup(self.query, 3, allow_stale=True)
+            self.assertTrue(historical["stale"])
+            self.assertEqual(historical["sources"], [{**saved, "stale": True}])
+            self.store.configure({**self.config, "reuse_hours": 48})
+            self.assertEqual(self.store.lookup(self.query, 3)["sources"], [{**saved, "stale": False}])
+
+    def test_eligibility_transitions_clear_mappings_and_numeric_saves_preserve_deletion(self):
+        broad = {**self.config, "capture_policy": "all_public", "public_sources": []}
+        cases = (("scopes", self.config, {**self.config, "public_sources": ["https://other.example.org/"]}, self.source),
+                 ("policy", broad, self.config, {**self.source, "url": "https://other.example.org/public"}),
+                 ("disabled", self.config, {**self.config, "enabled": False}, self.source))
+        for name, initial, restricted, source in cases:
+            with self.subTest(change=name):
+                self.store.configure(initial)
+                saved = self.capture(sources=[source])["sources"][0]
+                self.assertIsNotNone(self.store.lookup(self.query, 3))
+                self.store.configure(restricted)
+                self.assertIsNone(self.store.lookup(self.query, 3))
+                with closing(sqlite3.connect(self.database)) as db:
+                    self.assertEqual(db.execute("SELECT COUNT(*) FROM context_queries").fetchone()[0], 0)
+                with self.assertRaises(KeyError):
+                    self.store.get_capture(saved["capture_id"])
+                self.store.configure(initial)
+                self.assertIsNone(self.store.lookup(self.query, 3))
+                self.assertEqual(self.store.get_capture(saved["capture_id"]), saved)
+                self.store.delete_capture(saved["capture_id"])
+                self.store.configure({**initial, "reuse_hours": 48})
+                self.assertIsNone(self.store.lookup(self.query, 3, allow_stale=True))
+                with self.assertRaises(KeyError):
+                    self.store.get_capture(saved["capture_id"])
+        self.assertEqual(self.store.rebuild()["indexed_count"], 0)
+
     def test_partial_index_failure_reports_durable_bytes_without_claiming_every_source_saved(self):
         self.config = {**self.config, "capture_policy": "all_public", "public_sources": []}
         self.enable()
