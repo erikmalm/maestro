@@ -35,6 +35,14 @@ class ContextStoreTests(unittest.TestCase):
         return self.store.capture(changes.get("query", self.query), changes.get("at", self.store.now().isoformat()),
                                   changes.get("sources", [self.source]), changes.get("max_results", 3), changes.get("secrets", ()))
 
+    def seed_source(self):
+        self.enable()
+        return self.capture()["sources"][0]
+
+    def assert_missing_capture(self, capture_id):
+        with self.assertRaises(KeyError):
+            self.store.get_capture(capture_id)
+
     def manifests(self):
         return list(self.archive.glob("records/captures/*/*.json"))
 
@@ -178,8 +186,7 @@ class ContextStoreTests(unittest.TestCase):
 
     def test_noop_and_numeric_settings_saves_preserve_exact_reuse_and_immutable_files(self):
         with self.store.archive_owner():
-            self.enable()
-            saved = self.capture()["sources"][0]
+            saved = self.seed_source()
             self.assertEqual(self.store.search(self.query)["sources"], [])
             files = {path.relative_to(self.archive): path.read_bytes() for path in self.archive.rglob("*") if path.is_file()}
             for change in ({}, {"max_bytes": 1048576}, {"max_items": 100}, {"reuse_hours": 48}):
@@ -221,16 +228,14 @@ class ContextStoreTests(unittest.TestCase):
                 self.assertIsNone(self.store.lookup(self.query, 3))
                 with closing(sqlite3.connect(self.database)) as db:
                     self.assertEqual(db.execute("SELECT COUNT(*) FROM context_queries").fetchone()[0], 0)
-                with self.assertRaises(KeyError):
-                    self.store.get_capture(saved["capture_id"])
+                self.assert_missing_capture(saved["capture_id"])
                 self.store.configure(initial)
                 self.assertIsNone(self.store.lookup(self.query, 3))
                 self.assertEqual(self.store.get_capture(saved["capture_id"]), saved)
                 self.store.delete_capture(saved["capture_id"])
                 self.store.configure({**initial, "reuse_hours": 48})
                 self.assertIsNone(self.store.lookup(self.query, 3, allow_stale=True))
-                with self.assertRaises(KeyError):
-                    self.store.get_capture(saved["capture_id"])
+                self.assert_missing_capture(saved["capture_id"])
         self.assertEqual(self.store.rebuild()["indexed_count"], 0)
 
     def test_partial_index_failure_reports_durable_bytes_without_claiming_every_source_saved(self):
@@ -356,8 +361,7 @@ class ContextStoreTests(unittest.TestCase):
         self.store.configure(self.config)
         self.assertEqual(self.store.get_capture(saved[0]["capture_id"]), saved[0])
         for source in saved[1:]:
-            with self.assertRaises(KeyError):
-                self.store.get_capture(source["capture_id"])
+            self.assert_missing_capture(source["capture_id"])
         self.assertEqual(self.store.rebuild()["indexed_count"], 1)
         self.assertEqual(self.store.search("historical evidence")["sources"][0]["capture_id"], saved[0]["capture_id"])
         self.assertEqual(len(self.manifests()), 3)
@@ -488,8 +492,7 @@ class ContextStoreTests(unittest.TestCase):
         saved = self.capture(sources=[{**self.source, "url": url}])["sources"][0]
         self.store.configure({**self.config, "public_sources": ["https://weather.example.org/forecast"]})
         self.assertIsNone(self.store.lookup(self.query, 3))
-        with self.assertRaises(KeyError):
-            self.store.get_capture(saved["capture_id"])
+        self.assert_missing_capture(saved["capture_id"])
         self.assertEqual(self.store.search("historical evidence")["sources"], [])
         self.assertEqual(self.store.rebuild()["indexed_count"], 0)
         self.store.configure(self.config)
@@ -507,8 +510,7 @@ class ContextStoreTests(unittest.TestCase):
         manifest = json.loads(path.read_text(encoding="utf-8"))
         manifest["source_url"] = second_url
         path.write_text(json.dumps(manifest), encoding="utf-8")
-        with self.assertRaises(KeyError):
-            self.store.get_capture(saved["capture_id"])
+        self.assert_missing_capture(saved["capture_id"])
         self.assertIsNone(self.store.lookup(self.query, 3))
         self.assertEqual(self.store.rebuild()["corrupt_count"], 1)
         manifest["source_id"] = hashlib.sha256(second_url.encode()).hexdigest()
@@ -530,8 +532,7 @@ class ContextStoreTests(unittest.TestCase):
         self.store.delete_capture(first["capture_id"])
         self.assertIsNone(self.store.lookup(self.query, 3))
         self.assertEqual(self.store.rebuild()["indexed_count"], 1)
-        with self.assertRaises(KeyError):
-            self.store.get_capture(first["capture_id"])
+        self.assert_missing_capture(first["capture_id"])
         self.assertEqual(self.store.get_capture(second["capture_id"]), second)
         self.assertEqual(self.store.search("historical evidence")["sources"], [{**second, "stale": False}])
 
@@ -588,8 +589,7 @@ class ContextStoreTests(unittest.TestCase):
             self.assertTrue(stale["sources"][0]["stale"])
 
     def test_identical_bytes_share_an_object_but_keep_capture_versions(self):
-        self.enable()
-        first = self.capture()["sources"][0]
+        first = self.seed_source()
         second = self.capture()["sources"][0]
         third = self.capture(sources=[{**self.source, "content": "A changed public version."}])["sources"][0]
         self.assertNotEqual(first["capture_id"], second["capture_id"])
@@ -599,20 +599,17 @@ class ContextStoreTests(unittest.TestCase):
         self.assertEqual(self.store.get_capture(first["capture_id"]), first)
 
     def test_hash_tampering_and_missing_objects_never_reuse_saved_evidence(self):
-        self.enable()
-        saved = self.capture()["sources"][0]
+        saved = self.seed_source()
         obj = next(self.archive.glob("objects/sha256/*/*.txt"))
         obj.write_text("Different bytes", encoding="utf-8")
         self.assertIsNone(self.store.lookup(self.query, 3))
-        with self.assertRaises(KeyError):
-            self.store.get_capture(saved["capture_id"])
+        self.assert_missing_capture(saved["capture_id"])
         self.assertEqual(self.store.rebuild()["corrupt_count"], 1)
         obj.unlink()
         self.assertEqual(self.store.rebuild()["missing_count"], 1)
 
     def test_manifest_traversal_and_schema_tampering_are_rejected(self):
-        self.enable()
-        saved = self.capture()["sources"][0]
+        saved = self.seed_source()
         path = self.manifests()[0]
         original = json.loads(path.read_text(encoding="utf-8"))
         for mutation in ({**original, "schema_version": 2}, {**original, "object": {**original["object"], "path": "../private/workspace.sqlite3"}},
@@ -623,16 +620,14 @@ class ContextStoreTests(unittest.TestCase):
         self.assertEqual(self.store.rebuild()["corrupt_count"], 1)
 
     def test_deeply_nested_manifest_is_unavailable_without_blocking_healthy_sources(self):
-        self.enable()
-        broken = self.capture()["sources"][0]
+        broken = self.seed_source()
         manifest = self.manifests()[0]
         healthy = self.capture(query="Healthy source", sources=[{
             **self.source, "url": self.source["url"] + "/healthy", "content": "Healthy historical evidence."}])["sources"][0]
         nested = "[" * 3000 + "0" + "]" * 3000
         self.assertLess(len(nested.encode()), MANIFEST_BYTES)
         manifest.write_text(nested, encoding="utf-8")
-        with self.assertRaises(KeyError):
-            self.store.get_capture(broken["capture_id"])
+        self.assert_missing_capture(broken["capture_id"])
         self.assertIsNone(self.store.lookup(self.query, 3))
         self.assertEqual(self.store.search("historical evidence")["sources"], [{**healthy, "stale": False}])
         rebuilt = self.store.rebuild()
@@ -646,12 +641,10 @@ class ContextStoreTests(unittest.TestCase):
         self.store.delete_capture(healthy["capture_id"])
         self.assertEqual(self.store.search("historical evidence")["sources"], [])
         self.assertEqual(self.store.rebuild()["indexed_count"], 0)
-        with self.assertRaises(KeyError):
-            self.store.get_capture(healthy["capture_id"])
+        self.assert_missing_capture(healthy["capture_id"])
 
     def test_invalid_format_is_a_managed_error_and_preserves_existing_captures(self):
-        self.enable()
-        saved = self.capture()["sources"][0]
+        saved = self.seed_source()
         path = self.archive / "format.json"
         original = path.read_bytes()
         nested = ("[" * 2000 + "0" + "]" * 2000).encode()
@@ -762,14 +755,12 @@ class ContextStoreTests(unittest.TestCase):
         self.assertIsNone(self.store.lookup(self.query, 3))  # Lost private query history is not guessed.
 
     def test_deletion_invalidates_cache_and_cannot_be_resurrected_by_rebuild(self):
-        self.enable()
-        first = self.capture()["sources"][0]
+        first = self.seed_source()
         second = self.capture(query="Other exact query")["sources"][0]
         self.store.delete_capture(first["capture_id"])
         self.store.delete_capture(first["capture_id"])
         self.assertIsNone(self.store.lookup(self.query, 3))
-        with self.assertRaises(KeyError):
-            self.store.get_capture(first["capture_id"])
+        self.assert_missing_capture(first["capture_id"])
         self.assertEqual(self.store.get_capture(second["capture_id"]), second)
         self.assertEqual(self.store.rebuild()["indexed_count"], 1)
         self.assertIsNone(self.store.lookup(self.query, 3))
@@ -780,8 +771,7 @@ class ContextStoreTests(unittest.TestCase):
         self.config["max_items"] = 100
         # Scale the global hard bound down, then fill it using legitimate captures.
         with patch("backend.context_store.MAX_ARCHIVE_ITEMS", 100), self.store.archive_owner():
-            self.enable()
-            first = self.capture()["sources"][0]
+            first = self.seed_source()
             healthy = self.capture(query="Healthy source", sources=[{
                 **self.source, "url": self.source["url"] + "/healthy", "content": "Healthy historical evidence."}])["sources"][0]
             saved = [first, healthy]
@@ -826,8 +816,7 @@ class ContextStoreTests(unittest.TestCase):
             self.assertEqual(len(list(self.archive.glob("records/deletions/*.json"))), len(saved))
             for source in saved:
                 self.store.delete_capture(source["capture_id"])
-                with self.assertRaises(KeyError):
-                    self.store.get_capture(source["capture_id"])
+                self.assert_missing_capture(source["capture_id"])
             self.assertEqual(archive_inventory(self.archive, 200)[:2], measured)
             with closing(sqlite3.connect(self.database)) as db:
                 self.assertEqual(db.execute("SELECT COUNT(*) FROM context_queries").fetchone()[0], 0)
@@ -852,8 +841,7 @@ class ContextStoreTests(unittest.TestCase):
     def test_lowered_acquisition_cap_does_not_prevent_existing_archive_rebuild(self):
         self.config["max_items"] = 200
         with patch("backend.context_store.MAX_ARCHIVE_ITEMS", 200), self.store.archive_owner():
-            self.enable()
-            saved = self.capture()["sources"][0]
+            saved = self.seed_source()
             path = self.manifests()[0]
             template = json.loads(path.read_text(encoding="utf-8"))
             for number in range(100):
@@ -871,20 +859,17 @@ class ContextStoreTests(unittest.TestCase):
             self.assertEqual(archive_inventory(self.archive, 400)[:2], measured)
 
     def test_disabling_or_changing_approved_scope_suppresses_retrieval(self):
-        self.enable()
-        saved = self.capture()["sources"][0]
+        saved = self.seed_source()
         self.store.configure({**self.config, "public_sources": ["https://other.example.org/"]})
         self.assertIsNone(self.store.lookup(self.query, 3))
-        with self.assertRaises(KeyError):
-            self.store.get_capture(saved["capture_id"])
+        self.assert_missing_capture(saved["capture_id"])
         self.store.configure({**self.config, "enabled": False})
         before = sorted(path.as_posix() for path in self.archive.rglob("*"))
         self.capture()
         self.assertEqual(before, sorted(path.as_posix() for path in self.archive.rglob("*")))
 
     def test_byte_item_and_free_space_limits_do_not_damage_existing_capture(self):
-        self.enable()
-        saved = self.capture()["sources"][0]
+        saved = self.seed_source()
         for metric in ("items", "bytes", "free"):
             with self.subTest(metric=metric):
                 inventory = (self.config["max_bytes"] if metric == "bytes" else 100, self.config["max_items"] if metric == "items" else 5, [])
@@ -899,8 +884,7 @@ class ContextStoreTests(unittest.TestCase):
                 self.assertEqual(len(self.manifests()), 1)
 
     def test_rebuild_replaces_corrupt_index_and_obeys_limit_without_partial_replacement(self):
-        self.enable()
-        first = self.capture()["sources"][0]
+        first = self.seed_source()
         self.capture(query="Other query")
         partial = self.store.rebuild(limit=1)
         self.assertFalse(partial["rebuild_progress"]["complete"])
@@ -1030,8 +1014,7 @@ class ContextStoreTests(unittest.TestCase):
         self.assertFalse(claim.exists())
 
     def test_index_cannot_redirect_a_capture_id_to_another_verified_manifest(self):
-        self.enable()
-        first = self.capture()["sources"][0]
+        first = self.seed_source()
         second = self.capture(query="Second source", sources=[{
             **self.source, "url": self.source["url"] + "/second", "content": "Different public evidence."}])["sources"][0]
         with closing(sqlite3.connect(self.store.index)) as db, db:
@@ -1045,8 +1028,7 @@ class ContextStoreTests(unittest.TestCase):
         self.assertEqual(self.store.get_capture(second["capture_id"]), second)
 
     def test_replaced_manifest_cannot_change_a_hash_bound_view_or_query_reuse(self):
-        self.enable()
-        first = self.capture()["sources"][0]
+        first = self.seed_source()
         manifest_path = self.manifests()[0]
         manifest = json.loads(manifest_path.read_text())
         replacement = b"Self-consistent replacement with different historical facts."
@@ -1066,8 +1048,7 @@ class ContextStoreTests(unittest.TestCase):
                 self.fail("Changed historical evidence must not enter an answer commit.")
 
     def test_metadata_replacement_is_rejected_before_and_after_index_rebuild(self):
-        self.enable()
-        first = self.capture()["sources"][0]
+        first = self.seed_source()
         path = self.manifests()[0]
         original = json.loads(path.read_text())
         original_at = original["retrieved_at"]
@@ -1075,8 +1056,7 @@ class ContextStoreTests(unittest.TestCase):
             manifest = {**original, field: replacement}
             path.write_text(json.dumps(manifest), encoding="utf-8")
             with self.subTest(field=field):
-                with self.assertRaises(KeyError):
-                    self.store.get_capture(first["capture_id"])
+                self.assert_missing_capture(first["capture_id"])
                 self.store.rebuild()
                 with self.assertRaises(KeyError):
                     self.store.get_capture(first["capture_id"], expected_hash=first["content_hash"], expected_manifest_hash=first["manifest_hash"])
@@ -1139,8 +1119,7 @@ class ContextStoreTests(unittest.TestCase):
 
 
     def test_keyword_search_reuses_changed_query_and_requires_every_literal_term(self):
-        self.enable()
-        saved = self.capture()["sources"][0]
+        saved = self.seed_source()
         self.assertIsNone(self.store.lookup("distinct evidence", 3))
         result = self.store.search("  distinct   evidence ")
         self.assertEqual(result["query"], "distinct evidence")
@@ -1281,8 +1260,7 @@ class ContextStoreTests(unittest.TestCase):
         self.assertEqual(self.store.search("historical")["sources"], [])
 
     def test_keyword_search_reports_corrupt_index_and_recovers_only_after_explicit_rebuild(self):
-        self.enable()
-        saved = self.capture()["sources"][0]
+        saved = self.seed_source()
         self.store.index.write_bytes(b"Synthetic corrupt index")
         with self.assertRaisesRegex(ValueError, "local source index could not be searched"):
             self.store.search("historical")

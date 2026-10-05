@@ -120,6 +120,10 @@ class SearchContextTests(unittest.TestCase):
         with self.mocked_http():
             return self.client.post("/api/chat", headers=self.headers, json={"text": text, "context_mode": mode})
 
+    def answer(self, response):
+        self.assertEqual(response.status_code, 200, response.text)
+        return response.json()["messages"][-1]
+
     def age_searches(self):
         with self.search.transaction() as state:
             for entry in state["ledger"]:
@@ -130,8 +134,7 @@ class SearchContextTests(unittest.TestCase):
 
     def seed_answer(self):
         reply = self.send()
-        self.assertEqual(reply.status_code, 200, reply.text)
-        source = reply.json()["messages"][-1]["web_search"]["sources"][0]
+        source = self.answer(reply)["web_search"]["sources"][0]
         self.assertEqual(source["archive_status"], "saved")
         self.assertEqual(len(self.hosted_requests()), 1)
         self.age_searches()
@@ -148,16 +151,14 @@ class SearchContextTests(unittest.TestCase):
                                      json={**config, "public_sources": [self.url]})
         self.assertEqual(configured.status_code, 200, configured.text)
         first = self.send("Use a fresh search for the Stockholm forecast on 2026-10-05", mode="refresh")
-        self.assertEqual(first.status_code, 200, first.text)
-        original = first.json()["messages"][-1]["web_search"]["sources"][0]
+        original = self.answer(first)["web_search"]["sources"][0]
         self.assertEqual(original["archive_status"], "saved")
         self.assertEqual(original["url"], self.url)
         self.assertEqual(len(self.hosted_requests()), 1)
         self.requests.clear()
         self.keys.clear()
         reused = self.send("Use the saved Stockholm forecast on 2026-10-05", mode="saved_only")
-        self.assertEqual(reused.status_code, 200, reused.text)
-        evidence = reused.json()["messages"][-1]["web_search"]
+        evidence = self.answer(reused)["web_search"]
         self.assertTrue(evidence["from_cache"])
         self.assertEqual(evidence["sources"][0]["capture_id"], original["capture_id"])
         self.assertEqual(evidence["sources"][0]["retrieved_at"], original["retrieved_at"])
@@ -193,8 +194,7 @@ class SearchContextTests(unittest.TestCase):
         source = self.seed_answer()
         before = self.search.status()["searches_today"]
         reply = self.send()
-        self.assertEqual(reply.status_code, 200, reply.text)
-        evidence = reply.json()["messages"][-1]["web_search"]
+        evidence = self.answer(reply)["web_search"]
         self.assertTrue(evidence["from_cache"])
         self.assertEqual(evidence["sources"][0]["retrieved_at"], source["retrieved_at"])
         self.assertEqual(evidence["sources"][0]["content_hash"], source["content_hash"])
@@ -352,8 +352,7 @@ class SearchContextTests(unittest.TestCase):
         with patch("backend.provider.datetime", wraps=datetime) as clock:
             clock.now.return_value = datetime(2026, 10, 4, 10, tzinfo=backend.TIMEZONE)
             reply = self.send("Use search to check tomorrow's weather in Stockholm Årsta")
-        self.assertEqual(reply.status_code, 200, reply.text)
-        answer = reply.json()["messages"][-1]
+        answer = self.answer(reply)
         self.assertIn("cannot verify", answer["text"])
         self.assertNotIn("29", answer["text"])
         self.assertEqual(answer["reply_origin"], "source_validation")
@@ -414,8 +413,7 @@ class SearchContextTests(unittest.TestCase):
         with backend.workspace_transaction() as state:
             state["chats"][0]["title_source"] = "manual"
         reply = self.send("Sammanfatta vädret i Stockholm 2026-10-05", mode="refresh")
-        self.assertEqual(reply.status_code, 200, reply.text)
-        answer = reply.json()["messages"][-1]
+        answer = self.answer(reply)
         self.assertEqual(answer["reply_origin"], "source_validation")
         self.assertIn("kan inte verifiera", answer["text"])
         self.assertNotIn("23", answer["text"])
@@ -444,8 +442,7 @@ class SearchContextTests(unittest.TestCase):
             {"title": "Undated", "url": "https://docs.ollama.com/weather/relative", "content": "Tomorrow: rain 5.0 mm."},
         ]
         reply = self.send("Use search for Stockholm weather on 2026-10-05", mode="refresh")
-        self.assertEqual(reply.status_code, 200, reply.text)
-        answer = reply.json()["messages"][-1]
+        answer = self.answer(reply)
         self.assertNotIn("reply_origin", answer)
         evidence = answer["web_search"]
         self.assertEqual(evidence["forecast_date_check"], {"requested_dates": ["2026-10-05"], "supported_source_count": 1, "excluded_source_count": 2})
@@ -467,8 +464,7 @@ class SearchContextTests(unittest.TestCase):
         self.snippet = "Synthetic context. " * 58 + " Forecast 2026-10-05: rain 1.5 mm."
         with patch("backend.provider.fit_sources", side_effect=lambda sources, bound: fit_sources(sources, min(bound, 1200))):
             reply = self.send("Use search for Stockholm weather on 2026-10-05", mode="refresh")
-        self.assertEqual(reply.status_code, 200, reply.text)
-        answer = reply.json()["messages"][-1]
+        answer = self.answer(reply)
         self.assertEqual(answer["reply_origin"], "source_validation")
         self.assertEqual(answer["web_search"]["forecast_date_check"]["supported_source_count"], 0)
         self.assertEqual(answer["web_search"]["evidence"], [])
@@ -484,8 +480,7 @@ class SearchContextTests(unittest.TestCase):
             "title": "Wrong day", "url": self.url, "content": "Forecast 2026-05-02: max 23 C."}], 3)["sources"][0]
         self.keys.clear()
         reply = self.send("Use saved sources for Stockholm weather on 2026-10-05", mode="saved_only")
-        self.assertEqual(reply.status_code, 200, reply.text)
-        answer = reply.json()["messages"][-1]
+        answer = self.answer(reply)
         self.assertEqual(answer["reply_origin"], "source_validation")
         self.assertTrue(answer["web_search"]["from_cache"])
         self.assertEqual(answer["web_search"]["sources"][0]["capture_id"], saved["capture_id"])
@@ -557,8 +552,7 @@ class SearchContextTests(unittest.TestCase):
             state["config"]["daily_limit"] = 0
         before = self.client.get("/api/workspace").json()["usage"]
         reply = self.send()
-        self.assertEqual(reply.status_code, 200, reply.text)
-        evidence = reply.json()["messages"][-1]["web_search"]
+        evidence = self.answer(reply)["web_search"]
         self.assertEqual(evidence["retrieval"], "keyword")
         self.assertTrue(evidence["from_cache"])
         self.assertEqual(evidence["sources"][0]["capture_id"], source["capture_id"])
@@ -608,8 +602,7 @@ class SearchContextTests(unittest.TestCase):
         self.query = "tool interface"
         self.extra_args = {"domain": "DOCS.OLLAMA.COM", "retrieved_from": source["retrieved_at"][:10]}
         hit = self.send(mode="saved_only")
-        self.assertEqual(hit.status_code, 200, hit.text)
-        evidence = hit.json()["messages"][-1]["web_search"]
+        evidence = self.answer(hit)["web_search"]
         self.assertEqual(evidence["retrieval"], "keyword")
         self.assertEqual(evidence["filters"]["domain"], "docs.ollama.com")
         self.query = "Ollama tool documentation"  # An exact hit exists, but is outside the filter.
@@ -630,8 +623,7 @@ class SearchContextTests(unittest.TestCase):
         self.freshness = "current"
         self.extra_args = {"domain": "", "retrieved_from": "", "retrieved_to": ""}
         reply = self.send("Summarize the latest Uppsala forecast", mode="refresh")
-        self.assertEqual(reply.status_code, 200, reply.text)
-        evidence = reply.json()["messages"][-1]["web_search"]
+        evidence = self.answer(reply)["web_search"]
         self.assertFalse(evidence["from_cache"])
         self.assertNotIn("filters", evidence)
         self.assertEqual(len(self.hosted_requests()), 1)
@@ -641,8 +633,7 @@ class SearchContextTests(unittest.TestCase):
         self.keys.clear()
         self.extra_args = {"domain": "  ", "retrieved_from": "", "retrieved_to": "\t"}
         reply = self.send(mode="saved_only")
-        self.assertEqual(reply.status_code, 200, reply.text)
-        evidence = reply.json()["messages"][-1]["web_search"]
+        evidence = self.answer(reply)["web_search"]
         self.assertEqual(evidence["retrieval"], "exact_query")
         self.assertEqual(evidence["sources"][0]["capture_id"], source["capture_id"])
         self.assertNotIn("filters", evidence)
@@ -674,8 +665,7 @@ class SearchContextTests(unittest.TestCase):
         recent_only = self.send()
         self.assertEqual(recent_only.status_code, 409, recent_only.text)
         historical = self.send(mode="saved_only")
-        self.assertEqual(historical.status_code, 200, historical.text)
-        evidence = historical.json()["messages"][-1]["web_search"]
+        evidence = self.answer(historical)["web_search"]
         self.assertEqual(evidence["retrieval"], "keyword")
         self.assertTrue(evidence["stale"])
         self.assertTrue(evidence["sources"][0]["stale"])
@@ -690,8 +680,7 @@ class SearchContextTests(unittest.TestCase):
             state["chats"][0]["messages"][-1]["memory_ids"] = ["synthetic-private-memory"]
         self.query = "tool interface"
         reply = self.send()
-        self.assertEqual(reply.status_code, 200, reply.text)
-        evidence = reply.json()["messages"][-1]["web_search"]
+        evidence = self.answer(reply)["web_search"]
         self.assertEqual(evidence["retrieval"], "keyword")
         self.assertEqual(evidence["sources"][0]["capture_id"], source["capture_id"])
         self.assertEqual(self.hosted_requests(), [])
@@ -733,8 +722,7 @@ class SearchContextTests(unittest.TestCase):
         self.assertEqual(self.hosted_requests(), [])
         self.keys[ENDPOINT] = "synthetic-search-context-key"
         fresh = self.send("Use search to explain the tool interface")
-        self.assertEqual(fresh.status_code, 200, fresh.text)
-        evidence = fresh.json()["messages"][-1]["web_search"]
+        evidence = self.answer(fresh)["web_search"]
         self.assertFalse(evidence["from_cache"])
         self.assertIn("archive_warning", evidence)
         self.assertEqual(len(self.hosted_requests()), 1)
@@ -746,8 +734,7 @@ class SearchContextTests(unittest.TestCase):
         partial = {**store.search(self.query, 3), "search_limited": True}
         with patch.object(store, "search", return_value=partial):
             answer = self.send(mode="saved_only")
-        self.assertEqual(answer.status_code, 200, answer.text)
-        evidence = answer.json()["messages"][-1]["web_search"]
+        evidence = self.answer(answer)["web_search"]
         self.assertTrue(evidence["search_limited"])
         self.assertEqual(evidence["retrieval"], "keyword")
         self.assertEqual(self.hosted_requests(), [])
@@ -758,8 +745,7 @@ class SearchContextTests(unittest.TestCase):
             self.assertIn("Narrow", blocked.json()["detail"])
             self.assertEqual(self.hosted_requests(), [])
             fresh = self.send("Use search to explain the tool interface")
-        self.assertEqual(fresh.status_code, 200, fresh.text)
-        evidence = fresh.json()["messages"][-1]["web_search"]
+        evidence = self.answer(fresh)["web_search"]
         self.assertFalse(evidence["from_cache"])
         self.assertTrue(evidence["search_limited"])
         self.assertIn("work limit", evidence["archive_warning"])
@@ -813,8 +799,7 @@ class SearchContextTests(unittest.TestCase):
     def test_capture_is_public_only_and_source_view_is_authenticated(self):
         self.snippet += " " + self.keys[ENDPOINT]
         reply = self.send("Synthetic private chat detail")
-        self.assertEqual(reply.status_code, 200, reply.text)
-        source = reply.json()["messages"][-1]["web_search"]["sources"][0]
+        source = self.answer(reply)["web_search"]["sources"][0]
         viewed = self.client.get("/api/context/sources/" + source["capture_id"])
         self.assertEqual(viewed.status_code, 200, viewed.text)
         self.assertIsNone(viewed.json()["published_at"])
@@ -828,8 +813,7 @@ class SearchContextTests(unittest.TestCase):
     def test_unapproved_source_is_transient_with_no_snapshot_id(self):
         self.url = "https://other.example.org/public"
         reply = self.send()
-        self.assertEqual(reply.status_code, 200, reply.text)
-        source = reply.json()["messages"][-1]["web_search"]["sources"][0]
+        source = self.answer(reply)["web_search"]["sources"][0]
         self.assertIn(source["archive_status"], ("skipped", "not_saved"))
         self.assertNotIn("capture_id", source)
         self.assertEqual(self.client.get("/api/context").json()["indexed_count"], 0)
