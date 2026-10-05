@@ -16,9 +16,10 @@ from urllib.parse import urlsplit
 import uuid
 
 from backend.context_policy import (
-    DEFAULT, MAX_ARCHIVE_ITEMS, approved, configuration, contains_source_secret, contains_url_secret,
+    DEFAULT, MAX_ARCHIVE_ITEMS, configuration, contains_source_secret, contains_url_secret,
     decoded_url_variants, eligible, manifest_hash, public_url, timestamp,
 )
+from backend.storage import archive_path, publish_archive, read_archive, read_archive_json
 
 
 SCHEMA = 1
@@ -188,14 +189,14 @@ class ContextStore:
                 state = {**state, "last_error": "The local source index needs rebuilding."}
         available = bool(self.archive and self.archive.is_dir() and not state.get("write_unavailable"))
         if available:
-            claim = self.archive / "writer-owner.tmp"
-            if claim.exists():
-                try:
+            try:
+                claim = archive_path(self.archive, "writer-owner.tmp")
+                if claim.exists():
                     with _owner_lock:
-                        available = (_owners.get(os.path.normcase(str(self.archive))) == self._token
-                                     and self._read("writer-owner.tmp", 64).decode("ascii") == self._token)
-                except (OSError, ValueError, UnicodeError):
-                    available = False
+                        available = (_owners.get(os.path.normcase(str(self.archive)), (None,))[0] == self._token
+                                     and read_archive(self.archive, "writer-owner.tmp", 64).decode("ascii") == self._token)
+            except (OSError, ValueError, UnicodeError):
+                available = False
         return {"configured": self.archive is not None, "available": available,
                 "path": str(self.archive) if self.archive else None, "config": state["config"], "indexed_count": count,
                 **{field: state[field] for field in ("missing_count", "corrupt_count", "archive_bytes", "archive_items",
@@ -206,19 +207,18 @@ class ContextStore:
         """Atomic cross-runtime local claim; stale claims require explicit cleanup."""
         if self.archive is None:
             raise ValueError("Configure a context archive directory on the server first.")
+        claim = archive_path(self.archive, "writer-owner.tmp")
         key = os.path.normcase(str(self.archive))
         with _owner_lock:
             if key in _owners:
-                if _owners[key] != self._token:
+                if _owners[key][0] != self._token:
                     raise ValueError("Another Maestro workspace owns this archive. Stop it before enabling a second writer.")
-                nested = True
+                _owners[key][1] += 1
             else:
-                nested = False
                 try:
                     self.archive.mkdir(parents=True, exist_ok=True)
                 except OSError:
                     raise ValueError("The context archive directory is unavailable or cannot be written.") from None
-                claim = self.archive / "writer-owner.tmp"
                 try:
                     with os.fdopen(os.open(claim, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "w", encoding="ascii") as stream:
                         stream.write(self._token)
@@ -228,15 +228,16 @@ class ContextStore:
                     raise ValueError("This archive has an existing writer claim. Stop its previous Maestro instance before removing writer-owner.tmp and retrying.") from None
                 except OSError:
                     raise ValueError("The context archive writer claim could not be created. Check its directory permissions.") from None
-                _owners[key] = self._token
+                _owners[key] = [self._token, 1]
         try:
             yield self
         finally:
-            if not nested:
-                with self._write_lock, _owner_lock:
+            with self._write_lock, _owner_lock:
+                _owners[key][1] -= 1
+                if not _owners[key][1]:
                     _owners.pop(key, None)
                     try:
-                        if self._read("writer-owner.tmp", 64).decode("ascii") == self._token:
+                        if read_archive(self.archive, "writer-owner.tmp", 64).decode("ascii") == self._token:
                             (self.archive / "writer-owner.tmp").unlink()
                     except (OSError, ValueError, UnicodeError):
                         pass  # An uncleared claim blocks the next writer safely.
@@ -244,73 +245,18 @@ class ContextStore:
     @contextmanager
     def _writer(self):
         with self._write_lock, self.archive_owner():
-            if self._read("writer-owner.tmp", 64).decode("ascii") != self._token:
+            if read_archive(self.archive, "writer-owner.tmp", 64).decode("ascii") != self._token:
                 raise ValueError("The archive writer claim changed. Stop capture and check its ownership.")
             yield
 
-    def _path(self, relative):
-        if self.archive is None or not isinstance(relative, str):
-            raise ValueError("The source archive is unavailable.")
-        parts = Path(relative)
-        if parts.is_absolute() or ".." in parts.parts or "\\" in relative:
-            raise ValueError("Invalid archived source path.")
-        path = self.archive / parts
-        for parent in (path, *path.parents):
-            if parent == self.archive:
-                break
-            if parent.is_symlink() or getattr(parent, "is_junction", lambda: False)():
-                raise ValueError("Archived source links are not supported.")
-        if self.archive not in path.resolve().parents:
-            raise ValueError("Invalid archived source path.")
-        return path
-
-    def _read(self, relative, limit):
-        path = self._path(relative)
-        if path.stat().st_size > limit:
-            raise ValueError("An archived source exceeds its supported size.")
-        with path.open("rb") as stream:
-            data = stream.read(limit + 1)
-        if len(data) > limit:
-            raise ValueError("An archived source exceeds its supported size.")
-        return data
-
-    def _read_json(self, relative, limit):
-        data = self._read(relative, limit)
-        try:
-            return json.loads(data)
-        except RecursionError:
-            raise ValueError("An archived JSON document is too deeply nested.") from None
-
-    def _publish(self, relative, data):
-        path = self._path(relative)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        if path.exists():
-            if self._read(relative, max(len(data), MANIFEST_BYTES)) != data:
-                raise ValueError("Existing archive content does not match its hash.")
-            return False
-        temporary = path.with_name(path.name + "." + uuid.uuid4().hex + ".tmp")
-        try:
-            with temporary.open("xb") as stream:
-                stream.write(data)
-                stream.flush()
-                os.fsync(stream.fileno())
-            # Ownership excludes other writers; never overwrite an existing artifact.
-            if path.exists():
-                raise ValueError("The archive changed during publication.")
-            temporary.rename(path)
-            return True
-        finally:
-            if temporary.exists():
-                temporary.unlink()
-
     def _format(self):
         expected = {"format": "maestro-public-context", "schema_version": SCHEMA}
-        path = self._path("format.json")
+        path = archive_path(self.archive, "format.json")
         if path.exists():
-            if self._read_json("format.json", 4096) != expected:
+            if read_archive_json(self.archive, "format.json", 4096) != expected:
                 raise ValueError("The archive uses an unsupported format.")
         else:
-            self._publish("format.json", json.dumps(expected).encode())
+            publish_archive(self.archive, "format.json", json.dumps(expected).encode())
 
     @storage_errors
     def configure(self, config):
@@ -348,7 +294,7 @@ class ContextStore:
                     if count > max_items or time.monotonic() - started > 10:
                         raise ValueError("The archive exceeds its item or scan allowance.")
                     relative = Path(entry.path).relative_to(self.archive).as_posix()
-                    path = self._path(relative)
+                    path = archive_path(self.archive, relative)
                     if entry.is_dir(follow_symlinks=False):
                         pending.append(path)
                     else:
@@ -380,10 +326,10 @@ class ContextStore:
             db.execute("INSERT INTO captures_fts(id,title,content) VALUES(?,?,?)", (manifest["capture_id"], manifest["title"], content))
 
     def _deleted(self, capture_id):
-        return self._path("records/deletions/" + capture_id + ".json").exists()
+        return archive_path(self.archive, "records/deletions/" + capture_id + ".json").exists()
 
     def _manifest(self, relative, config):
-        data = self._read_json(relative, MANIFEST_BYTES)
+        data = read_archive_json(self.archive, relative, MANIFEST_BYTES)
         required = {"schema_version", "capture_id", "source_id", "source_url", "title", "object", "retrieved_at", "content_kind", "completeness", "published_at", "modified_at"}
         if (not isinstance(data, dict) or set(data) != required or type(data["schema_version"]) is not int or data["schema_version"] != SCHEMA
                 or not isinstance(data["capture_id"], str) or not ID.fullmatch(data["capture_id"])
@@ -404,7 +350,7 @@ class ContextStore:
                 or obj["path"] != "objects/sha256/" + obj["sha256"][:2] + "/" + obj["sha256"] + ".txt"
                 or obj["encoding"] != "utf-8" or type(obj["bytes"]) is not int or not 1 <= obj["bytes"] <= SOURCE_BYTES):
             raise ValueError("Invalid archived source object.")
-        raw = self._read(obj["path"], SOURCE_BYTES)
+        raw = read_archive(self.archive, obj["path"], SOURCE_BYTES)
         if len(raw) != obj["bytes"] or hashlib.sha256(raw).hexdigest() != obj["sha256"]:
             raise ValueError("An archived source failed its hash check.")
         return data, raw.decode("utf-8")
@@ -422,28 +368,25 @@ class ContextStore:
 
     def lookup(self, query, max_results, allow_stale=False):
         with self._write_lock:
-            return self._lookup(query, max_results, allow_stale)
-
-    def _lookup(self, query, max_results, allow_stale):
-        key = self._key(query, max_results)
-        state = self._state()
-        if not state["config"]["enabled"] or not self.database.is_file() or not self.archive or not self.archive.is_dir():
-            return None
-        try:
-            with closing(sqlite3.connect(self.database.as_uri() + "?mode=ro", uri=True)) as db:
-                row = db.execute("SELECT at,captures FROM context_queries WHERE key=?", (key,)).fetchone()
-            if not row:
+            key = self._key(query, max_results)
+            state = self._state()
+            if not state["config"]["enabled"] or not self.database.is_file() or not self.archive or not self.archive.is_dir():
                 return None
-            at = datetime.fromisoformat(row[0])
-            age = self.now() - at
-            stale = age > timedelta(hours=state["config"]["reuse_hours"])
-            if age < timedelta(0) or not allow_stale and stale:
+            try:
+                with closing(sqlite3.connect(self.database.as_uri() + "?mode=ro", uri=True)) as db:
+                    row = db.execute("SELECT at,captures FROM context_queries WHERE key=?", (key,)).fetchone()
+                if not row:
+                    return None
+                at = datetime.fromisoformat(row[0])
+                age = self.now() - at
+                stale = age > timedelta(hours=state["config"]["reuse_hours"])
+                if age < timedelta(0) or not allow_stale and stale:
+                    return None
+                sources = [{**self.get_capture(item["capture_id"], expected_hash=item["content_hash"], expected_manifest_hash=item["manifest_hash"]), "stale": stale}
+                           for item in json.loads(row[1])]
+                return {"query": normalize_query(query), "at": row[0], "sources": sources, "from_cache": True, "stale": stale}
+            except (OSError, sqlite3.Error, ValueError, KeyError, TypeError):
                 return None
-            sources = [{**self.get_capture(item["capture_id"], expected_hash=item["content_hash"], expected_manifest_hash=item["manifest_hash"]), "stale": stale}
-                       for item in json.loads(row[1])]
-            return {"query": normalize_query(query), "at": row[0], "sources": sources, "from_cache": True, "stale": stale}
-        except (OSError, sqlite3.Error, ValueError, KeyError, TypeError):
-            return None
 
     def search(self, query, limit=3, *, domain=None, retrieved_from=None, retrieved_to=None, allow_stale=False):
         filters = validate_search(query, limit, domain=domain, retrieved_from=retrieved_from, retrieved_to=retrieved_to)
@@ -624,17 +567,17 @@ class ContextStore:
                                 "source_url": clean["url"], "title": clean["title"][:200], "object": obj,
                                 "retrieved_at": at, "content_kind": "search_excerpt", "completeness": clean["completeness"], "published_at": None, "modified_at": None}
                     encoded = json.dumps(manifest, ensure_ascii=False).encode("utf-8")
-                    extra = len(encoded) + (0 if self._path(obj["path"]).exists() else len(raw))
-                    new_paths = {self._path(name) for name in (obj["path"], relative)}
+                    extra = len(encoded) + (0 if archive_path(self.archive, obj["path"]).exists() else len(raw))
+                    new_paths = {archive_path(self.archive, name) for name in (obj["path"], relative)}
                     new_paths |= {parent for path in tuple(new_paths) for parent in path.parents if parent != self.archive and self.archive in parent.parents}
                     additions = sum(not path.exists() for path in new_paths)
                     if total + extra > config["max_bytes"] or items + additions > config["max_items"] or shutil.disk_usage(self.archive).free < extra + 65536:
                         result["archive_warning"] = "The archive has reached its byte, item or free-space allowance. Some source evidence was not saved."
                         continue
-                    if self._publish(obj["path"], raw):
+                    if publish_archive(self.archive, obj["path"], raw):
                         measured["object_bytes"] += len(raw)
                         measured["new_bytes"] += len(raw)
-                    if self._publish(relative, encoded):
+                    if publish_archive(self.archive, relative, encoded):
                         measured["manifest_bytes"] += len(encoded)
                         measured["new_bytes"] += len(encoded)
                     self._index_capture(manifest, relative, clean["content"])
@@ -668,10 +611,6 @@ class ContextStore:
                 pass
         return result
 
-    def get_capture(self, capture_id, expected_hash=None, expected_manifest_hash=None):
-        with self._write_lock:
-            return self._get_capture(capture_id, expected_hash, expected_manifest_hash)
-
     @contextmanager
     def evidence_guard(self, sources):
         """Validate and commit evidence under mutation exclusion, never over inference."""
@@ -684,26 +623,27 @@ class ContextStore:
                 raise ValueError("Saved source evidence changed or was removed. Refresh the source choice before answering.") from None
             yield
 
-    def _get_capture(self, capture_id, expected_hash=None, expected_manifest_hash=None):
-        if not isinstance(capture_id, str) or not ID.fullmatch(capture_id):
-            raise KeyError(capture_id)
-        config = self._state()["config"]
-        if not config["enabled"] or not self.index.is_file():
-            raise KeyError(capture_id)
-        try:
-            with closing(sqlite3.connect(self.index.as_uri() + "?mode=ro", uri=True)) as db:
-                row = db.execute("SELECT manifest,manifest_hash FROM captures WHERE id=?", (capture_id,)).fetchone()
-            if not row:
+    def get_capture(self, capture_id, expected_hash=None, expected_manifest_hash=None):
+        with self._write_lock:
+            if not isinstance(capture_id, str) or not ID.fullmatch(capture_id):
                 raise KeyError(capture_id)
-            manifest, content = self._manifest(row[0], config)
-            digest = manifest_hash(manifest)
-            if row[1] != digest or expected_manifest_hash is not None and expected_manifest_hash != digest:
+            config = self._state()["config"]
+            if not config["enabled"] or not self.index.is_file():
                 raise KeyError(capture_id)
-            if expected_hash is not None and manifest["object"]["sha256"] != expected_hash:
-                raise KeyError(capture_id)
-            return self._source(manifest, content)
-        except (OSError, sqlite3.Error, ValueError, TypeError, UnicodeError):
-            raise KeyError(capture_id) from None
+            try:
+                with closing(sqlite3.connect(self.index.as_uri() + "?mode=ro", uri=True)) as db:
+                    row = db.execute("SELECT manifest,manifest_hash FROM captures WHERE id=?", (capture_id,)).fetchone()
+                if not row:
+                    raise KeyError(capture_id)
+                manifest, content = self._manifest(row[0], config)
+                digest = manifest_hash(manifest)
+                if row[1] != digest or expected_manifest_hash is not None and expected_manifest_hash != digest:
+                    raise KeyError(capture_id)
+                if expected_hash is not None and manifest["object"]["sha256"] != expected_hash:
+                    raise KeyError(capture_id)
+                return self._source(manifest, content)
+            except (OSError, sqlite3.Error, ValueError, TypeError, UnicodeError):
+                raise KeyError(capture_id) from None
 
     @storage_errors
     def delete_capture(self, capture_id):
@@ -715,7 +655,7 @@ class ContextStore:
             relative = "records/deletions/" + capture_id + ".json"
             if not self._deleted(capture_id):
                 self.get_capture(capture_id)
-                self._publish(relative, json.dumps({"schema_version": SCHEMA, "capture_id": capture_id}).encode())
+                publish_archive(self.archive, relative, json.dumps({"schema_version": SCHEMA, "capture_id": capture_id}).encode())
             total, items, _ = self._inventory()
             with self._transaction() as (state, db):
                 state.update(archive_bytes=total, archive_items=items)

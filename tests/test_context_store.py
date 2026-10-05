@@ -3,14 +3,17 @@ from datetime import datetime, timedelta, timezone
 from contextlib import closing
 import hashlib
 import json
+import os
 from pathlib import Path
 import sqlite3
+import subprocess
 import tempfile
 import threading
 import unittest
 from unittest.mock import patch
 
 from backend.context_store import ContextStore, DEFAULT, MANIFEST_BYTES, ROOT, decoded_url_variants, public_url, validate_search
+from backend.storage import publish_archive
 
 
 class ContextStoreTests(unittest.TestCase):
@@ -623,12 +626,12 @@ class ContextStoreTests(unittest.TestCase):
 
     def test_interrupted_publication_leaves_no_reusable_partial_capture(self):
         self.enable()
-        original = self.store._publish
-        def interrupted(relative, data):
+        original = publish_archive
+        def interrupted(root, relative, data):
             if relative.startswith("records/captures/"):
                 raise OSError("Synthetic disk interruption with private diagnostics")
-            return original(relative, data)
-        with patch.object(self.store, "_publish", side_effect=interrupted):
+            return original(root, relative, data)
+        with patch("backend.context_store.publish_archive", side_effect=interrupted):
             result = self.capture()
         self.assertIn("archive_warning", result)
         self.assertEqual(result["sources"][0]["archive_status"], "not_saved")
@@ -833,6 +836,70 @@ class ContextStoreTests(unittest.TestCase):
         self.assertFalse(self.store.status()["available"])
         self.assertNotIn("private exception", self.store.status()["last_error"])
         self.assertEqual(claim.read_text(), "synthetic-stale-owner-token")
+
+    def test_replaced_archive_root_and_ancestor_cannot_claim_or_create_private_storage(self):
+        private = self.database.parent
+        private.mkdir()
+        for ancestor in (False, True):
+            archive = self.root / ("linked-parent/public-archive" if ancestor else "linked-root")
+            store = ContextStore(self.database, archive)
+            link = archive.parent if ancestor else archive
+            if os.name == "nt":
+                created = subprocess.run(["cmd.exe", "/c", "mklink", "/J", str(link), str(private)],
+                                         capture_output=True, text=True, timeout=10)
+                self.assertEqual(created.returncode, 0, created.stderr)
+            else:
+                link.symlink_to(private, target_is_directory=True)
+            try:
+                with self.subTest(ancestor=ancestor):
+                    self.assertFalse(store.status()["available"])
+                    with self.assertRaises(ValueError):
+                        with store.archive_owner():
+                            self.fail("A redirected archive cannot acquire writer ownership.")
+                    self.assertEqual(list(private.iterdir()), [])
+                    if ancestor:
+                        (private / "public-archive").mkdir()
+                        self.assertFalse(store.status()["available"])
+            finally:
+                link.rmdir() if os.name == "nt" else link.unlink()
+
+    def test_overlapping_owner_contexts_retain_claim_until_the_last_exit(self):
+        entered, release = threading.Event(), threading.Event()
+        errors = []
+        def work():
+            try:
+                with self.store.archive_owner():
+                    entered.set()
+                    if not release.wait(timeout=10):
+                        raise TimeoutError("The owner test did not release its worker.")
+            except Exception as error:
+                errors.append(error)
+            finally:
+                entered.set()
+        thread = threading.Thread(target=work, daemon=True)
+        claim = self.archive / "writer-owner.tmp"
+        other = ContextStore(self.root / "other-private" / "workspace.sqlite3", self.archive)
+        try:
+            with self.store.archive_owner():
+                token = claim.read_bytes()
+                thread.start()
+                self.assertTrue(entered.wait(timeout=5))
+                self.assertEqual(errors, [])
+            self.assertTrue(thread.is_alive())
+            self.assertEqual(claim.read_bytes(), token)
+            with self.assertRaisesRegex(ValueError, "owns"):
+                with other.archive_owner():
+                    self.fail("Another store cannot claim an archive while its owner is active.")
+        finally:
+            release.set()
+            if thread.ident is not None:
+                thread.join(timeout=5)
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(errors, [])
+        self.assertFalse(claim.exists())
+        with other.archive_owner():
+            self.assertTrue(claim.exists())
+        self.assertFalse(claim.exists())
 
     def test_replaced_manifest_cannot_change_a_hash_bound_view_or_query_reuse(self):
         self.enable()
