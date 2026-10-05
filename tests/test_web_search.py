@@ -356,7 +356,9 @@ class WebSearchTests(unittest.TestCase):
                 fitted = fit_sources([source], 256)
                 self.assertTrue(fitted[0]["content"])
                 self.assertTrue(content.startswith(fitted[0]["content"]))
-                self.assertLessEqual(len(json.dumps(fitted, ensure_ascii=False).encode("utf-8")), 256)
+                encoded = json.dumps(fitted, ensure_ascii=False)
+                self.assertLessEqual(len(encoded.encode("utf-8")), 256)
+                self.assertLessEqual(len(json.dumps(encoded, ensure_ascii=False).encode("utf-8")) - 2, 256)
 
     def test_invalid_stored_search_key_never_dispatches_or_reserves(self):
         for key in ("synthetic-\u2603-key", "synthetic-\n-key"):
