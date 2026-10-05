@@ -22,9 +22,11 @@ The Settings view distinguishes indexed source snapshots from measured archive b
 | `sources_received` | Number of returned entries considered within the configured one-to-three result allowance. |
 | `sources_saved` | Entries whose immutable manifests and index rows were successfully published. |
 | `excerpt_bytes` | UTF-8 bytes in those saved excerpts, including repeated excerpts that share an object. |
-| `object_bytes` | Bytes in object files newly published by this attempt; deduplicated objects add zero. |
-| `manifest_bytes` | Bytes in capture manifests newly published by this attempt. |
-| `new_bytes` | Newly published object plus manifest bytes, including files published before a later indexing failure; excludes directories, format/claim files and private databases. |
+| `object_bytes` | Bytes in object files whose new publication completed successfully; deduplicated objects add zero. |
+| `manifest_bytes` | Bytes in capture manifests whose new publication completed successfully. |
+| `new_bytes` | Confirmed new object plus manifest bytes, including successful publications before a later indexing failure; excludes directories, format/claim files and private databases. |
+
+These publication receipts are distinct from archive inventory. Staging cleanup can fail after a complete destination was linked, leaving final files and staging residue without confirming that publication. In that case the byte counters are lower bounds; zero confirmed bytes does not prove no files were written. `archive_bytes` measures logical file bytes, including final files and staging residue, rather than physical disk allocation.
 
 Saved counts can be lower than received counts because of policy exclusions, storage limits or errors. At capacity, fitting sources remain reusable and refusals produce a warning; exact reuse returns only the verified saved subset. Unexpected publication/index failures can leave files but do not publish a new query mapping. Each successful fresh observation receives its own timestamped capture ID; exact/keyword reuse creates no new capture and does not refresh dates. Source removal suppresses evidence through a deletion record and normally increases stored bytes slightly; physical cleanup remains a separate future retention action.
 

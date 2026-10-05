@@ -1036,10 +1036,10 @@ test("settings and compact menu report actual archive usage and last retrieval s
     "Archive storage: 8.0 KiB (8,192 bytes) of 256.0 MiB · 12 of 50,000 files/directories",
   );
   await expect(accounting).toContainText(
-    "2 of 3 results saved · 3.8 KiB excerpt text · 1.4 KiB new source files",
+    "2 of 3 results saved · 3.8 KiB excerpt text · 1.4 KiB confirmed new source files",
   );
   await expect(accounting).toContainText(
-    "New text objects: 640 B · New snapshot manifests: 800 B",
+    "Confirmed new text objects: 640 B · Confirmed new snapshot manifests: 800 B",
   );
   await expect(accounting).toContainText(
     "excludes archive control files and the private index",

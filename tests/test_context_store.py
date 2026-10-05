@@ -265,6 +265,37 @@ class ContextStoreTests(unittest.TestCase):
         self.assertEqual(self.store.get_capture(result["sources"][0]["capture_id"]), result["sources"][0])
         self.assertEqual(self.store.rebuild()["indexed_count"], 2)
 
+    def test_cleanup_failures_leave_inventory_beyond_confirmed_publication_receipts(self):
+        for kind, segment in (("object", "objects"), ("manifest", "records")):
+            with self.subTest(kind=kind):
+                archive = self.root / kind
+                store = ContextStore(self.root / "private" / kind / "workspace.sqlite3", archive)
+                store.configure(self.config)
+                unlink = Path.unlink
+                def fail_cleanup(path, *args, **kwargs):
+                    if path.suffix == ".tmp" and archive / segment in path.parents:
+                        raise PermissionError("Synthetic staging cleanup failure")
+                    return unlink(path, *args, **kwargs)
+                with store.archive_owner():
+                    before = archive_inventory(archive, self.config["max_items"])[0]
+                    with patch.object(Path, "unlink", fail_cleanup):
+                        result = store.capture(self.query, store.now().isoformat(), [self.source], 3)
+                    status = store.status()
+                    receipt = status["last_capture"]
+                    confirmed = len(self.source["content"].encode()) if kind == "manifest" else 0
+                    self.assertEqual((receipt["object_bytes"], receipt["manifest_bytes"], receipt["new_bytes"]), (confirmed, 0, confirmed))
+                    self.assertEqual((receipt["sources_saved"], receipt["excerpt_bytes"], status["indexed_count"]), (0, 0, 0))
+                    self.assertIn("archive_warning", result)
+                    self.assertEqual(result["sources"][0]["archive_status"], "not_saved")
+                    self.assertIsNone(store.lookup(self.query, 3))
+                    residue = list((archive / segment).rglob("*.tmp"))
+                    self.assertEqual(len(residue), 1)
+                    destination = residue[0].with_name(residue[0].name.rsplit(".", 2)[0])
+                    self.assertEqual(destination.read_bytes(), residue[0].read_bytes())
+                    self.assertEqual(status["archive_bytes"], archive_inventory(archive, self.config["max_items"])[0])
+                    self.assertGreater(status["archive_bytes"] - before, receipt["new_bytes"])
+                    self.assertEqual(store.rebuild()["indexed_count"], int(kind == "manifest"))
+
     def test_failed_capture_recovery_cannot_overwrite_concurrent_capture_usage(self):
         self.enable()
         scanned, release, checked = threading.Event(), threading.Event(), threading.Event()

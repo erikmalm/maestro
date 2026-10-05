@@ -112,14 +112,15 @@ function ArchiveAccounting({
             Last fresh retrieval {sourceDate(capture.retrieved_at)} ·{" "}
             {capture.sources_saved} of {capture.sources_received} results saved
             · {archiveSize(capture.excerpt_bytes)} excerpt text ·{" "}
-            {archiveSize(capture.new_bytes)} new source files
+            {archiveSize(capture.new_bytes)} confirmed new source files
           </p>
           {!compact && (
             <p>
-              New text objects: {archiveSize(capture.object_bytes)} · New
-              snapshot manifests: {archiveSize(capture.manifest_bytes)}. New
-              source-file size excludes archive control files and the private
-              index; total archive storage includes control files.
+              Confirmed new text objects: {archiveSize(capture.object_bytes)} ·
+              Confirmed new snapshot manifests:{" "}
+              {archiveSize(capture.manifest_bytes)}. New source-file size
+              excludes archive control files and the private index; total
+              archive storage includes control files.
             </p>
           )}
         </>

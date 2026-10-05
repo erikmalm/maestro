@@ -24,7 +24,7 @@ Callers must still check deletion, read bounded object bytes, verify their size/
 
 Callers supply a resolved archive root, enforce ownership/capacity and choose read limits. Paths reject traversal, drive/alternate-stream syntax, reserved Windows names, symlinks and junctions, including replaced roots and ancestors. Reads consume at most the limit plus one byte and reject oversized or excessively nested JSON documents.
 
-Publication writes an exclusive staging file, flushes and syncs its bytes, then uses an atomic hard link to create the destination without replacing it. Identical existing content is reused; conflicting content or a publication race raises an error. Owned staging files are removed after success or failure; unrelated staging collisions remain untouched.
+Publication writes an exclusive staging file, flushes and syncs its bytes, then uses an atomic hard link to create the destination without replacing it. Identical existing content is reused; conflicting content or a publication race raises an error. Owned staging cleanup is attempted after success or failure; cleanup errors propagate even if the complete destination already exists. Unrelated staging collisions remain untouched.
 
 The destination filesystem must support hard links. Unsupported publication fails without a replacement fallback. File helpers do not validate manifests or connect capture to chat; callers obtain ownership separately. Existing workspace locking and SQLite snapshots retain their behavior.
 
