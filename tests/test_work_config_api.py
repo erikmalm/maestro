@@ -104,26 +104,23 @@ class WorkConfigAPITests(unittest.TestCase):
             self.assertEqual(response.status_code, 200, response.text)
             self.assertFalse(response.json()["config"]["enabled"])
 
-    def test_automatic_curation_requires_context_and_preserves_the_six_hour_schedule(self):
+    def test_automatic_curation_uses_own_context_and_preserves_the_six_hour_schedule(self):
         config = self.client.get("/api/work-config").json()["config"]
         provider = self.client.get("/api/provider").json()["config"]
         local = {**provider, "protocol": "ollama", "base_url": "http://127.0.0.1:11434",
                  "model": "synthetic:7b", "ollama_context_tokens": 4096, "max_output_tokens": 256}
-        automatic = {**config, "enabled": True, "auto_curate": True, "periodic_reflection": True}
+        automatic = {**config, "enabled": True, "auto_curate": True, "periodic_reflection": True,
+                     "background_context_tokens": 65536, "max_output_tokens": 8192}
         self.assertEqual(automatic["reflection_interval_minutes"], 360)
         with patch("backend.provider.network", side_effect=AssertionError("Saving settings must not infer")):
             self.assertEqual(self.client.put("/api/provider", headers=self.headers,
                 json={"config": local, "persist": False}).status_code, 200)
-            response = self.client.put("/api/work-config", headers=self.headers, json=automatic)
-            self.assertEqual(response.status_code, 409, response.text)
-            self.assertIn("8192", response.json()["detail"])
-            self.assertEqual(self.client.get("/api/work-config").json()["config"], config)
-            self.assertEqual(self.client.put("/api/provider", headers=self.headers,
-                json={"config": {**local, "ollama_context_tokens": 8192}, "persist": False}).status_code, 200)
+            saved_local = self.client.get("/api/provider").json()["config"]
             response = self.client.put("/api/work-config", headers=self.headers, json=automatic)
             self.assertEqual(response.status_code, 200, response.text)
             self.assertEqual(response.json()["config"], automatic)
             self.assertEqual(self.client.get("/api/work-config").json()["config"], automatic)
+            self.assertEqual(self.client.get("/api/provider").json()["config"], saved_local)
 
     def test_configured_keys_cannot_be_saved_as_model_names(self):
         config = self.client.get("/api/work-config").json()["config"]

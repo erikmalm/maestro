@@ -442,8 +442,6 @@ def put_work_config(entry: WorkConfig):
         connection = provider().read_state()["config"]
         if entry.enabled and (connection["protocol"] != "ollama" or not connection["model"]):
             raise ValueError("Select a local Ollama chat model before enabling reflection.")
-        if entry.enabled and entry.auto_curate and connection["ollama_context_tokens"] < 8192:
-            raise ValueError("Automatic memory curation needs at least 8192 context tokens. Update Local worker settings first.")
         for model in (entry.reflection_model, entry.memory_model, entry.coding_model):
             safe_private_content(model)
         with workspace_transaction(with_db=True) as (state, db):

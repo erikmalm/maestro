@@ -207,7 +207,7 @@ def failure_reason(error):
         "Enter a memory between 1 and 8000 characters.": "Reflection proposed an empty or oversized memory; no memory was saved.",
         "Reflection paused because its source or settings changed.": "Reflection paused because its source or settings changed.",
         "Reflection paused because a memory source changed.": "Reflection paused because a memory source changed.",
-        "Reflection context is too small; increase the local context limit.": "Reflection context is too small; increase the local context limit.",
+        "Reflection context is too small; increase background context or the workspace token limit, or lower reflection output.": "Reflection context is too small; increase background context or the workspace token limit, or lower reflection output.",
         "Daily reflection budget reached; queued work waits for the next day.": "Daily reflection budget reached; queued work waits for the next day.",
         "A proposal may contain credentials; no memory was saved.": "A proposal may contain credentials; no memory was saved.",
         "Remove credentials before saving.": "A proposal may contain credentials; no memory was saved.",
@@ -482,8 +482,8 @@ class ReflectionStore:
                     self.write_job(db, job, "done")
                     return None
             source_text = self.source_text(job, workspace)
-            output = min(policy["max_output_tokens"], config["max_output_tokens"])
-            cap = min(config["ollama_context_tokens"], policy["background_context_tokens"], workspace["limits"]["max_tokens"]) - output - 2048
+            output = policy["max_output_tokens"]
+            cap = min(policy["background_context_tokens"], workspace["limits"]["max_tokens"]) - output - 2048
             # Leave room for a draft, then verify the actual review before dispatch.
             formation_cap = cap - min(output * 2, max(0, cap // 3)) if automatic else cap
             # Inventory must leave room for new evidence and task titles when present.
@@ -566,14 +566,14 @@ class ReflectionStore:
                     if available <= 0:
                         break
             if not data and job["mode"] != "periodic":
-                self.pause(db, job, "Reflection context is too small; increase the local context limit.")
+                self.pause(db, job, "Reflection context is too small; increase background context or the workspace token limit, or lower reflection output.")
                 return None
             context["sources"] = data
             messages = [{"role": "user", "content": json.dumps(context if automatic else data)}]
             if len((instructions + json.dumps(messages) + json.dumps(schema)).encode("utf-8")) > cap:
-                self.pause(db, job, "Reflection context is too small; increase the local context limit.")
+                self.pause(db, job, "Reflection context is too small; increase background context or the workspace token limit, or lower reflection output.")
                 return None
-            reserve = len((instructions + json.dumps(messages) + json.dumps(schema)).encode("utf-8")) + 2048 + min(policy["max_output_tokens"], config["max_output_tokens"])
+            reserve = len((instructions + json.dumps(messages) + json.dumps(schema)).encode("utf-8")) + 2048 + output
             budget = db.execute("SELECT jobs,tokens FROM reflection_budget WHERE day=?", (self.day(),)).fetchone() or (0, 0)
             if budget[0] >= policy["max_jobs_per_day"] or budget[1] + reserve > policy["max_tokens_per_day"]:
                 self.pause(db, job, "Daily reflection budget reached; queued work waits for the next day.")
@@ -800,9 +800,9 @@ class ReflectionStore:
             for field in ("usage_settled", "reserved_tokens", "request_id"):
                 current.pop(field, None)
             messages = [{"role": "user", "content": json.dumps({**context, "drafts": drafts, **({"task_drafts": tasks} if job.get("tasks_enabled") else {})})}]
-            bound = len((instructions_for(current) + json.dumps(messages) + json.dumps(schema_for(current))).encode("utf-8")) + 2048 + min(job["work_config"]["max_output_tokens"], job["connection_config"]["max_output_tokens"])
-            if bound > min(job["connection_config"]["ollama_context_tokens"], job["work_config"]["background_context_tokens"], job["limits"]["max_tokens"]):
-                raise ValueError("Reflection context is too small; increase the local context limit.")
+            bound = len((instructions_for(current) + json.dumps(messages) + json.dumps(schema_for(current))).encode("utf-8")) + 2048 + job["work_config"]["max_output_tokens"]
+            if bound > min(job["work_config"]["background_context_tokens"], job["limits"]["max_tokens"]):
+                raise ValueError("Reflection context is too small; increase background context or the workspace token limit, or lower reflection output.")
             self.write_job(db, current, "reviewing")
             return {"job": current, "drafts": drafts, "task_drafts": tasks, "instructions": instructions_for(current), "schema": schema_for(current),
                     "messages": messages}
