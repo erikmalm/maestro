@@ -108,28 +108,7 @@ Under `approved_sources`, capture additionally requires exact HTTPS origins with
 
 Observation timestamps use timezone-aware UTC. Publisher dates retain their actual precision: a date without a time remains a date, with no invented midnight or timezone. Publication date, modification date, HTTP `Last-Modified`, server `Date`, retrieval time and an event discussed in the article have separate meanings. Missing publication dates remain unknown. A model must not supply a guessed date to the index. For webpage captures, record explicit publisher metadata or labelled text and its extraction location; keep conflicts visible. Structured `datePublished` describes publication, while `dateModified` describes modification. [Schema.org CreativeWork](https://schema.org/CreativeWork). Store HTTP `Date` and `Last-Modified` separately: the former describes message origination, the latter the server's selected representation. [RFC 9110](https://www.rfc-editor.org/rfc/rfc9110.html#section-8.8).
 
-First-delivery manifest for an excerpt; IDs and hash are placeholders. `manifest_hash` is derived and kept in private references rather than inserted into the manifest itself:
-
-```json
-{
-  "schema_version": 1,
-  "capture_id": "<uuid>",
-  "source_id": "<normalized-url-hash>",
-  "source_url": "https://example.org/article",
-  "title": "Example public article",
-  "content_kind": "search_excerpt",
-  "completeness": {"maestro_truncated": false, "full_page": false},
-  "object": {
-    "path": "objects/sha256/ab/<sha256>.txt",
-    "sha256": "<sha256>",
-    "bytes": 53,
-    "encoding": "utf-8"
-  },
-  "retrieved_at": "2026-10-04T10:00:00Z",
-  "published_at": null,
-  "modified_at": null
-}
-```
+The exact excerpt manifest contract is defined by [`validate_capture_manifest`](../backend/context_policy.py). `manifest_hash` is derived and retained in private references, not inserted into the public manifest.
 
 Origin verification is recorded in a separate immutable check referencing the capture, URL, time, response status and validators. A successful conditional `304` can verify the matching representation without downloading it again. A changed `200` creates a new capture; an unchanged response can refer to existing bytes. Failures and cache reuse do not advance verification time. Verification establishes what the origin served or validated, not factual correctness. Record validator strength: weak ETags can validate semantic equivalence without proving byte identity. Do not describe their `304` response as an exact-byte comparison.
 
