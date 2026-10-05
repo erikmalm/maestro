@@ -234,7 +234,7 @@ class WebSearch:
                 raise ValueError("Ollama search returned an invalid result list.")
             # Retain the request's credential across rotations; decoded safety views
             # must be checked before any source fields reach inference or public storage.
-            from backend.context_store import contains_url_secret, contains_source_secret
+            from backend.context_policy import contains_url_secret, contains_source_secret
 
             results = []
             completeness = []

@@ -16,7 +16,8 @@ import httpx
 
 from backend import credentials
 from backend.web_search import WebSearch, TOOL, SEARCH_INSTRUCTIONS, fit_sources, ENDPOINT as SEARCH_ENDPOINT
-from backend.context_store import ContextStore, validate_search, contains_url_secret, contains_source_secret
+from backend.context_store import ContextStore, validate_search
+from backend.context_policy import contains_url_secret, contains_source_secret
 from backend.context_tools import (TOOL as CONTEXT_TOOL, INSTRUCTIONS as CONTEXT_INSTRUCTIONS, requires_refresh,
                                    explicit_search_request, requested_relative_dates, dated_search_query,
                                    requested_calendar_dates, is_weather_request, forecast_date_supported, gate_forecast_sources,
@@ -613,10 +614,8 @@ class Provider:
                 if contains_source_secret(content, secrets):
                     entry["evidence_status"] = "withheld_credentials"
                     continue
-                if forecast_dates and not forecast_date_supported({"title": source.get("title", ""), "content": content}, forecast_dates):
-                    entry["evidence_status"] = "unsupported_forecast_date"
-                    continue
-                if required_dates and not forecast_date_supported({"title": source.get("title", ""), "content": content}, required_dates):
+                if any(dates and not forecast_date_supported({"title": source.get("title", ""), "content": content}, dates)
+                       for dates in (forecast_dates, required_dates)):
                     entry["evidence_status"] = "unsupported_forecast_date"
                     continue
                 entry.update(content=content, evidence_sha256=digest, evidence_status="available", citation=len(references) + 1)

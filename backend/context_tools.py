@@ -115,29 +115,37 @@ def is_weather_request(*texts):
     return any(isinstance(text, str) and WEATHER_REQUEST.search(text) for text in texts)
 
 
-def requested_calendar_dates(user_text, today: date) -> tuple[str, ...]:
-    """Resolve full calendar days once, without exporting request text."""
-    dates = set(requested_relative_dates(user_text, today))
+def _calendar_dates(text, *, strict=False):
+    """Read explicit days; source excerpts skip dates that requests must reject."""
+    dates = set()
 
     def add(year, month, day):
         try:
             dates.add(date(int(year), int(month), int(day)).isoformat())
-        except ValueError:
-            raise ValueError("Use valid calendar dates in the source request.") from None
+        except (ValueError, TypeError):
+            if strict:
+                raise ValueError("Use valid calendar dates in the source request.") from None
 
-    for year, month, day in CALENDAR_DATE.findall(user_text):
+    for year, month, day in CALENDAR_DATE.findall(text):
         add(year, month, day)
-    for day, month, year in DAY_MONTH_YEAR.findall(user_text):
+    for day, month, year in DAY_MONTH_YEAR.findall(text):
         add(year, MONTHS[month.casefold()], day)
-    for month, day, year in MONTH_DAY_YEAR.findall(user_text):
+    for month, day, year in MONTH_DAY_YEAR.findall(text):
         add(year, MONTHS[month.casefold()], day)
-    for day, month, year in NUMERIC_DATE.findall(user_text):
+    for day, month, year in NUMERIC_DATE.findall(text):
+        # Numeric month/day ordering is ambiguous unless only one is valid.
         if int(day) > 12 or int(day) == int(month):
             add(year, month, day)
         elif int(month) > 12:
             add(year, day, month)
-        else:
+        elif strict:
             raise ValueError("Use an unambiguous full calendar date (YYYY-MM-DD) in the source request.")
+    return dates
+
+
+def requested_calendar_dates(user_text, today: date) -> tuple[str, ...]:
+    """Resolve full calendar days once, without exporting request text."""
+    dates = set(requested_relative_dates(user_text, today)) | _calendar_dates(user_text, strict=True)
     if len(dates) > 2:
         raise ValueError("Request at most two calendar dates in one source lookup.")
     return tuple(sorted(dates))
@@ -157,26 +165,7 @@ def forecast_date_supported(source, dates):
     metadata = re.compile(r"^\s*[#*>-]*\s*(?:published|publication|modified|last\s+modified|updated|retrieved|"
                           r"fetched|saved|copyright|publicerad|uppdaterad|hämtad|observationstid|datepublished|datemodified)\b", re.I)
     text = "\n".join(line for line in text.splitlines() if not metadata.search(line))
-    found = set()
-
-    def add(year, month, day):
-        try:
-            found.add(date(int(year), int(month), int(day)).isoformat())
-        except (ValueError, TypeError):
-            pass
-
-    for year, month, day in CALENDAR_DATE.findall(text):
-        add(year, month, day)
-    for day, month, year in DAY_MONTH_YEAR.findall(text):
-        add(year, MONTHS[month.casefold()], day)
-    for month, day, year in MONTH_DAY_YEAR.findall(text):
-        add(year, MONTHS[month.casefold()], day)
-    for day, month, year in NUMERIC_DATE.findall(text):
-        # Numeric month/day ordering is ambiguous unless only one is valid.
-        if int(day) > 12 or int(day) == int(month):
-            add(year, month, day)
-        elif int(month) > 12:
-            add(year, day, month)
+    found = _calendar_dates(text)
     return all(day in found for day in dates)
 
 

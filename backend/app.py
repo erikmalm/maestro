@@ -25,7 +25,8 @@ from backend.provider import Provider
 from backend import credentials
 from backend.capabilities import CAPABILITIES
 from backend.web_search import WebSearch, ENDPOINT as SEARCH_ENDPOINT
-from backend.context_store import ContextStore, validate_search, decoded_url_variants
+from backend.context_store import ContextStore, validate_search
+from backend.context_policy import decoded_url_variants
 from backend.storage import workspace_owner
 from backend.memory import MAX_CONTENT, MemoryStore
 from backend.work_config import WorkConfig, config_value
