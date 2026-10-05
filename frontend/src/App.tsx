@@ -594,22 +594,14 @@ function ContextArchiveSetup({
               ["max_items", "Maximum archive files/directories", 100, 200000],
             ]}
           />
-          <label>
-            Archive size limit (MiB)
-            <input
-              required
-              type="number"
-              min={1}
-              max={102400}
-              step="any"
-              value={config.max_bytes / 1048576}
-              onChange={(event) =>
-                setConfig({
-                  max_bytes: Math.round(Number(event.target.value) * 1048576),
-                })
-              }
-            />
-          </label>
+          <NumberFields
+            values={{ archive_mib: config.max_bytes / 1048576 }}
+            fields={[["archive_mib", "Archive size limit (MiB)", 1, 102400]]}
+            step="any"
+            onChange={(_, value) =>
+              setConfig({ max_bytes: Math.round(value * 1048576) })
+            }
+          />
         </div>
         <div className="reflection-actions">
           <button className="button primary" disabled={!!busy}>
