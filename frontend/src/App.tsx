@@ -2054,34 +2054,39 @@ export default function App() {
                           : "memories"}
                       </small>
                     )}
-                    {message.web_search && (
+                    {(message.web_search ||
+                      !!message.source_context?.citations?.length) && (
                       <div className="message-sources">
                         <p>
-                          {message.web_search.from_cache
-                            ? "Saved sources for:"
-                            : "Search query:"}{" "}
-                          {message.web_search.query}
+                          {message.web_search
+                            ? `${message.web_search.from_cache ? "Saved sources for:" : "Search query:"} ${message.web_search.query}`
+                            : "Sources from earlier answers"}
                         </p>
-                        {message.web_search.from_cache && (
+                        {message.web_search?.from_cache && (
                           <p>Reused saved evidence; no new web search.</p>
                         )}
-                        {message.web_search.stale && (
+                        {message.web_search?.stale && (
                           <p>Older saved evidence</p>
                         )}
-                        {message.web_search.search_limited && (
+                        {message.web_search?.search_limited && (
                           <p role="status">
                             Saved lookup reached its work limit; narrow keywords
                             or saved-source filters for a more complete lookup.
                           </p>
                         )}
-                        {message.web_search.archive_warning && (
+                        {message.web_search?.archive_warning && (
                           <p role="status">
                             {message.web_search.archive_warning}
                           </p>
                         )}
                         <ol>
-                          {message.web_search.sources.map((source, index) => {
+                          {[
+                            ...(message.web_search?.sources ?? []),
+                            ...(message.source_context?.citations ?? []),
+                          ].map((source, index) => {
                             const url = sourceURL(source.url);
+                            const lookup =
+                              index < (message.web_search?.sources.length ?? 0);
                             return (
                               <li key={index}>
                                 {url ? (
@@ -2099,12 +2104,15 @@ export default function App() {
                                   <span>
                                     Search excerpt ·{" "}
                                     {(source.stale ??
-                                      message.web_search!.stale) &&
+                                      (lookup && message.web_search?.stale)) &&
                                       "Older saved evidence · "}
                                     Retrieved{" "}
                                     {sourceDate(
                                       source.retrieved_at ??
-                                        message.web_search!.at,
+                                        (lookup
+                                          ? message.web_search?.at
+                                          : null) ??
+                                        null,
                                     )}
                                   </span>
                                   <span>

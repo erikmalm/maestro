@@ -39,6 +39,7 @@ export type Message = {
   cost?: number;
   input_tokens?: number;
   output_tokens?: number;
+  source_context?: { citations?: CitationSource[] };
   web_search?: {
     query: string;
     at: string | null;

@@ -100,7 +100,7 @@ class SourceFollowupTests(unittest.TestCase):
                     response["message"] = {"role": "assistant", "content": "", "tool_calls": [{"function": {
                         "name": "search_context", "arguments": {"query": "second guide", "freshness": "stable"}}}]}
                 else:
-                    response["message"] = {"role": "assistant", "content": "Alpha is enabled; beta is disabled."}
+                    response["message"] = {"role": "assistant", "content": "Beta is disabled [1]; alpha is enabled [2]."}
                     if on_final:
                         on_final(first, second)
             return response
@@ -135,6 +135,13 @@ class SourceFollowupTests(unittest.TestCase):
         answer = self.workspace()["chats"][0]["messages"][-1]
         self.assertNotIn("web_search", answer)
         self.assertEqual(answer["source_context"]["references"][0]["capture_id"], sources[0]["capture_id"])
+        citations = answer["source_context"]["citations"]
+        self.assertEqual([source["url"] for source in citations], [source["url"] for source in sources])
+        self.assertEqual([source["archive_status"] for source in citations], ["saved", "skipped"])
+        self.assertEqual((citations[0]["content_hash"], citations[0]["manifest_hash"]),
+                         (sources[0]["content_hash"], sources[0]["manifest_hash"]))
+        self.assertTrue(all("content" not in source for source in citations))
+        self.assertEqual([source["citation"] for source in earlier["sources"]], [1, 2])
 
     def test_missing_tampered_deleted_or_out_of_scope_capture_is_unavailable_without_private_body_fallback(self):
         for action in ("missing", "tamper", "manifest", "delete", "scope", "disable"):
@@ -389,6 +396,9 @@ class SourceFollowupTests(unittest.TestCase):
         self.assertEqual((result["input_tokens"], result["output_tokens"]), (74, 22))
         self.assertEqual(len([call for call in self.calls if call[1] == "/api/chat"]), 2)
         self.assertTrue(any(message["content"] == ordinary_text for message in self.calls[-1][2]["messages"]))
+        record = next(message for message in self.calls[-1][2]["messages"]
+                      if message["content"].startswith(SOURCE_RECORD_PREFIX) and message["content"] != ordinary_text)
+        self.assertEqual(json.loads(record["content"][len(SOURCE_RECORD_PREFIX):])["previous_searches"][0]["sources"][0]["citation"], 2)
         self.assertEqual(self.provider.read_state()["ledger"][-1]["status"], "settled")
 
     def test_saved_exact_and_keyword_credentials_are_rejected_before_final_synthesis(self):
@@ -682,6 +692,8 @@ class SourceFollowupTests(unittest.TestCase):
             self.send("Rewrite that answer in Swedish")
             references = self.workspace()["chats"][0]["messages"][-1]["source_context"]["references"]
             self.assertEqual(len(references), 1)
+            self.assertEqual([source["capture_id"] for source in self.workspace()["chats"][0]["messages"][-1]["source_context"]["citations"]],
+                             [sources[0]["capture_id"]])
             self.assertEqual(references[0]["capture_id"], sources[0]["capture_id"])
             self.assertEqual(self.packet()["previous_searches"][0]["sources"][1]["evidence_status"], "omitted_budget")
             for text in ("Make it shorter", "Translate it in English"):
@@ -700,6 +712,16 @@ class SourceFollowupTests(unittest.TestCase):
         latest = self.workspace()["chats"][0]["messages"][-1]
         self.assertEqual(latest["web_search"]["sources"][0]["capture_id"], second["capture_id"])
         self.assertEqual(latest["source_context"]["references"][0]["capture_id"], first["capture_id"])
+        self.assertEqual(latest["source_context"]["references"][0]["source"], 1)
+        record = self.packet()["previous_searches"][0]["sources"][0]
+        fitted = json.loads(self.calls[-1][2]["messages"][-1]["content"])
+        self.assertEqual((record["source"], record["citation"], fitted[0]["source"]), (1, 2, 1))
+        displayed = [*latest["web_search"]["sources"], *latest["source_context"]["citations"]]
+        self.assertEqual([source["url"] for source in displayed], [second["url"], first["url"]])
+        self.assertEqual(latest["source_context"]["citations"][0]["manifest_hash"], first["manifest_hash"])
+        self.assertTrue(all("content" not in source for source in displayed))
+        self.assertIn("cite its excerpts by citation",
+                      self.calls[-1][2]["messages"][0]["content"].lower())
         for source in (first, second):
             self.assertIn(source["content"], json.dumps(self.calls[-1][2]))
         origins = {"original-answer", latest["id"]}
@@ -715,6 +737,14 @@ class SourceFollowupTests(unittest.TestCase):
                 self.assertEqual({entry["content"] for report in reports for entry in report["sources"]},
                                  {first["content"], second["content"]})
                 answer = self.workspace()["chats"][0]["messages"][-1]
+                self.assertNotIn("web_search", answer)
+                entries = [entry for report in reports for entry in report["sources"] if "content" in entry]
+                self.assertEqual([(entry["citation"], entry["url"]) for entry in entries],
+                                 list(enumerate([source["url"] for source in answer["source_context"]["citations"]], 1)))
+                self.assertEqual([entry["source"] for entry in entries], [1, 1])
+                source_message = next(message for message in self.calls[-1][2]["messages"]
+                                      if message["content"].startswith(SOURCE_RECORD_PREFIX))
+                self.assertLessEqual(len(json.dumps(source_message).encode("utf-8")) + 2, SOURCE_RECORD_BYTES)
                 references = answer["source_context"]["references"]
                 self.assertEqual({reference["message_id"] for reference in references}, origins)
                 self.assertEqual({reference["capture_id"]: (reference["content_hash"], reference["manifest_hash"], reference["sha256"])

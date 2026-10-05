@@ -2150,48 +2150,106 @@ test("a saved source viewer stays loaded through non-eligibility saves and later
   );
 });
 
-test("older saved citations keep their original retrieval date and request both cited hashes", async ({
-  page,
-}) => {
-  const state = workspace([
-    {
-      ...sourcedAnswer({
-        query: "older public reference",
-        at: "2026-11-04T12:00:00Z",
-        from_cache: true,
-        stale: true,
-        sources: [{ ...source, retrieved_at: "2026-10-02", stale: true }],
-      }),
-      id: "older-answer",
-      text: "Answer from older saved evidence",
-    },
-  ]);
-  const api = await fixture(page, state);
-  await expect(
-    page.getByText("Older saved evidence", { exact: true }),
-  ).toBeVisible();
-  await expect(
-    page.getByText(
-      "Search excerpt · Older saved evidence · Retrieved 2026-10-02",
-      { exact: true },
-    ),
-  ).toBeVisible();
-  await page.getByRole("button", { name: "View saved source 1" }).click();
-  await expect(
-    page.getByRole("dialog").getByLabel("Saved source text"),
-  ).toHaveText(source.content);
-  const request = api.requests.find(
-    (entry) =>
-      entry.path === "/api/context/sources/capture-one" &&
-      entry.method === "GET",
-  )!;
-  expect(new URL(request.url).searchParams.get("expected_hash")).toBe(
-    source.content_hash,
-  );
-  expect(new URL(request.url).searchParams.get("expected_manifest_hash")).toBe(
-    source.manifest_hash,
-  );
-});
+for (const mode of ["lookup", "combined", "replayed"] as const) {
+  test(`older saved citations keep their original retrieval date and request both cited hashes (${mode})`, async ({
+    page,
+  }) => {
+    const state = workspace([
+      {
+        ...sourcedAnswer({
+          query: "older public reference",
+          at: "2026-11-04T12:00:00Z",
+          from_cache: true,
+          stale: true,
+          sources: [{ ...source, retrieved_at: "2026-10-02", stale: true }],
+        }),
+        id: "older-answer",
+        text: "Answer from older saved evidence",
+      },
+    ]);
+    if (mode !== "lookup") {
+      const answer = state.messages[0];
+      answer.source_context = {
+        citations: [
+          {
+            title: source.title,
+            url: source.url,
+            capture_id: source.capture_id,
+            retrieved_at: "2026-10-02",
+            content_kind: source.content_kind,
+            content_hash: source.content_hash,
+            manifest_hash: source.manifest_hash,
+            archive_status: "saved",
+          },
+        ],
+      };
+      answer.web_search =
+        mode === "combined"
+          ? {
+              query: "current public reference",
+              at: "2026-11-04T12:00:00Z",
+              sources: [
+                {
+                  title: "Current lookup source",
+                  url: "https://docs.example.org/current",
+                  retrieved_at: "2026-11-04",
+                  archive_status: "not_saved",
+                },
+              ],
+            }
+          : undefined;
+    }
+    const api = await fixture(page, state);
+    const report = page.locator(".message-sources");
+    await expect(report.locator("li")).toHaveCount(mode === "combined" ? 2 : 1);
+    if (mode === "lookup") {
+      await expect(
+        page.getByText("Older saved evidence", { exact: true }),
+      ).toBeVisible();
+    } else if (mode === "combined") {
+      await expect(report.locator("li").first()).toContainText(
+        "Current lookup source",
+      );
+      await expect(report).toContainText(
+        "Search query: current public reference",
+      );
+    } else {
+      await expect(report).toContainText("Sources from earlier answers");
+      await expect(report).not.toContainText("Search query:");
+      await expect(report).not.toContainText("Saved sources for:");
+      await expect(report).not.toContainText(
+        "Reused saved evidence; no new web search.",
+      );
+    }
+    await expect(
+      page.getByText(
+        mode === "lookup"
+          ? "Search excerpt · Older saved evidence · Retrieved 2026-10-02"
+          : "Search excerpt · Retrieved 2026-10-02",
+        { exact: true },
+      ),
+    ).toBeVisible();
+    await page
+      .getByRole("button", {
+        name: `View saved source ${mode === "combined" ? 2 : 1}`,
+      })
+      .click();
+    await expect(
+      page.getByRole("dialog").getByLabel("Saved source text"),
+    ).toHaveText(source.content);
+    const request = api.requests.find(
+      (entry) =>
+        entry.path === "/api/context/sources/capture-one" &&
+        entry.method === "GET",
+    )!;
+    expect(new URL(request.url).searchParams.get("expected_hash")).toBe(
+      source.content_hash,
+    );
+    expect(
+      new URL(request.url).searchParams.get("expected_manifest_hash"),
+    ).toBe(source.manifest_hash);
+  });
+}
 
 for (const digest of ["content_hash", "manifest_hash"] as const) {
   test(`a changed saved capture ${digest} shows an unavailable error instead of replacement evidence`, async ({
