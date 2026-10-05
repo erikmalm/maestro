@@ -18,8 +18,7 @@ from backend.storage import archive_inventory, publish_archive
 
 class ContextStoreTests(unittest.TestCase):
     def setUp(self):
-        self.temporary = tempfile.TemporaryDirectory(prefix="maestro-context-test-")
-        self.root = Path(self.temporary.name)
+        self.root = Path(self.enterContext(tempfile.TemporaryDirectory(prefix="maestro-context-test-")))
         self.archive = self.root / "public-archive"
         self.database = self.root / "private" / "workspace.sqlite3"
         self.store = ContextStore(self.database, self.archive)
@@ -28,9 +27,6 @@ class ContextStoreTests(unittest.TestCase):
         self.query = "Synthetic 2026 documentation"
         self.source = {"title": "Synthetic public documentation", "url": "https://docs.example.org/docs/page",
                        "content": "Public excerpt with distinct historical evidence.", "maestro_truncated": True}
-
-    def tearDown(self):
-        self.temporary.cleanup()
 
     def enable(self):
         self.store.configure(self.config)

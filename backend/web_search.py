@@ -244,16 +244,13 @@ class WebSearch:
                 if (contains_url_secret(item["url"], source_secrets)
                         or contains_source_secret(item["url"], source_secrets) or not safe_url(item["url"])):
                     continue
-                title, sanitized = item["title"], item["content"]
+                clean = {field: item[field] for field in ("title", "content")}
                 for secret in source_secrets:
-                    title = credentials.redact(title, secret)
-                    sanitized = credentials.redact(sanitized, secret)
-                if (contains_source_secret(title, source_secrets)
-                        or contains_source_secret(sanitized, source_secrets)):
+                    clean = {field: credentials.redact(value, secret) for field, value in clean.items()}
+                if any(contains_source_secret(value, source_secrets) for value in clean.values()):
                     continue
-                results.append({"title": title[:200], "url": item["url"],
-                                "content": sanitized[:1200]})
-                completeness.append({"maestro_truncated": len(sanitized) > 1200, "full_page": False})
+                results.append({"title": clean["title"][:200], "url": item["url"], "content": clean["content"][:1200]})
+                completeness.append({"maestro_truncated": len(clean["content"]) > 1200, "full_page": False})
             if not results:
                 raise ValueError("Ollama search returned no usable public sources. No answer was generated from search.")
             with self.transaction() as state:

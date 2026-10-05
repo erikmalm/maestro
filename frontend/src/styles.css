@@ -592,11 +592,6 @@ textarea {
   font-size: 13px;
   line-height: 1.6;
 }
-@media (max-width: 420px) {
-  .archive-search-fields {
-    grid-template-columns: minmax(0, 1fr);
-  }
-}
 .source-snapshot {
   max-height: 45dvh;
   overflow-y: auto;
@@ -1478,6 +1473,7 @@ textarea {
   }
 }
 @media (max-width: 420px) {
+  .archive-search-fields,
   .reflection-fields {
     grid-template-columns: minmax(0, 1fr);
   }

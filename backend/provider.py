@@ -563,15 +563,13 @@ class Provider:
                         continue  # Fresh query planning receives no older untrusted source strings.
                     value = source.get(field)
                     if isinstance(value, str) and len(value) <= bound:
-                        if field == "url" and (contains_url_secret(value, secrets) or contains_source_secret(value, secrets)):
-                            entry["url_redacted"] = True
-                        else:
+                        if field != "url" or not (contains_url_secret(value, secrets) or contains_source_secret(value, secrets)):
                             for secret in secrets:
                                 value = credentials.redact(value, secret)
-                            if contains_source_secret(value, secrets):
-                                entry[field + "_redacted"] = True
-                            else:
+                            if not contains_source_secret(value, secrets):
                                 entry[field] = value
+                                continue
+                        entry[field + "_redacted"] = True
                 current = None
                 if recorded == "saved":
                     try:
@@ -599,19 +597,17 @@ class Provider:
                     continue
                 body = evidence[index] if index < len(evidence) and isinstance(evidence[index], dict) else {}
                 content, digest = body.get("content"), body.get("sha256")
+                reference = target[index + 1] if target is not None else None
                 if (not isinstance(content, str) or not 1 <= len(content.encode("utf-8")) <= SOURCE_RECORD_BYTES
                         or not isinstance(digest, str) or hashlib.sha256(content.encode("utf-8")).hexdigest() != digest
                         or body.get("capture_id") != source.get("capture_id")
-                        or current is not None and not current["content"].startswith(content)):
+                        or current is not None and not current["content"].startswith(content)
+                        or reference is not None and (reference.get("sha256") != digest
+                            or reference.get("recorded_archive_status") != recorded
+                            or any(reference.get(field) != source.get(field)
+                                   for field in ("capture_id", "content_hash", "manifest_hash")))):
                     entry["evidence_status"] = "unavailable"
                     continue
-                if target is not None:
-                    reference = target[index + 1]
-                    if (reference.get("sha256") != digest or reference.get("recorded_archive_status") != recorded
-                            or any(reference.get(field) != source.get(field)
-                                   for field in ("capture_id", "content_hash", "manifest_hash"))):
-                        entry["evidence_status"] = "unavailable"
-                        continue
                 if contains_source_secret(content, secrets):
                     entry["evidence_status"] = "withheld_credentials"
                     continue
@@ -1183,9 +1179,8 @@ class Provider:
         if forecast_check is not None:
             provenance["forecast_date_check"] = forecast_check
         if archive_enabled:
-            provenance["from_cache"] = result.get("from_cache", False)
-            provenance["stale"] = result.get("stale", False)
-            provenance["retrieval"] = result.get("retrieval", "web_search")
+            provenance.update(from_cache=result.get("from_cache", False), stale=result.get("stale", False),
+                              retrieval=result.get("retrieval", "web_search"))
             if lookup_limited:
                 provenance["search_limited"] = True
             if filters:

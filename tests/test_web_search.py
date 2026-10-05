@@ -20,19 +20,18 @@ from backend.web_search import DEFAULT, ENDPOINT, WebSearch, fit_sources, safe_u
 
 class WebSearchTests(unittest.TestCase):
     def setUp(self):
-        self.directory = tempfile.TemporaryDirectory(prefix="maestro-search-test-")
-        self.database_patch = patch.object(backend, "DATABASE", Path(self.directory.name) / "workspace.sqlite3")
-        self.database_patch.start()
+        self.directory = self.enterContext(tempfile.TemporaryDirectory(prefix="maestro-search-test-"))
+        self.enterContext(patch.object(backend, "DATABASE", Path(self.directory) / "workspace.sqlite3"))
         self.keys = {}
         self.key = "synthetic-hosted-search-key"
-        self.patches = [
-            patch.object(credentials, "read", side_effect=lambda endpoint: (self.keys.get(endpoint), "synthetic session")),
-            patch.object(credentials, "save", side_effect=lambda endpoint, key, persist: self.keys.__setitem__(endpoint, key)),
-            patch.object(credentials, "delete", side_effect=lambda endpoint: self.keys.pop(endpoint, None)),
-        ]
-        for item in self.patches:
-            item.start()
+        self.enterContext(patch.object(credentials, "read",
+                                      side_effect=lambda endpoint: (self.keys.get(endpoint), "synthetic session")))
+        self.enterContext(patch.object(credentials, "save",
+                                      side_effect=lambda endpoint, key, persist: self.keys.__setitem__(endpoint, key)))
+        self.enterContext(patch.object(credentials, "delete",
+                                      side_effect=lambda endpoint: self.keys.pop(endpoint, None)))
         self.client = TestClient(backend.app)
+        self.addCleanup(self.client.close)
         self.headers = {"X-Maestro-CSRF": self.client.get("/api/session").json()["csrf"]}
         self.client.get("/api/workspace")
         self.provider_config = {
@@ -46,13 +45,6 @@ class WebSearchTests(unittest.TestCase):
         self.query = "Ollama official current capabilities"
         self.snippet = "Synthetic public documentation excerpt."
         self.tool_calls = [{"function": {"name": "web_search", "arguments": {"query": self.query}}}]
-
-    def tearDown(self):
-        self.client.close()
-        for item in reversed(self.patches):
-            item.stop()
-        self.database_patch.stop()
-        self.directory.cleanup()
 
     def set_provider(self, config):
         response = self.client.put("/api/provider", headers=self.headers,
@@ -129,6 +121,10 @@ class WebSearchTests(unittest.TestCase):
         with patch("backend.provider.httpx.Client", side_effect=lambda **kwargs: real_client(transport=transport, **kwargs)), \
                 patch("backend.web_search.httpx.AsyncClient", side_effect=lambda **kwargs: real_async_client(transport=transport, **kwargs)):
             yield
+
+    def send(self, text, handler=None):
+        with self.mock_http(handler):
+            return self.client.post("/api/chat", headers=self.headers, json={"text": text})
 
     def search_requests(self):
         return [request for request in self.requests if request.url.host == "ollama.com"]
@@ -243,7 +239,7 @@ class WebSearchTests(unittest.TestCase):
         self.assertEqual(json.dumps(state, sort_keys=True), original)
 
     def test_status_is_read_only_on_existing_and_absent_databases_and_makes_no_requests(self):
-        fresh = Path(self.directory.name) / "not-created" / "workspace.sqlite3"
+        fresh = Path(self.directory) / "not-created" / "workspace.sqlite3"
         absent = WebSearch(fresh, backend.TIMEZONE)
         before = backend.DATABASE.read_bytes()
         with patch.object(httpx, "AsyncClient", side_effect=AssertionError("Status must not send requests")), patch.object(WebSearch, "transaction", side_effect=AssertionError("Status must not initialize or update SQLite")):
@@ -279,8 +275,7 @@ class WebSearchTests(unittest.TestCase):
     def test_automatic_search_two_model_calls_sources_and_usage_persist(self):
         self.enable()
         private_context = "Synthetic private chat detail excluded from the public search query"
-        with self.mock_http():
-            response = self.client.post("/api/chat", headers=self.headers, json={"text": private_context})
+        response = self.send(private_context)
         self.assertEqual(response.status_code, 200, response.text)
         self.assertEqual(len(self.model_requests()), 2)
         self.assertEqual(len(self.search_requests()), 1)
@@ -315,8 +310,7 @@ class WebSearchTests(unittest.TestCase):
     def test_ordinary_reply_does_not_search(self):
         self.enable()
         self.mode = "reply"
-        with self.mock_http():
-            response = self.client.post("/api/chat", headers=self.headers, json={"text": "Hello locally"})
+        response = self.send("Hello locally")
         self.assertEqual(response.status_code, 200, response.text)
         self.assertEqual(len(self.model_requests()), 1)
         self.assertEqual(self.search_requests(), [])
@@ -336,8 +330,7 @@ class WebSearchTests(unittest.TestCase):
                     state["config"]["daily_limit"] = 1 if reason == "daily cap" else 20
                     state["paused_until"] = (self.service.now() + timedelta(seconds=60)).isoformat() if reason == "cooldown" else None
                 self.requests.clear()
-                with self.mock_http(self.ordinary_http):
-                    response = self.client.post("/api/chat", headers=self.headers, json={"text": reason})
+                response = self.send(reason, self.ordinary_http)
                 self.assertEqual(response.status_code, 200, response.text)
                 self.assertEqual(self.search_requests(), [])
                 self.assertEqual(self.service.status()["searches_today"], 1)
@@ -351,8 +344,7 @@ class WebSearchTests(unittest.TestCase):
         self.assertIsNone(self.service.status()["tested_at"])
         with self.assertRaisesRegex(ValueError, "Test the Ollama search key"):
             self.service.search(self.query)
-        with self.mock_http(self.ordinary_http):
-            response = self.client.post("/api/chat", headers=self.headers, json={"text": "Reply after a failed retest"})
+        response = self.send("Reply after a failed retest", self.ordinary_http)
         self.assertEqual(response.status_code, 200, response.text)
         self.assertEqual(self.search_requests(), [])
 
@@ -368,8 +360,7 @@ class WebSearchTests(unittest.TestCase):
             with self.subTest(calls=calls):
                 self.tool_calls = calls
                 self.requests.clear()
-                with self.mock_http():
-                    response = self.client.post("/api/chat", headers=self.headers, json={"text": "Synthetic invalid tool request"})
+                response = self.send("Synthetic invalid tool request")
                 self.assertEqual(response.status_code, 409, response.text)
                 self.assertEqual(len(self.model_requests()), 1)
                 self.assertEqual(self.search_requests(), [])
@@ -380,8 +371,7 @@ class WebSearchTests(unittest.TestCase):
         self.enable()
         limits = self.client.get("/api/workspace").json()["limits"]
         self.client.put("/api/limits", headers=self.headers, json={**limits, "max_tokens": 0})
-        with self.mock_http():
-            blocked = self.client.post("/api/chat", headers=self.headers, json={"text": "No token allowance"})
+        blocked = self.send("No token allowance")
         self.assertEqual(blocked.status_code, 409)
         self.assertEqual(self.requests, [])
         self.client.put("/api/limits", headers=self.headers, json=limits)
@@ -391,8 +381,7 @@ class WebSearchTests(unittest.TestCase):
             self.assertEqual(request.url.path, "/api/show")
             return httpx.Response(200, json={"details": {"format": "gguf"}, "capabilities": ["completion"]})
 
-        with self.mock_http(unsupported):
-            blocked = self.client.post("/api/chat", headers=self.headers, json={"text": "Tool support missing"})
+        blocked = self.send("Tool support missing", unsupported)
         self.assertEqual(blocked.status_code, 409, blocked.text)
         self.assertEqual(self.model_requests(), [])
         self.requests.clear()
@@ -404,8 +393,7 @@ class WebSearchTests(unittest.TestCase):
                     state["limits"]["max_tokens"] = 110
             return response
 
-        with self.mock_http(reduced_allowance):
-            blocked = self.client.post("/api/chat", headers=self.headers, json={"text": "Allowance changes before next call"})
+        blocked = self.send("Allowance changes before next call", reduced_allowance)
         self.assertEqual(blocked.status_code, 409, blocked.text)
         self.assertEqual(len(self.model_requests()), 1)
         usage = self.client.get("/api/workspace").json()["usage"]
@@ -561,9 +549,7 @@ class WebSearchTests(unittest.TestCase):
                 self.key = key
                 self.age_attempts()
                 self.enable()
-                with self.mock_http(handler):
-                    result = self.client.post("/api/chat", headers=self.headers,
-                                              json={"text": "Use search for this synthetic sanitation check"})
+                result = self.send("Use search for this synthetic sanitation check", handler)
                 self.assertEqual(result.status_code, 200, result.text)
                 final = json.loads(self.model_requests()[-1].content)
                 self.assertNotIn(key, json.dumps(final))
@@ -643,9 +629,7 @@ class WebSearchTests(unittest.TestCase):
                 patch.dict("os.environ", {"MAESTRO_CONTEXT_ARCHIVE_DIR": archive}):
             store = ContextStore(backend.DATABASE, archive)
             store.configure({**ARCHIVE_DEFAULT, "enabled": True})
-            with self.mock_http(handler):
-                response = self.client.post("/api/chat", headers=self.headers,
-                                            json={"text": "Search for this synthetic credential check"})
+            response = self.send("Search for this synthetic credential check", handler)
             self.assertEqual(response.status_code, 200, response.text)
             search = response.json()["messages"][-1]["web_search"]
             self.assertEqual(len(search["sources"]), 1)
@@ -793,8 +777,7 @@ class WebSearchTests(unittest.TestCase):
                 return httpx.Response(401, json={"error": "synthetic-error " + self.key})
             return self.provider_http(request)
 
-        with self.mock_http(handler):
-            result = self.client.post("/api/chat", headers=self.headers, json={"text": "Search fails safely"})
+        result = self.send("Search fails safely", handler)
         self.assertEqual(result.status_code, 409, result.text)
         self.assertNotIn(self.key, result.text)
         self.assertEqual(len(self.model_requests()), 1)
@@ -811,8 +794,7 @@ class WebSearchTests(unittest.TestCase):
         self.assertIsNone(self.service.status()["tested_at"])
         self.requests.clear()
 
-        with self.mock_http(self.ordinary_http):
-            ordinary = self.client.post("/api/chat", headers=self.headers, json={"text": "A normal follow-up"})
+        ordinary = self.send("A normal follow-up", self.ordinary_http)
         self.assertEqual(ordinary.status_code, 200, ordinary.text)
         self.assertEqual(self.search_requests(), [])
 
