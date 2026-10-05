@@ -108,6 +108,32 @@ class ContextRebuildTests(unittest.TestCase):
         self.assertEqual(result["rebuild_progress"]["id"], progress["id"])
         self.assertEqual(result["indexed_count"], 2)
 
+    def test_corrupt_persisted_progress_rejects_resume_and_preserves_index_until_fresh_rebuild(self):
+        self.add_manifests(1)
+        invalid = (("processed", 3), ("processed", -1), ("processed", 1.5), ("total", True),
+                   ("total", -1), ("missing", -1), ("missing", 2), ("corrupt", "0"),
+                   ("id", None), ("id", "A" * 32), ("inventory_hash", None), ("inventory_hash", "g" * 64))
+        for field, value in invalid:
+            with self.subTest(field=field, value=value):
+                progress = self.store.rebuild(limit=1)["rebuild_progress"]
+                previous = self.store.index.read_bytes()
+                with closing(sqlite3.connect(self.store._rebuild_path)) as db, db:
+                    job = json.loads(db.execute("SELECT value FROM rebuild_job WHERE id=1").fetchone()[0])
+                    db.execute("UPDATE rebuild_job SET value=? WHERE id=1", (json.dumps({**job, field: value}),))
+                restarted = ContextStore(self.database, self.archive)
+                with self.assertRaisesRegex(ValueError, "archive changed"):
+                    restarted.rebuild(limit=1, continuation=progress["id"])
+                self.assertFalse(restarted._rebuild_path.exists())
+                self.assertIsNone(restarted.status()["rebuild_progress"])
+                self.assertEqual(restarted.index.read_bytes(), previous)
+                self.assertEqual(restarted.get_capture(self.original["capture_id"], self.original["content_hash"],
+                                                       self.original["manifest_hash"]), self.original)
+                fresh = restarted.rebuild(limit=1)["rebuild_progress"]
+                self.assertNotEqual(fresh["id"], progress["id"])
+                self.assertEqual((fresh["processed"], fresh["total"], fresh["complete"]), (1, 2, False))
+                self.assertEqual(restarted.index.read_bytes(), previous)
+                self.assertEqual(restarted.rebuild(limit=1, continuation=fresh["id"])["indexed_count"], 2)
+
     def test_work_deadline_still_advances_one_capture_and_wrong_token_leaves_progress(self):
         self.add_manifests(2)
         with patch("backend.context_store.REBUILD_SECONDS", 0):

@@ -16,7 +16,7 @@ from urllib.parse import urlsplit
 import uuid
 
 from backend.context_policy import (
-    DEFAULT, ID, MANIFEST_BYTES, MAX_ARCHIVE_ITEMS, SCHEMA, SOURCE_BYTES, capture_source,
+    DEFAULT, HASH, ID, MANIFEST_BYTES, MAX_ARCHIVE_ITEMS, SCHEMA, SOURCE_BYTES, capture_source,
     configuration, contains_source_secret, contains_url_secret, decoded_url_variants, eligible,
     manifest_hash, public_url, timestamp, validate_capture_manifest,
 )
@@ -606,9 +606,13 @@ class ContextStore:
                     with closing(sqlite3.connect(stage.as_uri() + "?mode=ro", uri=True)) as db:
                         row = db.execute("SELECT value FROM rebuild_job WHERE id=1").fetchone()
                         job = json.loads(row[0]) if row else None
-                    if job is None or job["config"] != config:
-                        self._invalidate_rebuild()
-                        job = None
+                    if (not isinstance(job, dict) or set(job) != {"id", "config", "processed", "total", "missing", "corrupt", "inventory_hash"}
+                            or job["config"] != config or not isinstance(job["id"], str) or not ID.fullmatch(job["id"])
+                            or not isinstance(job["inventory_hash"], str) or not HASH.fullmatch(job["inventory_hash"])
+                            or any(type(job[field]) is not int or job[field] < 0 for field in ("processed", "total", "missing", "corrupt"))
+                            or not job["processed"] <= job["total"] <= MAX_ARCHIVE_ITEMS * 2
+                            or job["missing"] + job["corrupt"] > job["processed"]):
+                        raise ValueError("Invalid source index rebuild state.")
                 except (sqlite3.Error, ValueError, KeyError, TypeError):
                     self._invalidate_rebuild()
                     job = None
