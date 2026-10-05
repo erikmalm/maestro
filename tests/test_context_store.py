@@ -549,19 +549,27 @@ class ContextStoreTests(unittest.TestCase):
         with self.assertRaises(KeyError):
             self.store.get_capture(healthy["capture_id"])
 
-    def test_deeply_nested_format_is_a_managed_error_and_preserves_existing_captures(self):
+    def test_invalid_format_is_a_managed_error_and_preserves_existing_captures(self):
         self.enable()
         saved = self.capture()["sources"][0]
         path = self.archive / "format.json"
         original = path.read_bytes()
         nested = ("[" * 2000 + "0" + "]" * 2000).encode()
         self.assertLess(len(nested), 4096)
-        path.write_bytes(nested)
+        files = {entry.relative_to(self.archive): entry.read_bytes()
+                 for entry in self.archive.rglob("*") if entry.is_file() and entry != path}
         changed = {**self.config, "reuse_hours": 48}
-        with self.assertRaises(ValueError):
-            self.store.configure(changed)
-        self.assertEqual(self.store.status()["config"], self.config)
-        self.assertEqual(self.store.get_capture(saved["capture_id"]), saved)
+        for invalid in (nested, json.dumps({"format": "maestro-public-context", "schema_version": True}).encode(),
+                        json.dumps({"format": "maestro-public-context", "schema_version": 1.0}).encode()):
+            with self.subTest(invalid=invalid[:80]):
+                path.write_bytes(invalid)
+                with self.assertRaises(ValueError):
+                    self.store.configure(changed)
+                self.assertEqual(self.store.status()["config"], self.config)
+                self.assertEqual(self.store.get_capture(saved["capture_id"]), saved)
+                self.assertEqual(path.read_bytes(), invalid)
+                self.assertEqual({entry.relative_to(self.archive): entry.read_bytes()
+                                  for entry in self.archive.rglob("*") if entry.is_file() and entry != path}, files)
         path.write_bytes(original)
         self.store.configure(changed)
         self.assertEqual(self.store.get_capture(saved["capture_id"]), saved)
@@ -900,6 +908,21 @@ class ContextStoreTests(unittest.TestCase):
         with other.archive_owner():
             self.assertTrue(claim.exists())
         self.assertFalse(claim.exists())
+
+    def test_index_cannot_redirect_a_capture_id_to_another_verified_manifest(self):
+        self.enable()
+        first = self.capture()["sources"][0]
+        second = self.capture(query="Second source", sources=[{
+            **self.source, "url": self.source["url"] + "/second", "content": "Different public evidence."}])["sources"][0]
+        with closing(sqlite3.connect(self.store.index)) as db, db:
+            row = db.execute("SELECT manifest,manifest_hash FROM captures WHERE id=?", (second["capture_id"],)).fetchone()
+            db.execute("UPDATE captures SET manifest=?,manifest_hash=? WHERE id=?", (*row, first["capture_id"]))
+        for action in (self.store.get_capture, self.store.delete_capture):
+            with self.subTest(action=action.__name__), self.assertRaises(KeyError):
+                action(first["capture_id"])
+        self.assertFalse((self.archive / "records" / "deletions" / (first["capture_id"] + ".json")).exists())
+        self.assertIsNone(self.store.lookup(self.query, 3))
+        self.assertEqual(self.store.get_capture(second["capture_id"]), second)
 
     def test_replaced_manifest_cannot_change_a_hash_bound_view_or_query_reuse(self):
         self.enable()

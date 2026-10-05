@@ -253,7 +253,8 @@ class ContextStore:
         expected = {"format": "maestro-public-context", "schema_version": SCHEMA}
         path = archive_path(self.archive, "format.json")
         if path.exists():
-            if read_archive_json(self.archive, "format.json", 4096) != expected:
+            data = read_archive_json(self.archive, "format.json", 4096)
+            if data != expected or type(data.get("schema_version")) is not int:
                 raise ValueError("The archive uses an unsupported format.")
         else:
             publish_archive(self.archive, "format.json", json.dumps(expected).encode())
@@ -637,7 +638,7 @@ class ContextStore:
                     raise KeyError(capture_id)
                 manifest, content = self._manifest(row[0], config)
                 digest = manifest_hash(manifest)
-                if row[1] != digest or expected_manifest_hash is not None and expected_manifest_hash != digest:
+                if manifest["capture_id"] != capture_id or row[1] != digest or expected_manifest_hash is not None and expected_manifest_hash != digest:
                     raise KeyError(capture_id)
                 if expected_hash is not None and manifest["object"]["sha256"] != expected_hash:
                     raise KeyError(capture_id)
