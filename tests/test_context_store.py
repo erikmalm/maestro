@@ -309,6 +309,57 @@ class ContextStoreTests(unittest.TestCase):
             with self.subTest(path=path), self.assertRaises(ValueError):
                 ContextStore(self.database, path)
 
+    def test_failed_configuration_cannot_overwrite_a_successful_retry(self):
+        source = self.seed_source()
+        with closing(sqlite3.connect(self.database)) as db:
+            queries = db.execute("SELECT * FROM context_queries").fetchall()
+        original_format, original_error = self.store._format, self.store.record_error
+        for failure in (PermissionError("Synthetic archive denial"), sqlite3.OperationalError("Synthetic database failure")):
+            with self.subTest(failure=type(failure).__name__):
+                paused, release = threading.Event(), threading.Event()
+                errors = []
+                def format_archive():
+                    if threading.current_thread() is failing:
+                        raise failure
+                    return original_format()
+                def record_error(*args, **kwargs):
+                    if threading.current_thread() is failing:
+                        paused.set()
+                        if not release.wait(5):
+                            raise TimeoutError("The configuration recovery test was not released.")
+                    return original_error(*args, **kwargs)
+                def configure():
+                    try:
+                        self.store.configure(self.config)
+                    except Exception as error:
+                        errors.append(error)
+                failing = threading.Thread(target=configure, daemon=True)
+                acquired = False
+                with patch.object(self.store, "_format", side_effect=format_archive), \
+                        patch.object(self.store, "record_error", side_effect=record_error):
+                    try:
+                        failing.start()
+                        self.assertTrue(paused.wait(5))
+                        # Retry first only if failed configuration released its mutation lock.
+                        acquired = self.store._write_lock.acquire(blocking=False)
+                        if acquired:
+                            self.assertTrue(self.store.configure(self.config)["available"])
+                    finally:
+                        if acquired:
+                            self.store._write_lock.release()
+                        release.set()
+                        failing.join(5)
+                    self.assertFalse(failing.is_alive())
+                    self.assertEqual(len(errors), 1)
+                    self.assertIsInstance(errors[0], ValueError)
+                    if not acquired:
+                        self.assertTrue(self.store.configure(self.config)["available"])
+                status = self.store.status()
+                self.assertEqual((status["available"], status["last_error"], status["config"]), (True, None, self.config))
+                with closing(sqlite3.connect(self.database)) as db:
+                    self.assertEqual(db.execute("SELECT * FROM context_queries").fetchall(), queries)
+                self.assertEqual(self.store.get_capture(source["capture_id"], source["content_hash"], source["manifest_hash"]), source)
+
     def test_conservative_scopes_use_exact_origin_and_path_components(self):
         self.enable()
         eligible = [self.source, {**self.source, "url": "https://docs.example.org/docs"}]

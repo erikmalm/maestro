@@ -26,14 +26,15 @@ ROOT = Path(__file__).resolve().parent.parent
 def storage_errors(action):
     @wraps(action)
     def guarded(self, *args, **kwargs):
-        try:
-            return action(self, *args, **kwargs)
-        except (OSError, sqlite3.Error):
+        with self._write_lock:
             try:
-                self.record_error()
+                return action(self, *args, **kwargs)
             except (OSError, sqlite3.Error):
-                pass
-            raise ValueError("Context storage could not finish this operation. Check archive and local storage, then retry.") from None
+                try:
+                    self.record_error()
+                except (OSError, sqlite3.Error):
+                    pass
+                raise ValueError("Context storage could not finish this operation. Check archive and local storage, then retry.") from None
     return guarded
 
 
