@@ -414,6 +414,9 @@ class WorkspaceTests(unittest.TestCase):
         self.assertEqual(status["config"]["max_bytes"], 10 * 1024 ** 3)
         self.assertEqual(status["config"]["max_items"], 200000)
         self.assertIsNone(status["last_capture"])
+        with patch.object(backend.Path, "is_dir", side_effect=PermissionError("Synthetic archive attribute denial")):
+            response = self.client.get("/api/workspace")
+            self.assertEqual((response.status_code, response.json()["context_archive"]["available"]), (200, False))
         with self.client:
             self.assertFalse(backend.context_store().archive.exists())
 
@@ -449,6 +452,14 @@ class WorkspaceTests(unittest.TestCase):
         self.assertFalse(claim.exists())
         with self.client:
             self.assertEqual((claim.is_file(), self.client.get("/api/context").json()["available"]), (True, True))
+            path = claim.parent / "format.json"
+            original = path.read_bytes()
+            path.write_bytes(b'{"format":"unsupported"}')
+            self.assertEqual(self.save(result.json()["config"]).status_code, 409)
+            self.assertEqual((claim.is_file(), self.client.get("/api/context").json()["available"]), (True, False))
+            path.write_bytes(original)
+            recovered = self.save(result.json()["config"]).json()
+            self.assertEqual((recovered["available"], recovered["last_error"]), (True, None))
             self.assertEqual(self.save({**config, "enabled": False}).status_code, 200)
             self.assertFalse(claim.exists())
         self.assertFalse(claim.exists())
