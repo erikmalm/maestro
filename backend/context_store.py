@@ -83,14 +83,15 @@ class ContextStore:
 
     def initialize(self):
         """Explicit private initialization; disabled archives are never created."""
-        self.database.parent.mkdir(parents=True, exist_ok=True)
-        with closing(sqlite3.connect(self.database, timeout=10)) as db, db:
-            db.execute("CREATE TABLE IF NOT EXISTS context_state(id INTEGER PRIMARY KEY CHECK(id=1),value TEXT NOT NULL)")
-            db.execute("CREATE TABLE IF NOT EXISTS context_queries(key TEXT PRIMARY KEY,query TEXT NOT NULL,at TEXT NOT NULL,captures TEXT NOT NULL)")
-        if self._state()["config"]["enabled"]:
-            with self._writer():
-                self._format()
-        return self.status()
+        with self._write_lock:
+            config = self._state()["config"]
+            if config["enabled"]:
+                return self.configure(config)
+            self.database.parent.mkdir(parents=True, exist_ok=True)
+            with closing(sqlite3.connect(self.database, timeout=10)) as db, db:
+                db.execute("CREATE TABLE IF NOT EXISTS context_state(id INTEGER PRIMARY KEY CHECK(id=1),value TEXT NOT NULL)")
+                db.execute("CREATE TABLE IF NOT EXISTS context_queries(key TEXT PRIMARY KEY,query TEXT NOT NULL,at TEXT NOT NULL,captures TEXT NOT NULL)")
+            return self.status()
 
     def record_error(self, message=None):
         # Never persist arbitrary exceptions, paths or provider-generated prose.
@@ -215,11 +216,11 @@ class ContextStore:
                     "excerpt_bytes": 0, "manifest_bytes": 0, "object_bytes": 0, "new_bytes": 0}
         config = self._state()["config"]
         for source in sources[:max_results]:
-            if not isinstance(source, dict) or not all(isinstance(source.get(field), str) for field in ("title", "url", "content")):
+            clean = {field: source.get(field) for field in ("title", "url", "content")} if isinstance(source, dict) else {}
+            if not all(isinstance(clean.get(field), str) for field in ("title", "url", "content")):
                 continue
-            if contains_url_secret(source["url"], secrets) or contains_source_secret(source["url"], secrets):
+            if contains_url_secret(clean["url"], secrets) or contains_source_secret(clean["url"], secrets):
                 continue  # Never forward a credential embedded in a source link.
-            clean = {field: source[field] for field in ("title", "url", "content")}
             for field in ("title", "content"):
                 for secret in secrets:
                     clean[field] = clean[field].replace(secret, "\u2588")
@@ -240,8 +241,7 @@ class ContextStore:
                 self._format()
                 total, items, _ = archive_inventory(self.archive, config["max_items"])
                 for clean in result["sources"]:
-                    if (not eligible(clean["url"], config)
-                            or contains_url_secret(clean["url"], secrets)):
+                    if not eligible(clean["url"], config):
                         continue
                     clean["archive_status"] = "not_saved"
                     raw = clean["content"].encode("utf-8")
