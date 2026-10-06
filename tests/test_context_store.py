@@ -48,6 +48,8 @@ class ContextStoreTests(unittest.TestCase):
         return list(self.archive.glob("records/captures/*/*.json"))
 
     def test_constructor_status_and_disabled_capture_do_not_create_storage(self):
+        with patch.object(Path, "is_dir", side_effect=PermissionError("Synthetic archive attribute denial")):
+            self.assertFalse(self.store.status()["available"])
         self.assertFalse(self.store.status()["available"])
         self.assertEqual(self.capture()["sources"][0]["archive_status"], "skipped")
         self.assertFalse(self.database.exists())
@@ -447,6 +449,15 @@ class ContextStoreTests(unittest.TestCase):
 
     def test_hash_tampering_and_missing_objects_never_reuse_saved_evidence(self):
         saved = self.seed_source()
+        stat = Path.stat
+        def denied_stat(path, *args, **kwargs):
+            if path == self.store.index:
+                raise PermissionError("Synthetic index attribute denial")
+            return stat(path, *args, **kwargs)
+        with patch.object(Path, "stat", denied_stat):
+            self.assertEqual((self.store.status()["indexed_count"], self.store.status()["last_error"]), (0, "The local source index needs rebuilding."))
+            self.assert_missing_capture(saved["capture_id"])
+        self.assertEqual(self.store.get_capture(saved["capture_id"]), saved)
         obj = next(self.archive.glob("objects/sha256/*/*.txt"))
         obj.write_text("Different bytes", encoding="utf-8")
         self.assert_missing_capture(saved["capture_id"])
@@ -455,6 +466,9 @@ class ContextStoreTests(unittest.TestCase):
 
     def test_invalid_format_is_a_managed_error_and_preserves_existing_captures(self):
         saved = self.seed_source()
+        with self.assertRaises(ValueError):
+            self.store.configure({**self.config, "public_sources": ["https://127.0.0.1/"]})
+        self.assertTrue(self.store.status()["available"])
         path = self.archive / "format.json"
         original = path.read_bytes()
         nested = ("[" * 2000 + "0" + "]" * 2000).encode()
@@ -468,6 +482,7 @@ class ContextStoreTests(unittest.TestCase):
                 path.write_bytes(invalid)
                 with self.assertRaises(ValueError):
                     self.store.configure(changed)
+                self.assertFalse(self.store.status()["available"])
                 self.assertEqual(self.store.status()["config"], self.config)
                 self.assertEqual(self.store.get_capture(saved["capture_id"]), saved)
                 self.assertEqual(path.read_bytes(), invalid)
@@ -475,6 +490,14 @@ class ContextStoreTests(unittest.TestCase):
                                   for entry in self.archive.rglob("*") if entry.is_file() and entry != path}, files)
         path.write_bytes(original)
         self.store.configure(changed)
+        self.assertTrue(self.store.status()["available"])
+        with patch("backend.context_store.archive_inventory", side_effect=ValueError("Synthetic scan allowance")), self.assertRaises(ValueError):
+            self.store.configure(changed)
+        self.assertFalse(self.store.status()["available"])
+        self.assertEqual(self.store.status()["config"], changed)
+        self.assertEqual(self.store.get_capture(saved["capture_id"]), saved)
+        self.store.configure(changed)
+        self.assertEqual((self.store.status()["available"], self.store.status()["last_error"]), (True, None))
         self.assertEqual(self.store.get_capture(saved["capture_id"]), saved)
 
     def test_byte_item_and_free_space_limits_do_not_damage_existing_capture(self):
