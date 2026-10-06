@@ -448,7 +448,7 @@ class WorkspaceTests(unittest.TestCase):
         self.assertFalse(backend.app.state.archive_owner)
         self.assertFalse(claim.exists())
         with self.client:
-            self.assertTrue(claim.is_file())
+            self.assertEqual((claim.is_file(), self.client.get("/api/context").json()["available"]), (True, True))
             self.assertEqual(self.save({**config, "enabled": False}).status_code, 200)
             self.assertFalse(claim.exists())
         self.assertFalse(claim.exists())
@@ -520,8 +520,7 @@ class WorkspaceTests(unittest.TestCase):
         escaped_entities = entities.replace("&", "%26").replace("#", "%23").replace(";", "%3B")
         for value in (key, encoded, encoded.replace("%", "%25"), encoded.replace("%", "%2525"), escaped_entities):
             with self.subTest(encoded=value != key):
-                blocked = self.client.put("/api/context", headers=self.headers,
-                    json={**config, "public_sources": ["https://docs.ollama.com/public?token=" + value]})
+                blocked = self.save({**config, "public_sources": ["https://docs.ollama.com/public?token=" + value]})
                 self.assertEqual(blocked.status_code, 409, blocked.text)
                 self.assertNotIn(key, blocked.text)
                 self.assertNotIn(encoded, blocked.text)
