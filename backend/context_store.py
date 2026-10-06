@@ -26,14 +26,15 @@ ROOT = Path(__file__).resolve().parent.parent
 def storage_errors(action):
     @wraps(action)
     def guarded(self, *args, **kwargs):
-        try:
-            return action(self, *args, **kwargs)
-        except (OSError, sqlite3.Error):
+        with self._write_lock:
             try:
-                self.record_error()
+                return action(self, *args, **kwargs)
             except (OSError, sqlite3.Error):
-                pass
-            raise ValueError("Context storage could not finish this operation. Check archive and local storage, then retry.") from None
+                try:
+                    self.record_error()
+                except (OSError, sqlite3.Error):
+                    pass
+                raise ValueError("Context storage could not finish this operation. Check archive and local storage, then retry.") from None
     return guarded
 
 
@@ -117,12 +118,12 @@ class ContextStore:
     def status(self):
         state = self._state()
         count = 0
-        if self.index.is_file():
-            try:
+        try:
+            if self.index.is_file():
                 with closing(sqlite3.connect(self.index.as_uri() + "?mode=ro", uri=True)) as db:
                     count = db.execute("SELECT COUNT(*) FROM captures").fetchone()[0]
-            except sqlite3.Error:
-                state = {**state, "last_error": "The local source index needs rebuilding."}
+        except (OSError, sqlite3.Error):
+            state = {**state, "last_error": "The local source index needs rebuilding."}
         available = not state.get("write_unavailable") and archive_available(self.archive, self._token)
         return {"configured": self.archive is not None, "available": available,
                 "path": str(self.archive) if self.archive else None, "config": state["config"], "indexed_count": count,
@@ -153,18 +154,22 @@ class ContextStore:
     def configure(self, config):
         config = configuration(config)
         with (self._writer() if config["enabled"] else self._write_lock):
-            previous = self._state()["config"]
-            if config["enabled"]:
-                self._format()
-                # Saving a lower cap remains possible for an already larger archive.
-                total, items, _ = archive_inventory(self.archive, MAX_ARCHIVE_ITEMS * 2)
-            with self._transaction() as (state, db):
-                if any(config[field] != previous[field] for field in ("enabled", "capture_policy", "public_sources")):
-                    db.execute("DELETE FROM context_queries")
-                state["config"] = config
+            try:
+                previous = self._state()["config"]
                 if config["enabled"]:
-                    state.update(last_error=None, write_unavailable=False,
-                                 archive_bytes=total, archive_items=items)
+                    self._format()
+                    # Saving a lower cap remains possible for an already larger archive.
+                    total, items, _ = archive_inventory(self.archive, MAX_ARCHIVE_ITEMS * 2)
+                with self._transaction() as (state, db):
+                    if any(config[field] != previous[field] for field in ("enabled", "capture_policy", "public_sources")):
+                        db.execute("DELETE FROM context_queries")
+                    state["config"] = config
+                    if config["enabled"]:
+                        state.update(last_error=None, write_unavailable=False,
+                                     archive_bytes=total, archive_items=items)
+            except ValueError:
+                self.record_error()
+                raise
         return self.status()
 
     def _index_connection(self, path=None):
@@ -303,9 +308,9 @@ class ContextStore:
             if not isinstance(capture_id, str) or not ID.fullmatch(capture_id):
                 raise KeyError(capture_id)
             config = self._state()["config"]
-            if not config["enabled"] or not self.index.is_file():
-                raise KeyError(capture_id)
             try:
+                if not config["enabled"] or not self.index.is_file():
+                    raise KeyError(capture_id)
                 with closing(sqlite3.connect(self.index.as_uri() + "?mode=ro", uri=True)) as db:
                     row = db.execute("SELECT manifest,manifest_hash FROM captures WHERE id=?", (capture_id,)).fetchone()
                 if not row:
