@@ -370,6 +370,57 @@ class ContextStoreTests(unittest.TestCase):
         for source in saved:
             self.assertEqual(self.store.get_capture(source["capture_id"], source["content_hash"], source["manifest_hash"]), source)
 
+    def test_initialization_recovery_does_not_restore_concurrently_revoked_permissions(self):
+        source = self.seed_source()
+        paused, release, ordered = threading.Event(), threading.Event(), threading.Event()
+        errors = []
+        original = self.store.configure
+        revoked = {**self.config, "enabled": False, "public_sources": ["https://docs.example.org/new/"]}
+        def configure(config):
+            if threading.current_thread() is initializing:
+                paused.set()
+                if not release.wait(5):
+                    raise TimeoutError("The initialization test was not released.")
+            return original(config)
+        def work(initial):
+            acquired = False
+            try:
+                if initial:
+                    self.store.initialize()
+                else:
+                    # Finish revocation first if initialization left its snapshot unguarded.
+                    acquired = self.store._write_lock.acquire(blocking=False)
+                    if not acquired:
+                        ordered.set()
+                    original(revoked)
+            except Exception as error:
+                errors.append(error)
+            finally:
+                if acquired:
+                    self.store._write_lock.release()
+                if not initial:
+                    ordered.set()
+        initializing = threading.Thread(target=work, args=(True,), daemon=True)
+        revoking = threading.Thread(target=work, args=(False,), daemon=True)
+        with patch.object(self.store, "configure", side_effect=configure):
+            try:
+                initializing.start()
+                self.assertTrue(paused.wait(5))
+                revoking.start()
+                self.assertTrue(ordered.wait(5))
+            finally:
+                release.set()
+                initializing.join(5)
+                if revoking.ident is not None:
+                    revoking.join(5)
+        self.assertFalse(initializing.is_alive() or revoking.is_alive())
+        self.assertEqual(errors, [])
+        self.assertEqual(self.store.status()["config"], revoked)
+        with closing(sqlite3.connect(self.database)) as db:
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM context_queries").fetchone()[0], 0)
+        with self.assertRaises(KeyError):
+            self.store.get_capture(source["capture_id"], source["content_hash"], source["manifest_hash"])
+
     def test_archive_must_be_outside_checkout_database_and_private_index(self):
         for path in (ROOT / "tests" / "synthetic-context", self.database.parent, self.store.index.parent):
             with self.subTest(path=path), self.assertRaises(ValueError):
@@ -478,6 +529,7 @@ class ContextStoreTests(unittest.TestCase):
         for changed in (url.replace("2026-10-05", "2026-10-06"), url.split("?")[0], url.replace("forecast?", "forecast/child?")):
             self.assertEqual(self.capture(query="An unapproved variant", sources=[{**source, "url": changed}])["sources"][0]["archive_status"], "skipped")
         restarted = ContextStore(self.database, self.archive)
+        restarted.initialize()
         reused = restarted.lookup(self.query, 3)
         self.assertEqual(reused["sources"], [{**saved, "stale": False}])
         self.assertEqual(reused["at"], saved["retrieved_at"])
@@ -901,8 +953,9 @@ class ContextStoreTests(unittest.TestCase):
         self.assertEqual(partial["rebuild_progress"]["processed"], 1)
         self.assertEqual(self.store.get_capture(first["capture_id"]), first)
         self.store.index.write_bytes(b"Synthetic corrupt database")
+        self.store.initialize()
         self.assertIn("rebuilding", self.store.status()["last_error"])
-        self.assertEqual(self.store.rebuild()["indexed_count"], 2)
+        self.assertEqual(self.store.rebuild(continuation=partial["rebuild_progress"]["id"])["indexed_count"], 2)
         with closing(sqlite3.connect(self.store.index)) as db:
             self.assertEqual(db.execute("SELECT COUNT(*) FROM captures_fts WHERE captures_fts MATCH 'historical'").fetchone()[0], 2)
 
@@ -938,6 +991,8 @@ class ContextStoreTests(unittest.TestCase):
         self.assertFalse(self.store.status()["available"])
         self.assertNotIn("private exception", self.store.status()["last_error"])
         self.assertEqual(claim.read_text(), "synthetic-stale-owner-token")
+        claim.unlink()
+        self.assertTrue(self.store.initialize()["available"])
 
     def test_missing_or_tampered_live_claim_reports_unavailable_and_refuses_configure_and_capture(self):
         self.enable()
