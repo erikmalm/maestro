@@ -153,8 +153,8 @@ class ContextStore:
     @storage_errors
     def configure(self, config):
         config = configuration(config)
-        with (self._writer() if config["enabled"] else self._write_lock):
-            try:
+        try:
+            with (self._writer() if config["enabled"] else self._write_lock):
                 previous = self._state()["config"]
                 if config["enabled"]:
                     self._format()
@@ -167,9 +167,9 @@ class ContextStore:
                     if config["enabled"]:
                         state.update(last_error=None, write_unavailable=False,
                                      archive_bytes=total, archive_items=items)
-            except ValueError:
-                self.record_error()
-                raise
+        except ValueError:
+            self.record_error()
+            raise
         return self.status()
 
     def _index_connection(self, path=None):
@@ -238,59 +238,60 @@ class ContextStore:
             result["sources"].append(clean)
         if not config["enabled"]:
             return result
-        try:
-            with self._writer():
-                config = self._state()["config"]
-                if not config["enabled"]:
-                    return result
-                self._format()
-                total, items, _ = archive_inventory(self.archive, config["max_items"])
-                for clean in result["sources"]:
-                    if not eligible(clean["url"], config):
-                        continue
-                    clean["archive_status"] = "not_saved"
-                    raw = clean["content"].encode("utf-8")
-                    if not 1 <= len(raw) <= SOURCE_BYTES:
-                        raise ValueError("A source excerpt exceeds its archive allowance.")
-                    content_hash = hashlib.sha256(raw).hexdigest()
-                    capture_id = uuid.uuid4().hex
-                    relative = "records/captures/" + at[:7] + "/" + capture_id + ".json"
-                    obj = {"path": "objects/sha256/" + content_hash[:2] + "/" + content_hash + ".txt", "sha256": content_hash, "bytes": len(raw), "encoding": "utf-8"}
-                    manifest = {"schema_version": SCHEMA, "capture_id": capture_id,
-                                "source_id": hashlib.sha256(public_url(clean["url"], allow_query=True, allow_http=True).encode()).hexdigest(),
-                                "source_url": clean["url"], "title": clean["title"][:200], "object": obj,
-                                "retrieved_at": at, "content_kind": "search_excerpt", "completeness": clean["completeness"], "published_at": None, "modified_at": None}
-                    encoded = json.dumps(manifest, ensure_ascii=False).encode("utf-8")
-                    extra = len(encoded) + (0 if archive_path(self.archive, obj["path"]).exists() else len(raw))
-                    new_paths = {archive_path(self.archive, name) for name in (obj["path"], relative)}
-                    new_paths |= {parent for path in tuple(new_paths) for parent in path.parents if parent != self.archive and self.archive in parent.parents}
-                    additions = sum(not path.exists() for path in new_paths)
-                    if total + extra > config["max_bytes"] or items + additions > config["max_items"] or shutil.disk_usage(self.archive).free < extra + 65536:
-                        result["archive_warning"] = "The archive has reached its byte, item or free-space allowance. Some source evidence was not saved."
-                        continue
-                    for field, path, data in (("object_bytes", obj["path"], raw), ("manifest_bytes", relative, encoded)):
-                        if publish_archive(self.archive, path, data):
-                            measured[field] += len(data)
-                            measured["new_bytes"] += len(data)
-                    self._index_capture(manifest, relative, clean["content"])
-                    clean.update(capture_source(manifest, clean["content"]))
-                    saved.append({field: clean[field] for field in ("capture_id", "content_hash", "manifest_hash")})
-                    measured["sources_saved"] += 1
-                    measured["excerpt_bytes"] += len(raw)
-                    total += extra
-                    items += additions
-                with self._transaction() as (state, db):
-                    if saved:
-                        db.execute("INSERT INTO context_queries VALUES(?,?,?,?) ON CONFLICT(key) DO UPDATE SET query=excluded.query,at=excluded.at,captures=excluded.captures", (key, query, at, json.dumps(saved)))
-                    total, items, _ = archive_inventory(self.archive, config["max_items"])
-                    state.update(archive_bytes=total, archive_items=items, last_error=result.get("archive_warning"),
-                                 write_unavailable=False, last_capture=measured)
-                    if saved:
-                        state["last_indexed_at"] = self.now().isoformat()
-        except (OSError, sqlite3.Error, ValueError, UnicodeError):
-            result["archive_warning"] = "Some source evidence could not be saved. Existing captures remain unchanged."
+        # Keep the writer attempt and its failure receipt ordered before retries.
+        with self._write_lock:
             try:
-                with self._write_lock:
+                with self._writer():
+                    config = self._state()["config"]
+                    if not config["enabled"]:
+                        return result
+                    self._format()
+                    total, items, _ = archive_inventory(self.archive, config["max_items"])
+                    for clean in result["sources"]:
+                        if not eligible(clean["url"], config):
+                            continue
+                        clean["archive_status"] = "not_saved"
+                        raw = clean["content"].encode("utf-8")
+                        if not 1 <= len(raw) <= SOURCE_BYTES:
+                            raise ValueError("A source excerpt exceeds its archive allowance.")
+                        content_hash = hashlib.sha256(raw).hexdigest()
+                        capture_id = uuid.uuid4().hex
+                        relative = "records/captures/" + at[:7] + "/" + capture_id + ".json"
+                        obj = {"path": "objects/sha256/" + content_hash[:2] + "/" + content_hash + ".txt", "sha256": content_hash, "bytes": len(raw), "encoding": "utf-8"}
+                        manifest = {"schema_version": SCHEMA, "capture_id": capture_id,
+                                    "source_id": hashlib.sha256(public_url(clean["url"], allow_query=True, allow_http=True).encode()).hexdigest(),
+                                    "source_url": clean["url"], "title": clean["title"][:200], "object": obj,
+                                    "retrieved_at": at, "content_kind": "search_excerpt", "completeness": clean["completeness"], "published_at": None, "modified_at": None}
+                        encoded = json.dumps(manifest, ensure_ascii=False).encode("utf-8")
+                        extra = len(encoded) + (0 if archive_path(self.archive, obj["path"]).exists() else len(raw))
+                        new_paths = {archive_path(self.archive, name) for name in (obj["path"], relative)}
+                        new_paths |= {parent for path in tuple(new_paths) for parent in path.parents if parent != self.archive and self.archive in parent.parents}
+                        additions = sum(not path.exists() for path in new_paths)
+                        if total + extra > config["max_bytes"] or items + additions > config["max_items"] or shutil.disk_usage(self.archive).free < extra + 65536:
+                            result["archive_warning"] = "The archive has reached its byte, item or free-space allowance. Some source evidence was not saved."
+                            continue
+                        for field, path, data in (("object_bytes", obj["path"], raw), ("manifest_bytes", relative, encoded)):
+                            if publish_archive(self.archive, path, data):
+                                measured[field] += len(data)
+                                measured["new_bytes"] += len(data)
+                        self._index_capture(manifest, relative, clean["content"])
+                        clean.update(capture_source(manifest, clean["content"]))
+                        saved.append({field: clean[field] for field in ("capture_id", "content_hash", "manifest_hash")})
+                        measured["sources_saved"] += 1
+                        measured["excerpt_bytes"] += len(raw)
+                        total += extra
+                        items += additions
+                    with self._transaction() as (state, db):
+                        if saved:
+                            db.execute("INSERT INTO context_queries VALUES(?,?,?,?) ON CONFLICT(key) DO UPDATE SET query=excluded.query,at=excluded.at,captures=excluded.captures", (key, query, at, json.dumps(saved)))
+                        total, items, _ = archive_inventory(self.archive, config["max_items"])
+                        state.update(archive_bytes=total, archive_items=items, last_error=result.get("archive_warning"),
+                                     write_unavailable=False, last_capture=measured)
+                        if saved:
+                            state["last_indexed_at"] = self.now().isoformat()
+            except (OSError, sqlite3.Error, ValueError, UnicodeError):
+                result["archive_warning"] = "Some source evidence could not be saved. Existing captures remain unchanged."
+                try:
                     try:
                         total, items, _ = archive_inventory(self.archive, config["max_items"])
                     except (OSError, ValueError):
@@ -299,8 +300,8 @@ class ContextStore:
                         state.update(last_error=result["archive_warning"], last_capture=measured)
                         if total is not None:
                             state.update(archive_bytes=total, archive_items=items)
-            except (OSError, sqlite3.Error):
-                pass
+                except (OSError, sqlite3.Error):
+                    pass
         return result
 
     def get_capture(self, capture_id, expected_hash=None, expected_manifest_hash=None):
