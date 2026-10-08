@@ -113,9 +113,9 @@ def publish_archive(root, relative, data):
 
 def archive_available(root, token):
     """Inspect writer availability without creating directories or claims."""
-    if root is None or not Path(root).is_dir():
-        return False
     try:
+        if root is None or not Path(root).is_dir():
+            return False
         claim = archive_path(root, "writer-owner.tmp")
         with _owner_lock:
             owner = _owners.get(os.path.normcase(str(root)))
