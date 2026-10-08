@@ -1,6 +1,6 @@
 """Synthetic archive fixtures; no real OneDrive, network, keys or model calls."""
 from datetime import datetime, timedelta, timezone
-from contextlib import closing
+from contextlib import closing, contextmanager
 import hashlib
 import json
 import os
@@ -372,6 +372,75 @@ class ContextStoreTests(unittest.TestCase):
         for source in saved:
             self.assertEqual(self.store.get_capture(source["capture_id"], source["content_hash"], source["manifest_hash"]), source)
 
+    def test_capture_writer_exit_keeps_recovery_ahead_of_a_successful_retry(self):
+        self.enable()
+        exited, release, checked = threading.Event(), threading.Event(), threading.Event()
+        results, errors = {}, []
+        original_writer, original_index = self.store._writer, self.store._index_capture
+
+        @contextmanager
+        def paused_writer():
+            try:
+                with original_writer():
+                    yield
+            except sqlite3.Error:
+                if threading.current_thread() is first:
+                    # Pause after the original writer has exited, before capture
+                    # enters its recovery handler: a normal preemption point.
+                    exited.set()
+                    if not release.wait(5):
+                        raise TimeoutError("The writer-exit recovery test was not released.")
+                raise
+
+        def index(*args):
+            if threading.current_thread() is first:
+                raise sqlite3.OperationalError("Synthetic first-capture index failure")
+            return original_index(*args)
+
+        def capture(label, at):
+            try:
+                if label == "retry":
+                    acquired = self.store._write_lock.acquire(blocking=False)
+                    results["lock_available"] = acquired
+                    if acquired:
+                        self.store._write_lock.release()
+                    checked.set()
+                results[label] = self.capture(query=label, at=at, sources=[{
+                    **self.source, "url": self.source["url"] + "/" + label,
+                    "content": label + " public evidence."}])
+            except Exception as error:
+                errors.append(error)
+
+        first = threading.Thread(target=capture, args=("first", "2026-10-07T10:00:00+00:00"), daemon=True)
+        retry = threading.Thread(target=capture, args=("retry", "2026-10-07T10:00:01+00:00"), daemon=True)
+        with self.store.archive_owner(), patch.object(self.store, "_writer", side_effect=paused_writer), \
+                patch.object(self.store, "_index_capture", side_effect=index):
+            try:
+                first.start()
+                self.assertTrue(exited.wait(5))
+                retry.start()
+                self.assertTrue(checked.wait(5))
+                self.assertFalse(results["lock_available"])
+                self.assertNotIn("retry", results)
+            finally:
+                release.set()
+                first.join(5)
+                if retry.ident is not None:
+                    retry.join(5)
+            self.assertFalse(first.is_alive() or retry.is_alive())
+            self.assertEqual(errors, [])
+            self.assertIn("archive_warning", results["first"])
+            self.assertNotIn("archive_warning", results["retry"])
+            status = self.store.status()
+            self.assertIsNone(status["last_error"])
+            self.assertEqual((status["last_capture"]["retrieved_at"], status["last_capture"]["sources_saved"]),
+                             ("2026-10-07T10:00:01+00:00", 1))
+            self.assertEqual((status["archive_bytes"], status["archive_items"]),
+                             archive_inventory(self.archive, self.config["max_items"])[:2])
+            source = results["retry"]["sources"][0]
+            self.assertEqual(self.store.get_capture(source["capture_id"], source["content_hash"], source["manifest_hash"]), source)
+
+
     def test_initialization_recovery_does_not_restore_concurrently_revoked_permissions(self):
         source = self.seed_source()
         paused, release, ordered = threading.Event(), threading.Event(), threading.Event()
@@ -478,6 +547,41 @@ class ContextStoreTests(unittest.TestCase):
                 with closing(sqlite3.connect(self.database)) as db:
                     self.assertEqual(db.execute("SELECT * FROM context_queries").fetchall(), queries)
                 self.assertEqual(self.store.get_capture(source["capture_id"], source["content_hash"], source["manifest_hash"]), source)
+
+    def test_writer_claim_creation_failure_marks_seeded_archive_unavailable_until_retry(self):
+        source = self.seed_source()
+        before = self.store.status()
+        with closing(sqlite3.connect(self.database)) as db:
+            queries = db.execute("SELECT * FROM context_queries").fetchall()
+        # Invalid settings must remain a validation error, without revoking a
+        # healthy archive or changing its permissions and existing query pins.
+        with self.assertRaises(ValueError):
+            self.store.configure({**self.config, "reuse_hours": 0})
+        self.assertEqual(self.store.status(), before)
+        original_open = os.open
+
+        def denied_claim(path, *args, **kwargs):
+            if Path(path) == self.archive / "writer-owner.tmp":
+                raise PermissionError("Synthetic private writer-claim creation denial")
+            return original_open(path, *args, **kwargs)
+
+        with patch("backend.storage.os.open", side_effect=denied_claim), self.assertRaises(ValueError):
+            self.store.configure(self.config)
+        unavailable = self.store.status()
+        self.assertFalse(unavailable["available"])
+        self.assertEqual(unavailable["config"], self.config)
+        self.assertTrue(unavailable["last_error"])
+        self.assertNotIn("private writer-claim", unavailable["last_error"])
+        self.assertFalse((self.archive / "writer-owner.tmp").exists())
+        self.assertEqual(self.store.get_capture(source["capture_id"], source["content_hash"], source["manifest_hash"]), source)
+        recovered = self.store.configure(self.config)
+        self.assertTrue(recovered["available"])
+        self.assertIsNone(recovered["last_error"])
+        self.assertEqual(recovered["config"], self.config)
+        with closing(sqlite3.connect(self.database)) as db:
+            self.assertEqual(db.execute("SELECT * FROM context_queries").fetchall(), queries)
+        self.assertEqual(self.store.get_capture(source["capture_id"], source["content_hash"], source["manifest_hash"]), source)
+
 
     def test_conservative_scopes_use_exact_origin_and_path_components(self):
         self.enable()
