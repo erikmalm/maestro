@@ -43,9 +43,29 @@ Include the original name, volume, ports, tunnel and secret options. If a releas
 
 The runtime uses UID/GID 1000, one worker, a read-only root filesystem, no added Linux capabilities, a private data volume, and loopback-only access. Defaults are two CPUs, 1 GiB RAM, no additional swap, 64 processes, a 64 MiB temporary filesystem at `/tmp`, and a 10 MB container log. Override CPU/RAM with `-Cpus 4 -Memory 2g`. These limits cover Maestro, not the host's Ollama models. The [Podman run reference](https://docs.podman.io/en/latest/markdown/podman-run.1.html) explains volume ownership, resource limits, logs and secrets.
 
-Check effective WSL memory with `podman machine ssh free -h` and, for NVIDIA hardware, host VRAM with `nvidia-smi --query-gpu=name,memory.total,memory.free --format=csv`. Changing models does not start another Maestro container. Ollama may keep several models resident; set **Keep model loaded (minutes)** to 0 to release each model after its reply when memory matters. Model suitability and switching latency still need benchmarking before automatic routing.
+Check effective WSL memory with `podman machine ssh free -h` and, for NVIDIA hardware, host VRAM with `nvidia-smi --query-gpu=name,memory.total,memory.free --format=csv`. Changing models does not start another Maestro container. Ollama may keep several models resident; set **Keep model loaded (minutes)** to 0 to release each model after its reply when memory matters. Model suitability and switching latency still need benchmarking before automatic specialist selection.
 
 The build uses registry-pinned Node/Python bases, `npm ci`, and the repository's pinned Python requirements. It uses Docker image format so Podman retains the image health check. Its allowlist excludes private files, Git history, local dependencies and build output from the build context. Update base digests deliberately when upgrading the Linux amd64 images.
+
+## Saved public web sources
+
+To make a public source archive available to Maestro, first create a dedicated directory outside the checkout, then supply it explicitly on `start`:
+
+```powershell
+$contextArchive = 'C:\Users\malme\OneDrive\maestro\web-context'
+New-Item -ItemType Directory -Force -Path $contextArchive | Out-Null
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\container.ps1 -Action start -ContextArchivePath $contextArchive
+```
+
+Include your existing name, volume, image, port, tunnel and secret options. This option currently requires the default running Windows WSL Podman machine and an active connection to that machine. The launcher accepts an existing local drive directory, rejects paths inside the checkout and symbolic links/junctions, and verifies the corresponding `/mnt/<drive>/...` directory in the selected machine. UNC paths, remote servers and non-WSL machines are unsupported. It does not create the archive directory or change its permissions.
+
+The directory is mounted at `/archive` with `MAESTRO_CONTEXT_ARCHIVE_DIR=/archive`. It has no `:U` or relabel option; UID 1000 must already have write access. The private database, query mappings and disposable index remain in `/data`. The mount only makes the archive available. In **Settings → Saved web sources**, enable saving and choose **Save eligible public search results** or **Only approved URLs**. New configurations default to the former with saving disabled; existing approved-source policy and limits persist through upgrades. The approved-only choice accepts public HTTPS path scopes or exact complete query URLs. Disabled startup does not initialize or write the archive.
+
+New configurations use a 24-hour reuse window, a 10 GiB archive allowance and a limit of 200,000 files and directories. Adjust limits in Settings, which reports measured archive usage and last-capture sizes. Eligible HTTP/HTTPS excerpts can be saved under the broad policy without fetching their origin sites. Repeated retrievals keep immutable captures with deduplicated objects; this increment has no full-page capture or automatic pruning.
+
+Adding, changing or removing `-ContextArchivePath` changes the launch fingerprint. For an existing container, follow the explicit stop/remove/start procedure above, keep its private volume, and pass the same archive path on subsequent starts. Do not start another writer against the same archive. Archive ownership is separate from private workspace ownership; a stale writer claim requires checking that all writers are stopped before manual cleanup.
+
+OneDrive synchronizes the public source objects and metadata, not the live database. Keep required files on this device for offline use. Unavailable files, incomplete synchronization or access failures must be reported as unavailable evidence. Do not recursively change ownership on the OneDrive tree. See [search context storage](SEARCH_CONTEXT_STORAGE.md) for source eligibility, date provenance and reuse behavior, and the [Podman volume reference](https://docs.podman.io/en/latest/markdown/podman-run.1.html#volume-v-source-volume-host-dir-container-dir-options) for mount semantics.
 
 ## Reach host Ollama
 
@@ -56,7 +76,7 @@ podman exec maestro python -c "import urllib.request; print(urllib.request.urlop
 ollama list
 ```
 
-Both commands describe the host's installed models; Maestro discovers them using Ollama's `/api/tags` endpoint. Select the chat default and separate orchestrator preference in Settings. Click the model name in the chat composer to change the chat choice without creating another provider or container. After pulling or removing models through Ollama, use **Connect and load models** in Settings to update the list.
+Both commands describe the host's installed models; Maestro discovers them using Ollama's `/api/tags` endpoint. Select the chat default and, for orchestrator routing, its installed model in Settings. **Chat routing** chooses the local default; the model picker in the chat composer overrides it without another provider or container. After pulling or removing models through Ollama, use **Connect and load models** in Settings to update the list.
 
 `host.containers.internal` must reach the host's Ollama listener. On Windows, a WSL Podman machine without user-mode networking may not reach an Ollama server bound only to `127.0.0.1`; its published UI port may also be unreachable. Use the optional SSH tunnel to connect both directions without restarting the machine or changing Ollama's listener:
 
@@ -122,6 +142,8 @@ The temporary import container only sets permissions, then exits. [Podman cp](ht
 
 Migration preserves the saved provider URL. In Settings, change a native Ollama URL such as `http://127.0.0.1:11434` to the container's host endpoint (`http://host.containers.internal:11434`, or `http://127.0.0.1:11435` with the tunnel above), then reconnect and verify the installed models before chatting.
 
+The SQLite workspace snapshot preserves private query mappings and answer references but does not include the disposable `/data/context/index.sqlite3` or public archive files. Preserve and mount the original public archive separately. After migration or restore, enable its saved policy and use **Settings → Saved web sources → Rebuild source index** to restore lookup and historical saved-source views. Reconstruction resumes in bounded batches, keeps an existing index usable until completion, and can pause or continue. Missing or changed public files remain unavailable; rebuilding cannot recover their original bytes or invent lost query mappings.
+
 For an online container backup:
 
 ```powershell
@@ -143,3 +165,11 @@ Choose a new private destination for each backup; `/tmp` is ephemeral and its sn
 ```
 
 Omit `--tunnel` where normal Podman port forwarding works. This opt-in check creates unique temporary images, containers, volumes and synthetic secrets, then removes them. It verifies build-context exclusions, the served UI, local access checks, resource limits, separate model choices, workspace ownership, restart/recreation persistence, backup/restore and mounted-key protection without paid calls or personal data. It uses a synthetic Ollama service; verify the real host connection separately with the probe above and a short local chat.
+
+Verify the archive separately against an existing parent directory:
+
+```powershell
+.\.venv\Scripts\python.exe tests/verify_context_container.py localhost/maestro:dev --archive-root 'C:\Users\malme\OneDrive\maestro'
+```
+
+Omit `--archive-root` to use a temporary directory. This check creates a unique synthetic archive fixture and private volumes, runs with networking disabled at UID 1000 and a read-only root, and removes its own resources afterward. It verifies eligible-public capture, repeated observations/object deduplication, capture-size reports, exact-query and keyword reuse, domain/UTC date filters, conservative version selection, content/metadata hashes, FTS5, restart/recreation persistence, independent second-writer rejection, rebuild and deletion without resurrecting old evidence. It does not change the running workspace or configure live source scopes. It verifies locally available storage; cloud synchronization and offline hydration remain separate checks.

@@ -13,6 +13,12 @@ class ContainerLauncherTests(unittest.TestCase):
         self.directory = self.enterContext(tempfile.TemporaryDirectory(prefix="maestro-container-test-"))
 
     def test_lifecycle_preserves_unrelated_containers_and_private_volumes(self):
+        archive = Path(self.directory) / "archive's public context"
+        alternate = Path(self.directory) / "another archive"
+        archive.mkdir()
+        alternate.mkdir()
+        source_file = Path(self.directory) / "not-a-directory.txt"
+        source_file.write_text("Synthetic path-validation fixture.", encoding="utf-8")
         harness = r"""
 $ErrorActionPreference = 'Stop'
 $launcher = Join-Path (Get-Location) 'scripts/container.ps1'
@@ -23,6 +29,12 @@ $global:imageId = 'built-image'
 $global:operations = @()
 $global:healthMode = 'ready'
 $global:connectionUrl = 'ssh://root@127.0.0.1:65152/run/podman/podman.sock'
+$global:machineType = 'wsl'
+$archiveDirectory = $env:MAESTRO_TEST_ARCHIVE_DIR
+$archiveAbsolute = (Get-Item -LiteralPath $archiveDirectory).FullName
+$global:archiveMount = '/mnt/' + $archiveAbsolute.Substring(0, 1).ToLowerInvariant() + '/' + $archiveAbsolute.Substring(3).Replace('\', '/')
+$global:archiveCanonical = $archiveMount
+$global:archiveQuoted = "'" + $archiveMount.Replace("'", "'\''") + "'"
 function podman {
     $global:LASTEXITCODE = 0
     $global:operations += ,@($args)
@@ -30,7 +42,13 @@ function podman {
         'container exists' { if (-not $global:container) { $global:LASTEXITCODE = 1 }; return }
         'container inspect' { return ($global:container | ConvertTo-Json -Depth 8) }
         'image inspect' { return (@{ Id = $global:imageId } | ConvertTo-Json) }
-        'machine inspect' { return (@{ State = 'running'; SSHConfig = @{ Port = 65152; RemoteUsername = 'user' } } | ConvertTo-Json) }
+        'machine inspect' { return (@{ Name = 'synthetic-machine'; ConfigDir = @{ Path = "C:\synthetic\$($global:machineType)" }; State = 'running'; SSHConfig = @{ Port = 65152; RemoteUsername = 'user' } } | ConvertTo-Json) }
+        'machine ssh' {
+            if ($args[2] -cne 'synthetic-machine') { throw 'Archive check used another machine.' }
+            if ($args[3].StartsWith('test -d ')) { return }
+            if ($args[3].StartsWith('readlink -e -- ')) { return $global:archiveCanonical }
+            throw 'Unexpected archive machine check.'
+        }
         'system connection' { return (@(@{ Name = 'default'; Default = $true; URI = $global:connectionUrl }, @{ Name = 'named'; Default = $false; URI = 'ssh://user@127.0.0.1:65153/run/podman/podman.sock' }) | ConvertTo-Json) }
         'volume exists' { if (-not $global:volumeExists) { $global:LASTEXITCODE = 1 }; return }
         'volume create' { $global:volumeExists = $true; return 'maestro-test-data' }
@@ -65,6 +83,7 @@ function Assert-Blocked($action, $expected, $extra = @{}) {
 $run = $global:operations | Where-Object { $_[0] -eq 'run' }
 $required = @('127.0.0.1:8765:8765', 'maestro-test-data:/data:U', '--read-only', '--cap-drop', 'all', '--memory-swap', '1g', '--pids-limit', '64', 'max-size=10mb', '--http-proxy=false', 'provider-test,target=maestro-provider-key,uid=1000,gid=1000,mode=0400', 'search-test,target=maestro-search-key,uid=1000,gid=1000,mode=0400')
 if (-not $global:volumeExists -or ($required | Where-Object { $_ -notin $run })) { throw 'Private volume, runtime constraints or secret mounts were missing.' }
+if ($global:container.Config.Env -contains 'MAESTRO_CONTEXT_ARCHIVE_DIR=/archive' -or ($run | Where-Object { [string]$_ -like '*:/archive:*' })) { throw 'Archive mount was enabled without an explicit path.' }
 $global:operations = @()
 & $launcher -Action start -Name maestro-test -ProviderSecret provider-test -SearchSecret search-test | Out-Null
 if ($global:operations | Where-Object { $_[0] -in @('run', 'start') }) { throw 'Matching running container was replaced or restarted.' }
@@ -93,6 +112,45 @@ $global:imageId = 'built-image'
 $global:healthMode = 'unrelated'
 Assert-Blocked start 'did not become ready'
 $global:healthMode = 'ready'
+$global:connectionUrl = 'ssh://root@127.0.0.1:65152/run/podman/podman.sock'
+Assert-Blocked start 'another image or configuration' @{ ContextArchivePath = $archiveDirectory }
+Assert-Blocked start 'existing directory' @{ ContextArchivePath = (Join-Path $archiveDirectory 'does-not-exist') }
+Assert-Blocked start 'filesystem directory' @{ ContextArchivePath = $env:MAESTRO_TEST_ARCHIVE_FILE }
+foreach ($overlap in @((Get-Location).Path, (Join-Path (Get-Location) 'frontend'), (Split-Path -Parent (Get-Location).Path))) {
+    Assert-Blocked start 'outside the Git checkout' @{ ContextArchivePath = $overlap }
+}
+$junction = Join-Path $env:LOCALAPPDATA 'archive-junction'
+New-Item -ItemType Junction -Path $junction -Target (Get-Location).Path | Out-Null
+try { Assert-Blocked start 'junction' @{ ContextArchivePath = (Join-Path $junction 'frontend') } }
+finally { [IO.Directory]::Delete($junction) }
+$global:machineType = 'hyperv'
+Assert-Blocked start 'Windows WSL' @{ ContextArchivePath = $archiveDirectory }
+$global:machineType = 'wsl'
+$global:connectionUrl = 'ssh://user@other.invalid:65152/run/podman/podman.sock'
+Assert-Blocked start 'active Podman connection' @{ ContextArchivePath = $archiveDirectory }
+$global:connectionUrl = 'ssh://root@127.0.0.1:65152/run/podman/podman.sock'
+$global:archiveCanonical = '/different/resolved/directory'
+Assert-Blocked start 'resolves differently' @{ ContextArchivePath = $archiveDirectory }
+$global:archiveCanonical = $archiveMount
+$global:container = $null; $global:operations = @()
+& $launcher -Action start -Name maestro-test -ProviderSecret provider-test -SearchSecret search-test -ContextArchivePath $archiveDirectory | Out-Null
+$run = $global:operations | Where-Object { $_[0] -eq 'run' }
+if ($run -notcontains "${archiveMount}:/archive:rw,noexec,nosuid,nodev" -or $global:container.Config.Env -notcontains 'MAESTRO_CONTEXT_ARCHIVE_DIR=/archive') { throw 'Explicit archive mount or environment was missing.' }
+$checks = @($global:operations | Where-Object { ($_[0..1] -join ' ') -eq 'machine ssh' })
+if ($checks.Count -ne 2 -or $checks[0][3] -cne "test -d $archiveQuoted" -or $checks[1][3] -cne "readlink -e -- $archiveQuoted") { throw 'Archive checks did not quote the selected directory literally.' }
+$archiveArgument = @($run | Where-Object { [string]$_ -like '*:/archive:*' })[0]
+if ((($archiveArgument -split ':/archive:', 2)[1] -split ',') | Where-Object { $_ -cin @('U', 'z', 'Z') }) { throw 'Archive mount changes ownership or labels.' }
+$global:operations = @()
+& $launcher -Action start -Name maestro-test -ProviderSecret provider-test -SearchSecret search-test -ContextArchivePath $archiveDirectory | Out-Null
+if ($global:operations | Where-Object { $_[0] -in @('run', 'start') }) { throw 'Matching archive container was replaced or restarted.' }
+& $launcher -Action stop -Name maestro-test | Out-Null
+& $launcher -Action start -Name maestro-test -ProviderSecret provider-test -SearchSecret search-test -ContextArchivePath $archiveDirectory | Out-Null
+if (-not $global:container.State.Running -or ($global:operations | Where-Object { $_[0] -eq 'run' })) { throw 'Archive restart replaced its private volume.' }
+Assert-Blocked start 'another image or configuration'
+$alternateAbsolute = (Get-Item -LiteralPath $env:MAESTRO_TEST_OTHER_ARCHIVE_DIR).FullName
+$global:archiveCanonical = '/mnt/' + $alternateAbsolute.Substring(0, 1).ToLowerInvariant() + '/' + $alternateAbsolute.Substring(3).Replace('\', '/')
+Assert-Blocked start 'another image or configuration' @{ ContextArchivePath = $env:MAESTRO_TEST_OTHER_ARCHIVE_DIR }
+if (Test-Path -LiteralPath (Join-Path $archiveDirectory 'does-not-exist')) { throw 'Archive validation created a missing directory.' }
 $global:container.Config.Labels.'io.maestro.managed' = 'other'
 foreach ($action in @('start', 'stop', 'status')) { Assert-Blocked $action 'not owned' }
 $global:container = $null; $global:volumeOwned = $false
@@ -102,7 +160,9 @@ Write-Output 'Container lifecycle scenarios passed.'
         result = subprocess.run(
             ["powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", harness],
             cwd=Path(__file__).resolve().parent.parent,
-            env={**os.environ, "LOCALAPPDATA": self.directory, "CONTAINER_HOST": "", "CONTAINER_CONNECTION": ""},
+            env={**os.environ, "LOCALAPPDATA": self.directory, "CONTAINER_HOST": "", "CONTAINER_CONNECTION": "",
+                 "MAESTRO_TEST_ARCHIVE_DIR": str(archive), "MAESTRO_TEST_OTHER_ARCHIVE_DIR": str(alternate),
+                 "MAESTRO_TEST_ARCHIVE_FILE": str(source_file)},
             capture_output=True, text=True, timeout=20,
         )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)

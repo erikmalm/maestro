@@ -19,14 +19,14 @@ from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 from backend.provider import Provider
 from backend import credentials
 from backend.capabilities import CAPABILITIES
 from backend.web_search import WebSearch, ENDPOINT as SEARCH_ENDPOINT
-from backend.context_store import ContextStore
-from backend.context_policy import contains_source_secret
+from backend.context_store import ContextStore, validate_search
+from backend.context_policy import HASH, contains_source_secret
 from backend.storage import workspace_owner
 from backend.memory import MAX_CONTENT, MemoryStore
 from backend.work_config import WorkConfig, config_value
@@ -185,6 +185,7 @@ class TextInput(StrictModel):
     chat_id: str | None = Field(default=None, min_length=1, max_length=100)
     model: str = Field(default="", max_length=200, pattern=r"^[A-Za-z0-9_./:-]*$")
     role: Literal["chat", "orchestrator"] = "chat"
+    context_mode: Literal["prefer_saved", "refresh", "saved_only"] = "prefer_saved"
 
 
 class ChatTitleInput(StrictModel):
@@ -254,6 +255,25 @@ class ContextArchiveConfig(StrictModel):
     max_items: int = Field(default=200000, ge=100, le=200000, strict=True)
 
 
+class ContextRebuildInput(StrictModel):
+    limit: int = Field(default=1000, ge=1, le=5000, strict=True)
+    continuation: str | None = Field(default=None, pattern=r"^[a-f0-9]{32}$")
+
+
+class ContextSearchInput(StrictModel):
+    query: str = Field(min_length=1, max_length=512)
+    limit: int = Field(default=10, ge=1, le=20, strict=True)
+    domain: str | None = Field(default=None, min_length=1, max_length=253)
+    retrieved_from: str | None = Field(default=None, pattern=r"^\d{4}-\d{2}-\d{2}$")
+    retrieved_to: str | None = Field(default=None, pattern=r"^\d{4}-\d{2}-\d{2}$")
+    allow_stale: bool = Field(default=True, strict=True)
+
+    @model_validator(mode="after")
+    def validate_lookup(self):
+        validate_search(**self.model_dump(exclude={"allow_stale"}))
+        return self
+
+
 _context_lock = threading.RLock()
 _archive_config_lock = threading.RLock()
 
@@ -270,7 +290,7 @@ def context_store():
 
 
 def provider():
-    return Provider(DATABASE, TIMEZONE)
+    return Provider(DATABASE, TIMEZONE, context_store=context_store())
 
 
 @contextmanager
@@ -562,6 +582,48 @@ def configure_context_archive(entry: ContextArchiveConfig):
             raise
 
 
+@app.post("/api/context/rebuild")
+def rebuild_context_archive(entry: ContextRebuildInput):
+    with conflict_errors():
+        return context_store().rebuild(limit=entry.limit, continuation=entry.continuation)
+
+
+@app.post("/api/context/search")
+def search_saved_context(entry: ContextSearchInput):
+    with conflict_errors():
+        store = context_store()
+        status = store.status()
+        if not status["configured"] or not status["config"]["enabled"]:
+            raise ValueError("Enable a configured saved-source archive before searching it.")
+        if not store.archive.is_dir():
+            raise ValueError("The saved-source archive directory is unavailable. Check its local storage before searching.")
+        # POST protects private terms from URL logging; lookup has no writes or inference.
+        return store.search(**entry.model_dump())
+
+
+@app.get("/api/context/sources/{capture_id}")
+def get_saved_source(capture_id: str, expected_hash: str | None = None, expected_manifest_hash: str | None = None):
+    for value in (expected_hash, expected_manifest_hash):
+        if value is not None and not HASH.fullmatch(value):
+            raise HTTPException(422, "Check the saved source reference and try again.")
+    try:
+        with conflict_errors():
+            return context_store().get_capture(capture_id, expected_hash=expected_hash,
+                                                expected_manifest_hash=expected_manifest_hash)
+    except KeyError:
+        raise HTTPException(404, "That saved source is unavailable or has been removed.") from None
+
+
+@app.delete("/api/context/sources/{capture_id}")
+def remove_saved_source(capture_id: str):
+    try:
+        with conflict_errors():
+            context_store().delete_capture(capture_id)
+            return context_store().status()
+    except KeyError:
+        raise HTTPException(404, "That saved source is unavailable or has been removed.") from None
+
+
 @app.put("/api/web-search")
 def configure_web_search(entry: WebSearchSetup):
     with conflict_errors():
@@ -576,7 +638,15 @@ def configure_web_search(entry: WebSearchSetup):
 def test_web_search():
     service = WebSearch(DATABASE, TIMEZONE)
     with conflict_errors():
-        service.search("Ollama official web search documentation", test=True)
+        result = service.search("Ollama official web search documentation", test=True)
+        store = context_store()
+        settings = store.status()["config"]
+        if settings["enabled"] and settings["capture_policy"] == "all_public":
+            key = credentials.read(SEARCH_ENDPOINT)[0]
+            sources = [dict(source, **flags) for source, flags in
+                       zip(result["sources"], result.get("completeness", [{}] * len(result["sources"])))]
+            store.capture(result["query"], result["at"], sources,
+                          service.read_state()["config"]["max_results"], secrets=(key or "",))
         return service.status()
 
 
@@ -661,7 +731,7 @@ def chat(entry: TextInput):
             state["chats"].append(target)
         chat_id = target["id"]
     with conflict_errors():
-        provider().chat(entry.text, chat_id, entry.model, entry.role)
+        provider().chat(entry.text, chat_id, entry.model, entry.role, entry.context_mode)
     state = read_workspace()
     return snapshot(state, chat_id if any(item["id"] == chat_id for item in state["chats"]) else None)
 

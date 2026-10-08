@@ -280,8 +280,10 @@ export default function ProviderSetup({
               </select>
             </label>
             <p className="reflection-note">
-              Choose the default reply model for local chats. Per-message
-              choices take precedence.
+              {config.chat_routing === "orchestrator"
+                ? "The orchestrator decides whether to retrieve sources and writes the grounded reply. Delegation to worker agents is not available yet."
+                : "Use the chat model for replies, or choose Orchestrator model to coordinate source retrieval and write the grounded reply."}{" "}
+              Per-message choices take precedence.
             </p>
             <label>
               Orchestrator default model

@@ -44,6 +44,8 @@ const initial: Workspace = {
     credentials_present: true,
     credential_source: "session",
     tested_at: "2026-10-01T00:00:00Z",
+    ready: true,
+    unavailable_reason: null,
   },
   capabilities: {
     mode: "local",
@@ -228,7 +230,10 @@ test("settings updates never silently replace an explicit chat model", async ({
   await expect(
     page.getByRole("button", { name: "Choose model:" }),
   ).toContainText("chosen-model");
-  await expect(page.getByRole("status")).toContainText(
+  const modelNotice = page.getByRole("status").filter({
+    hasText: "The chosen model is no longer installed.",
+  });
+  await expect(modelNotice).toContainText(
     "choose another model before sending",
   );
   await expect(
@@ -244,7 +249,7 @@ test("settings updates never silently replace an explicit chat model", async ({
     .locator(".model-picker")
     .getByRole("button", { name: "old-model", exact: false })
     .click();
-  await expect(page.getByRole("status")).toHaveCount(0);
+  await expect(modelNotice).toHaveCount(0);
   await expect(
     page.getByRole("button", { name: "Send message" }),
   ).toBeEnabled();
@@ -316,6 +321,7 @@ for (const [name, routing, orchestrator, expected] of [
     expect((await sent).postDataJSON()).toEqual({
       text: "Use the saved reply model",
       role: "chat",
+      context_mode: "prefer_saved",
       chat_id: "routing-chat",
     });
     await page.getByRole("button", { name: "Settings", exact: true }).click();
@@ -328,6 +334,10 @@ for (const [name, routing, orchestrator, expected] of [
     });
     await expect(preference).toHaveValue(orchestrator);
     await expect(preference).toBeEnabled();
+    if (routing === "orchestrator")
+      await expect(
+        page.getByText(/Delegation to worker agents is not available yet/),
+      ).toBeVisible();
   });
 }
 
@@ -335,6 +345,7 @@ test("saving chat routing updates the composer default and keeps the chat reques
   page,
 }) => {
   const state = routingWorkspace();
+  state.provider.config.orchestrator_model = "";
   await mockSettings(page, state, "");
   await page.route("**/api/chat", (route) => route.fulfill({ json: state }));
   await page.goto("/");
@@ -342,6 +353,9 @@ test("saving chat routing updates the composer default and keeps the chat reques
   await expect(picker).toHaveAccessibleName("Choose model: qwen2.5:7b");
   await page.getByLabel("Message Maestro").fill("Keep this routing draft");
   await page.getByRole("button", { name: "Settings", exact: true }).click();
+  await page
+    .getByRole("combobox", { name: "Orchestrator default model", exact: true })
+    .selectOption("devstral-small-2:24b");
   await page
     .getByRole("combobox", { name: "Chat routing", exact: true })
     .selectOption("orchestrator");
@@ -371,6 +385,7 @@ test("saving chat routing updates the composer default and keeps the chat reques
   expect((await sent).postDataJSON()).toEqual({
     role: "chat",
     text: "Keep this routing draft",
+    context_mode: "prefer_saved",
     chat_id: "routing-chat",
   });
 });
@@ -427,6 +442,7 @@ test("delayed chat routing saves preserve an explicit model and newer drafts", a
     role: "chat",
     model: "qwen2.5:7b",
     text: "Keep my newer question",
+    context_mode: "prefer_saved",
     chat_id: "routing-chat",
   });
 });
@@ -899,8 +915,13 @@ for (const [name, order, failed] of [
       );
       if (index === 1 && failed !== 1) currentModel = "new-model";
       await expect(
-        page.locator(".model-trigger, .composer-bottom > small"),
+        page.locator(".model-trigger, .composer-controls > small"),
       ).toHaveText(currentModel);
+      const searchOptions = page.getByRole("button", {
+        name: /^Search options:/,
+      });
+      if ((await searchOptions.getAttribute("aria-expanded")) !== "true")
+        await searchOptions.click();
       await expect(page.getByText(/Automatic web search/)).toContainText(
         `0 / ${currentModel === "new-model" ? 30 : 20} today`,
       );
@@ -950,18 +971,21 @@ test("a delayed limits save keeps newer provider settings", async ({
     .click();
   await page.getByRole("button", { name: "Workspace", exact: true }).click();
   await expect(
-    page.locator(".model-trigger, .composer-bottom > small"),
+    page.locator(".model-trigger, .composer-controls > small"),
   ).toHaveText("new-model");
+  await page.getByRole("button", { name: /^Search options:/ }).click();
   await saved!.route.fulfill({ json: saved!.snapshot });
   await expect(page.getByText("Limits saved.", { exact: true })).toBeVisible();
   await expect(
-    page.locator(".model-trigger, .composer-bottom > small"),
+    page.locator(".model-trigger, .composer-controls > small"),
   ).toHaveText("new-model");
   await expect.poll(() => reads).toBe(3);
   await page
     .getByRole("button", { name: "View usage and manage budgets" })
     .click();
-  await expect(page.getByLabel("Per day", { exact: true })).toHaveValue("9");
+  await expect(
+    page.getByRole("dialog").getByLabel("Per day", { exact: true }),
+  ).toHaveValue("9");
 });
 
 test("settings refreshes preserve an explicitly selected new chat", async ({
@@ -1032,7 +1056,7 @@ test("settings refreshes preserve an explicitly selected new chat", async ({
     page.getByRole("heading", { name: "Chat b", exact: true }),
   ).toBeVisible();
   await expect(
-    page.locator(".model-trigger, .composer-bottom > small"),
+    page.locator(".model-trigger, .composer-controls > small"),
   ).toHaveText("new-model");
   await expect(page.getByText(/Automatic web search/)).toContainText(
     "0 / 30 today",

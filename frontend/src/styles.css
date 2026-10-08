@@ -158,15 +158,18 @@ textarea {
   overflow-y: auto;
   min-height: 0;
 }
-.chat-link {
-  display: block;
+.chat-link,
+.model-picker button {
   width: 100%;
   border-radius: 7px;
   padding: 10px;
   background: transparent;
-  color: var(--muted);
   text-align: left;
   font-size: 13px;
+}
+.chat-link {
+  display: block;
+  color: var(--muted);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -286,15 +289,18 @@ textarea {
   color: var(--muted);
   background: #f2f2f5;
 }
-.icon-button {
+.icon-button,
+.send-button {
   display: inline-flex;
   align-items: center;
   justify-content: center;
   width: 36px;
   height: 36px;
   flex-shrink: 0;
-  background: transparent;
   border-radius: 7px;
+}
+.icon-button {
+  background: transparent;
 }
 .icon-button:hover:not(:disabled) {
   background: #e9e8ee;
@@ -331,16 +337,19 @@ textarea {
 .connection-prompt {
   align-self: flex-start;
 }
-.empty-conversation {
+.empty-conversation,
+.loading-screen {
   display: flex;
-  flex: 1;
   flex-direction: column;
   align-items: center;
   justify-content: center;
+  text-align: center;
+}
+.empty-conversation {
+  flex: 1;
   min-height: 280px;
   gap: 14px;
   color: var(--muted);
-  text-align: center;
   padding: 32px 12px;
 }
 .empty-conversation h2 {
@@ -507,6 +516,85 @@ textarea {
   margin: 7px 0 0;
   padding-left: 22px;
 }
+.source-details {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 12px;
+  margin: 4px 0 10px;
+  color: var(--muted);
+  font-size: 12px;
+}
+.source-details .button {
+  padding: 3px 8px;
+  font-size: 12px;
+}
+.archive-accounting {
+  margin: 8px 0 14px;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+.archive-accounting p + p {
+  margin-top: 6px;
+}
+.context-mode-control {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  margin: 12px 0 8px;
+  color: var(--muted);
+  font-size: 11px;
+}
+.context-mode-control select {
+  padding: 5px 8px;
+  font-size: 12px;
+}
+.saved-source-view h3 {
+  margin-bottom: 8px;
+  overflow-wrap: anywhere;
+}
+.saved-source-finder {
+  margin-top: 24px;
+  padding-top: 24px;
+  border-top: 1px solid var(--line);
+}
+.archive-search-fields {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+}
+.archive-search-results ol {
+  display: grid;
+  gap: 18px;
+  padding-left: 20px;
+}
+.archive-search-results li {
+  overflow-wrap: anywhere;
+}
+.archive-search-results h4,
+.archive-result-url {
+  margin: 0 0 6px;
+}
+.archive-result-excerpt {
+  white-space: pre-wrap;
+  font-size: 13px;
+  line-height: 1.6;
+}
+.source-snapshot {
+  max-height: 45dvh;
+  overflow-y: auto;
+  margin: 16px 0;
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #f8f7fb;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font: inherit;
+  line-height: 1.65;
+}
 .composer-area {
   margin-top: auto;
 }
@@ -550,22 +638,25 @@ textarea {
 .model-control {
   min-width: 0;
 }
-.model-picker {
-  position-anchor: --chat-model;
+.model-picker,
+.search-options {
   inset: auto;
   bottom: anchor(top);
   left: anchor(left);
   margin: 0 0 8px;
-  width: 280px;
-  max-width: calc(100vw - 40px);
-  max-height: 280px;
   overflow-y: auto;
-  padding: 6px;
   border: 1px solid var(--line);
   border-radius: 12px;
   background: #fff;
-  color: inherit;
   box-shadow: 0 8px 32px #26213618;
+}
+.model-picker {
+  position-anchor: --chat-model;
+  width: 280px;
+  max-width: calc(100vw - 40px);
+  max-height: 280px;
+  padding: 6px;
+  color: inherit;
 }
 .model-picker > p {
   padding: 8px 10px;
@@ -577,12 +668,6 @@ textarea {
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  width: 100%;
-  padding: 10px;
-  border-radius: 7px;
-  background: transparent;
-  text-align: left;
-  font-size: 13px;
   overflow-wrap: anywhere;
 }
 .model-picker button:hover:not(:disabled),
@@ -607,20 +692,105 @@ textarea {
   font-size: 12px;
   overflow-wrap: anywhere;
 }
-.send-button {
-  width: 36px;
-  height: 36px;
+.composer-controls {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+}
+.search-control {
   flex-shrink: 0;
+}
+.search-trigger {
+  anchor-name: --chat-search;
+  position: relative;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  border-radius: 7px;
+  width: 34px;
+  height: 34px;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--muted);
+}
+.search-trigger:hover,
+.search-trigger[aria-expanded="true"] {
+  background: #f0edf8;
+  color: var(--accent);
+}
+.search-indicator {
+  position: absolute;
+  bottom: 6px;
+  right: 5px;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  outline: 2px solid #fff;
+}
+.search-indicator.ready {
+  background: #278b67;
+}
+.search-indicator.unavailable {
+  background: #ae7a27;
+}
+.search-indicator.saved {
+  background: var(--accent);
+}
+.search-options {
+  position-anchor: --chat-search;
+  position-try-fallbacks: flip-block;
+  width: 340px;
+  max-width: calc(100vw - 80px);
+  max-height: min(540px, calc(100dvh - 40px));
+  padding: 14px;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.6;
+}
+.search-options-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+.search-options h3,
+.search-options strong {
+  color: #292d35;
+}
+.search-options h3 {
+  font-size: 14px;
+}
+.search-options p {
+  margin: 0 0 8px;
+  overflow-wrap: anywhere;
+}
+.search-options .context-mode-control select {
+  width: 100%;
+}
+.source-saving-status {
+  border-top: 1px solid var(--line);
+  margin-top: 12px;
+  padding-top: 12px;
 }
 .composer-note {
   color: var(--muted);
   font-size: 11px;
   line-height: 1.6;
   margin-top: 10px;
+}
+.search-readiness {
+  border-top: 1px solid var(--line);
+  margin: 12px 0;
+  padding-top: 12px;
+}
+.search-readiness p {
+  margin: 0 0 6px;
+}
+.search-readiness-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 8px;
 }
 
 .task-row {
@@ -1147,13 +1317,8 @@ textarea {
 }
 .loading-screen {
   min-height: 100dvh;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  flex-direction: column;
   gap: 20px;
   padding: 24px;
-  text-align: center;
 }
 .loading-screen p {
   display: flex;
@@ -1298,6 +1463,7 @@ textarea {
   }
 }
 @media (max-width: 420px) {
+  .archive-search-fields,
   .reflection-fields {
     grid-template-columns: minmax(0, 1fr);
   }

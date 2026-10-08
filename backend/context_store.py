@@ -1,25 +1,32 @@
-"""Opt-in public excerpt capture and pinned readback; private indexing stays local."""
+"""Opt-in public search excerpts, immutable files and a private rebuildable index."""
 from contextlib import closing, contextmanager
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from functools import wraps
 import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import sqlite3
 import threading
+import time
+import unicodedata
+from urllib.parse import urlsplit
 import uuid
 
 from backend.context_policy import (
-    DEFAULT, ID, MANIFEST_BYTES, MAX_ARCHIVE_ITEMS, SCHEMA, SOURCE_BYTES, capture_source,
-    configuration, contains_source_secret, contains_url_secret, eligible,
+    DEFAULT, HASH, ID, MANIFEST_BYTES, MAX_ARCHIVE_ITEMS, SCHEMA, SOURCE_BYTES, capture_source,
+    configuration, contains_source_secret, contains_url_secret, decoded_url_variants, eligible,
     manifest_hash, public_url, timestamp, validate_capture_manifest,
 )
 from backend.storage import (archive_available, archive_inventory, archive_owner, archive_path,
                              publish_archive, read_archive, read_archive_json)
 
 
+SEARCH_CANDIDATES = 200
+SEARCH_SECONDS = 2
+REBUILD_SECONDS = 5
 ROOT = Path(__file__).resolve().parent.parent
 
 
@@ -42,6 +49,56 @@ def normalize_query(query):
     if not isinstance(query, str) or not 1 <= len(query.strip()) <= 512:
         raise ValueError("Provide one search query of at most 512 characters.")
     return " ".join(query.split())
+
+
+def _search_terms(query):
+    # Match the default unicode61 tokenizer's letters, numbers and private-use
+    # characters. Combining marks remain with their word, including NFD text.
+    terms, current = [], []
+    for character in query:
+        category = unicodedata.category(character)
+        if category[0] in ("L", "N") or category == "Co" or category[0] == "M" and current:
+            current.append(character)
+        elif current:
+            terms.append("".join(current))
+            current = []
+    if current:
+        terms.append("".join(current))
+    if not terms or len(terms) > 16:
+        raise ValueError("Use one to sixteen literal keywords for saved-source search.")
+    return terms
+
+
+def validate_search(query, limit=3, *, domain=None, retrieved_from=None, retrieved_to=None):
+    """Shared public validation; operators are always interpreted as words."""
+    query = normalize_query(query)
+    _search_terms(query)
+    if type(limit) is not int or not 1 <= limit <= 20:
+        raise ValueError("Choose one to twenty saved search results.")
+    if domain is not None:
+        if (not isinstance(domain, str) or len(domain) > 253 or not domain
+                or any(character in domain for character in "/\\:@?#*%[]")
+                or any(ord(character) <= 32 or ord(character) == 127 for character in domain)):
+            raise ValueError("Use an exact public hostname without a URL, path, port or wildcard.")
+        try:
+            domain = urlsplit(public_url("https://" + domain + "/")).hostname
+            if (not re.fullmatch(r"(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z](?:[a-z0-9-]*[a-z0-9])?", domain)
+                    or len(domain) > 253 or any(len(label) > 63 for label in domain.split("."))):
+                raise ValueError()
+        except (ValueError, TypeError):
+            raise ValueError("Use an exact public hostname without a URL, path, port or wildcard.") from None
+    for value in (retrieved_from, retrieved_to):
+        if value is not None:
+            try:
+                if not isinstance(value, str) or not re.fullmatch(r"\d{4}-\d{2}-\d{2}", value):
+                    raise ValueError()
+                date.fromisoformat(value)
+            except ValueError:
+                raise ValueError("Use valid retrieval dates in YYYY-MM-DD format.") from None
+    if retrieved_from and retrieved_to and retrieved_from > retrieved_to:
+        raise ValueError("The retrieval start date must not follow its end date.")
+    return {"query": query, "limit": limit, "domain": domain,
+            "retrieved_from": retrieved_from, "retrieved_to": retrieved_to}
 
 
 class ContextStore:
@@ -160,6 +217,8 @@ class ContextStore:
                     self._format()
                     # Saving a lower cap remains possible for an already larger archive.
                     total, items, _ = archive_inventory(self.archive, MAX_ARCHIVE_ITEMS * 2)
+                if config != previous:
+                    self._invalidate_rebuild()
                 with self._transaction() as (state, db):
                     if any(config[field] != previous[field] for field in ("enabled", "capture_policy", "public_sources")):
                         db.execute("DELETE FROM context_queries")
@@ -188,6 +247,7 @@ class ContextStore:
         return db
 
     def _index_capture(self, manifest, relative, content):
+        self._invalidate_rebuild()
         with closing(self._index_connection()) as db, db:
             db.execute("DELETE FROM captures_fts WHERE id=?", (manifest["capture_id"],))
             db.execute("INSERT OR REPLACE INTO captures VALUES(?,?,?,?,?,?,?)", (manifest["capture_id"], relative, manifest["title"], manifest["source_url"], content, manifest["retrieved_at"], manifest_hash(manifest)))
@@ -210,6 +270,154 @@ class ContextStore:
         if type(max_results) is not int or not 1 <= max_results <= 3:
             raise ValueError("Choose one to three search results.")
         return hashlib.sha256(json.dumps([normalize_query(query), max_results, "ollama_web_search", SCHEMA]).encode()).hexdigest()
+
+    def lookup(self, query, max_results, allow_stale=False):
+        with self._write_lock:
+            key = self._key(query, max_results)
+            state = self._state()
+            if not state["config"]["enabled"] or not self.database.is_file() or not self.archive or not self.archive.is_dir():
+                return None
+            try:
+                with closing(sqlite3.connect(self.database.as_uri() + "?mode=ro", uri=True)) as db:
+                    row = db.execute("SELECT at,captures FROM context_queries WHERE key=?", (key,)).fetchone()
+                if not row:
+                    return None
+                at = datetime.fromisoformat(row[0])
+                age = self.now() - at
+                stale = age > timedelta(hours=state["config"]["reuse_hours"])
+                if age < timedelta(0) or not allow_stale and stale:
+                    return None
+                sources = [{**self.get_capture(item["capture_id"], expected_hash=item["content_hash"], expected_manifest_hash=item["manifest_hash"]), "stale": stale}
+                           for item in json.loads(row[1])]
+                return {"query": normalize_query(query), "at": row[0], "sources": sources, "from_cache": True, "stale": stale}
+            except (OSError, sqlite3.Error, ValueError, KeyError, TypeError):
+                return None
+
+    def search(self, query, limit=3, *, domain=None, retrieved_from=None, retrieved_to=None, allow_stale=False):
+        filters = validate_search(query, limit, domain=domain, retrieved_from=retrieved_from, retrieved_to=retrieved_to)
+        if type(allow_stale) is not bool:
+            raise ValueError("Choose whether historical saved sources are allowed.")
+        result = {"query": filters["query"], "at": None, "sources": [], "from_cache": True, "stale": False,
+                  "retrieval": "keyword", "search_limited": False}
+        work_exceeded = False
+        # This is a reader: never initialize schema, claim the archive, remember
+        # the query or repair the index as a side effect of searching.
+        with self._write_lock:
+            try:
+                config = self._state()["config"]
+                if (not config["enabled"] or not self.archive or not self.archive.is_dir() or not self.index.is_file()):
+                    return result
+                now = self.now()
+                earliest = now - timedelta(hours=config["reuse_hours"])
+                deadline = time.monotonic() + SEARCH_SECONDS
+                expression = " AND ".join('"' + term.replace('"', '""') + '"' for term in _search_terms(filters["query"]))
+                clauses, parameters = ["julianday(c.at)<=julianday(?)"], [now.isoformat()]
+                if not allow_stale:
+                    clauses.append("julianday(c.at)>=julianday(?)")
+                    parameters.append(earliest.isoformat())
+                if filters["domain"]:
+                    clauses.append("context_host(c.url)=?")
+                    parameters.append(filters["domain"])
+                for field, operator in (("retrieved_from", ">="), ("retrieved_to", "<=")):
+                    if filters[field]:
+                        clauses.append("date(c.at)" + operator + "?")
+                        parameters.append(filters[field])
+                eligibility = " AND ".join(clauses)
+
+                def check_time():
+                    nonlocal work_exceeded
+                    if time.monotonic() > deadline:
+                        work_exceeded = True
+                        raise ValueError("Saved-source search exceeded its time allowance.")
+
+                def canonical(value):
+                    check_time()
+                    try:
+                        return public_url(value, allow_query=True, allow_http=True)
+                    except ValueError:
+                        return None
+
+                def host(value):
+                    normalized = canonical(value)
+                    return urlsplit(normalized).hostname if normalized else None
+
+                def observation(value):
+                    check_time()
+                    try:
+                        return datetime.fromisoformat(timestamp(value)).isoformat(timespec="microseconds")
+                    except ValueError:
+                        return None
+
+                with closing(sqlite3.connect(self.index.as_uri() + "?mode=ro", uri=True, timeout=0.5)) as db:
+                    callbacks = 0
+                    def progress():
+                        nonlocal callbacks, work_exceeded
+                        callbacks += 1
+                        work_exceeded = callbacks > 10000 or time.monotonic() > deadline
+                        return work_exceeded
+                    db.set_progress_handler(progress, 1000)
+                    db.create_function("context_url", 1, canonical)
+                    db.create_function("context_host", 1, host)
+                    db.create_function("context_time", 1, observation)
+                    candidates = db.execute(
+                        "WITH matches AS MATERIALIZED (SELECT context_url(c.url) AS url,"
+                        "bm25(captures_fts,0.0,5.0,1.0) AS score,context_time(c.at) AS observed "
+                        "FROM captures_fts JOIN captures c ON c.id=captures_fts.id "
+                        "WHERE captures_fts MATCH ? AND " + eligibility + ") "
+                        "SELECT url FROM matches WHERE url IS NOT NULL GROUP BY url "
+                        "ORDER BY MIN(score),MAX(observed) DESC,url LIMIT ?",
+                        [expression, *parameters, SEARCH_CANDIDATES + 1]).fetchall()
+                    result["search_limited"] = len(candidates) > SEARCH_CANDIDATES
+                    urls = [row[0] for row in candidates[:SEARCH_CANDIDATES]]
+                    if not urls:
+                        return result
+                    # Select versions independently of keywords. A recent
+                    # conflicting version cannot be replaced by an older hit.
+                    versions = db.execute(
+                        "WITH eligible AS MATERIALIZED (SELECT c.id,"
+                        "context_url(c.url) AS source_url,context_time(c.at) AS observed FROM captures c WHERE " + eligibility +
+                        " AND context_url(c.url) IN (" + ",".join("?" for _ in urls) + ")),"
+                        "versions AS (SELECT *,ROW_NUMBER() OVER (PARTITION BY source_url ORDER BY observed DESC,id) AS version "
+                        "FROM eligible),chosen AS MATERIALIZED (SELECT id,source_url,version FROM versions "
+                        "ORDER BY version,source_url LIMIT ?) "
+                        "SELECT c.id,c.title,c.url,c.content,c.at,c.manifest_hash FROM chosen JOIN captures c ON c.id=chosen.id "
+                        "ORDER BY chosen.version,chosen.source_url",
+                        [*parameters, *urls, SEARCH_CANDIDATES + 1]).fetchall()
+                    found, seen = [], set()
+                    for capture_id, title, url, content, at, digest in versions[:SEARCH_CANDIDATES]:
+                        check_time()
+                        canonical_url = public_url(url, allow_query=True, allow_http=True)
+                        if canonical_url in seen:
+                            continue
+                        try:
+                            source = self.get_capture(capture_id, expected_manifest_hash=digest)
+                        except KeyError:
+                            continue
+                        if (title, url, content, at) != (source["title"], source["url"], source["content"], source["retrieved_at"]):
+                            continue  # The disposable index disagrees with verified evidence.
+                        observed = datetime.fromisoformat(timestamp(source["retrieved_at"]))
+                        stale = observed < earliest
+                        if (observed > now or stale and not allow_stale
+                                or filters["domain"] and urlsplit(canonical_url).hostname != filters["domain"]
+                                or filters["retrieved_from"] and observed.date().isoformat() < filters["retrieved_from"]
+                                or filters["retrieved_to"] and observed.date().isoformat() > filters["retrieved_to"]):
+                            continue
+                        seen.add(canonical_url)
+                        match = db.execute(
+                            "SELECT bm25(captures_fts,0.0,5.0,1.0),title,content FROM captures_fts "
+                            "WHERE captures_fts MATCH ? AND id=? ORDER BY 1 LIMIT 1", (expression, capture_id)).fetchone()
+                        if match and (match[1], match[2]) == (source["title"], source["content"]):
+                            found.append((match[0], -observed.timestamp(), capture_id, {**source, "stale": stale}))
+                    result["sources"] = [entry[3] for entry in sorted(found, key=lambda item: item[:3])[:filters["limit"]]]
+                    result["at"] = max((source["retrieved_at"] for source in result["sources"]),
+                                       key=datetime.fromisoformat, default=None)
+                    result["stale"] = any(source["stale"] for source in result["sources"])
+                    result["search_limited"] |= len(versions) > SEARCH_CANDIDATES and len(seen) < len(urls)
+                    return result
+            except (OSError, sqlite3.Error, ValueError, KeyError, TypeError, UnicodeError):
+                if work_exceeded:
+                    raise ValueError("Saved-source search exceeded its work allowance. Narrow keywords or filters and retry.") from None
+                raise ValueError("The local source index could not be searched. Rebuild it and retry.") from None
 
     def capture(self, query, at, sources, max_results, secrets=()):
         secrets = tuple(secret for secret in secrets if secret)
@@ -304,6 +512,18 @@ class ContextStore:
                     pass
         return result
 
+    @contextmanager
+    def evidence_guard(self, sources):
+        """Validate and commit evidence under mutation exclusion, never over inference."""
+        with self._write_lock:
+            try:
+                for source in sources:
+                    if source.get("archive_status") == "saved":
+                        self.get_capture(source["capture_id"], expected_hash=source["content_hash"], expected_manifest_hash=source["manifest_hash"])
+            except (KeyError, ValueError, TypeError):
+                raise ValueError("Saved source evidence changed or was removed. Refresh the source choice before answering.") from None
+            yield
+
     def get_capture(self, capture_id, expected_hash=None, expected_manifest_hash=None):
         with self._write_lock:
             if not isinstance(capture_id, str) or not ID.fullmatch(capture_id):
@@ -325,3 +545,124 @@ class ContextStore:
                 return capture_source(manifest, content)
             except (OSError, sqlite3.Error, ValueError, TypeError, UnicodeError):
                 raise KeyError(capture_id) from None
+
+    @storage_errors
+    def delete_capture(self, capture_id):
+        if not isinstance(capture_id, str) or not ID.fullmatch(capture_id):
+            raise KeyError(capture_id)
+        with self._writer():
+            self._invalidate_rebuild()
+            # Tombstones are portable; retained objects preserve other captures.
+            relative = "records/deletions/" + capture_id + ".json"
+            if not self._deleted(capture_id):
+                self.get_capture(capture_id)
+                publish_archive(self.archive, relative, json.dumps({"schema_version": SCHEMA, "capture_id": capture_id}).encode())
+            total, items, _ = archive_inventory(self.archive, MAX_ARCHIVE_ITEMS * 2)
+            with self._transaction() as (state, db):
+                state.update(archive_bytes=total, archive_items=items)
+                for key, raw in db.execute("SELECT key,captures FROM context_queries").fetchall():
+                    if any(item.get("capture_id") == capture_id for item in json.loads(raw)):
+                        db.execute("DELETE FROM context_queries WHERE key=?", (key,))
+            if self.index.is_file():
+                with closing(self._index_connection()) as db, db:
+                    db.execute("DELETE FROM captures_fts WHERE id=?", (capture_id,))
+                    db.execute("DELETE FROM captures WHERE id=?", (capture_id,))
+
+    @property
+    def _rebuild_path(self):
+        return self.index.with_name("rebuild.sqlite3")
+
+    def _invalidate_rebuild(self):
+        """A replacement cannot discard changes made after its snapshot."""
+        for suffix in ("-journal", "-wal", "-shm", ""):
+            self._rebuild_path.with_name(self._rebuild_path.name + suffix).unlink(missing_ok=True)
+        if self._state()["rebuild_progress"] is not None:
+            with self._transaction() as (state, _):
+                state["rebuild_progress"] = None
+
+    @staticmethod
+    def _capture_inventory_hash(paths):
+        return hashlib.sha256("\n".join(sorted(paths)).encode("utf-8")).hexdigest()
+
+    @storage_errors
+    def rebuild(self, limit=1000, continuation=None):
+        """Process one durable batch; publish only a complete verified index."""
+        if type(limit) is not int or not 1 <= limit <= 5000:
+            raise ValueError("Choose a rebuild batch between 1 and 5000 captures.")
+        if continuation is not None and (not isinstance(continuation, str) or not ID.fullmatch(continuation)):
+            raise ValueError("Use the current source index rebuild reference.")
+        config = self._state()["config"]
+        if not config["enabled"]:
+            raise ValueError("Enable the configured source archive before rebuilding.")
+        with self._writer():
+            config = self._state()["config"]
+            if not config["enabled"]:
+                raise ValueError("Enable the configured source archive before rebuilding.")
+            self._format()
+            stage = self._rebuild_path
+            job = None
+            if stage.is_file():
+                try:
+                    with closing(sqlite3.connect(stage.as_uri() + "?mode=ro", uri=True)) as db:
+                        row = db.execute("SELECT value FROM rebuild_job WHERE id=1").fetchone()
+                        job = json.loads(row[0]) if row else None
+                    if (not isinstance(job, dict) or set(job) != {"id", "config", "processed", "total", "missing", "corrupt", "inventory_hash"}
+                            or job["config"] != config or not isinstance(job["id"], str) or not ID.fullmatch(job["id"])
+                            or not isinstance(job["inventory_hash"], str) or not HASH.fullmatch(job["inventory_hash"])
+                            or any(type(job[field]) is not int or job[field] < 0 for field in ("processed", "total", "missing", "corrupt"))
+                            or not job["processed"] <= job["total"] <= MAX_ARCHIVE_ITEMS * 2
+                            or job["missing"] + job["corrupt"] > job["processed"]):
+                        raise ValueError("Invalid source index rebuild state.")
+                except (sqlite3.Error, ValueError, KeyError, TypeError):
+                    self._invalidate_rebuild()
+                    job = None
+            if continuation is not None and (job is None or job["id"] != continuation):
+                raise ValueError("The archive changed during index rebuild. Start or resume a new rebuild.")
+            if job is None:
+                total, items, paths = archive_inventory(self.archive, MAX_ARCHIVE_ITEMS * 2)
+                job = {"id": uuid.uuid4().hex, "config": config, "processed": 0, "total": len(paths),
+                       "missing": 0, "corrupt": 0, "inventory_hash": self._capture_inventory_hash(paths)}
+                with closing(self._index_connection(stage)) as db, db:
+                    db.execute("CREATE TABLE rebuild_queue(position INTEGER PRIMARY KEY,manifest TEXT NOT NULL)")
+                    db.executemany("INSERT INTO rebuild_queue VALUES(?,?)", enumerate(sorted(paths)))
+                    db.execute("CREATE TABLE rebuild_job(id INTEGER PRIMARY KEY,value TEXT NOT NULL)")
+                    db.execute("INSERT INTO rebuild_job VALUES(1,?)", (json.dumps(job),))
+            started = time.monotonic()
+            processed_before = job["processed"]
+            with closing(self._index_connection(stage)) as db, db:
+                rows = db.execute("SELECT position,manifest FROM rebuild_queue WHERE position>=? ORDER BY position LIMIT ?",
+                                  (job["processed"], limit)).fetchall()
+                for position, relative in rows:
+                    if job["processed"] > processed_before and time.monotonic() - started >= REBUILD_SECONDS:
+                        break
+                    if not self._deleted(Path(relative).stem):
+                        try:
+                            manifest, content = self._manifest(relative, config)
+                        except FileNotFoundError:
+                            job["missing"] += 1
+                        except (OSError, ValueError, TypeError, UnicodeError):
+                            job["corrupt"] += 1
+                        else:
+                            db.execute("INSERT INTO captures VALUES(?,?,?,?,?,?,?)", (manifest["capture_id"], relative, manifest["title"], manifest["source_url"], content, manifest["retrieved_at"], manifest_hash(manifest)))
+                            db.execute("INSERT INTO captures_fts VALUES(?,?,?)", (manifest["capture_id"], manifest["title"], content))
+                    job["processed"] = position + 1
+                db.execute("UPDATE rebuild_job SET value=? WHERE id=1", (json.dumps(job),))
+            complete = job["processed"] == job["total"]
+            progress = {field: job[field] for field in ("id", "processed", "total")}
+            progress["complete"] = complete
+            if complete:
+                total, items, paths = archive_inventory(self.archive, MAX_ARCHIVE_ITEMS * 2)
+                if self._capture_inventory_hash(paths) != job["inventory_hash"]:
+                    self._invalidate_rebuild()
+                    raise ValueError("The archive changed during index rebuild. Start or resume a new rebuild.")
+                with closing(sqlite3.connect(stage)) as db, db:
+                    db.execute("DROP TABLE rebuild_queue")
+                    db.execute("DROP TABLE rebuild_job")
+                os.replace(stage, self.index)
+            with self._transaction() as (state, _):
+                state["rebuild_progress"] = progress
+                if complete:
+                    state.update(archive_bytes=total, archive_items=items, missing_count=job["missing"], corrupt_count=job["corrupt"],
+                                 last_error="Some archived sources are missing or invalid." if job["missing"] or job["corrupt"] else None,
+                                 write_unavailable=False, last_indexed_at=self.now().isoformat())
+            return self.status()

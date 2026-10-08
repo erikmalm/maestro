@@ -5,10 +5,11 @@ from datetime import datetime, timedelta
 from email.utils import parsedate_to_datetime
 import ipaddress
 import json
+from pathlib import Path
 import re
 import sqlite3
 import uuid
-from urllib.parse import unquote, urlsplit
+from urllib.parse import urlsplit
 
 import httpx
 
@@ -83,7 +84,11 @@ class WebSearch:
         return datetime.now(self.timezone)
 
     def read_state(self):
-        with closing(sqlite3.connect(self.database)) as db:
+        default = {"config": DEFAULT.copy(), "tested_at": None, "paused_until": None, "ledger": []}
+        database = Path(self.database).resolve()
+        if not database.is_file():
+            return default
+        with closing(sqlite3.connect(database.as_uri() + "?mode=ro", uri=True)) as db:
             try:
                 row = db.execute("SELECT value FROM web_search_state WHERE id=1").fetchone()
                 if row:
@@ -91,7 +96,7 @@ class WebSearch:
             except sqlite3.OperationalError as error:
                 if str(error) != "no such table: web_search_state":
                     raise
-        return {"config": DEFAULT.copy(), "tested_at": None, "paused_until": None, "ledger": []}
+        return default
 
     @contextmanager
     def transaction(self):
@@ -117,8 +122,24 @@ class WebSearch:
     def status(self, state=None):
         state = self.read_state() if state is None else state
         credential_status = credentials.status(ENDPOINT)
-        return {**self.summary(state), **credential_status,
-                "tested_at": state["tested_at"] if credential_status["credentials_present"] else None}
+        result = {**self.summary(state), **credential_status,
+                  "tested_at": state["tested_at"] if credential_status["credentials_present"] else None}
+        reason = None
+        if not result["credentials_present"]:
+            reason = "Add and test an Ollama search API key in Settings."
+        elif not result["config"]["enabled"]:
+            reason = "Enable Optional web search in Settings."
+        elif not result["tested_at"]:
+            reason = "Test the Ollama search key in Settings before using web search."
+        elif not result["remaining_today"]:
+            reason = "Daily web search limit reached. Adjust the search allowance in Settings."
+        elif result["paused_until"]:
+            reason = "Ollama search is paused after a rate limit. Wait until the cooldown ends."
+        elif any(entry["status"] == "reserved" for entry in state["ledger"]):
+            reason = "A web search is already running. Wait for it to finish."
+        elif state["ledger"] and (self.now() - datetime.fromisoformat(state["ledger"][-1]["at"])).total_seconds() < 5:
+            reason = "Search requests are spaced at least five seconds apart. Wait before trying again."
+        return {**result, "ready": reason is None, "unavailable_reason": reason}
 
     def configure(self, config, key, persist):
         with self.transaction() as state:
@@ -143,6 +164,20 @@ class WebSearch:
                 if entry["status"] == "reserved":
                     entry["status"] = "interrupted"  # Keep the attempt charged to its search allowance.
 
+    def _source_secrets(self, search_key):
+        """Snapshot known credentials before dispatch, including a remote provider."""
+        secrets = [search_key]
+        database = Path(self.database).resolve()
+        with closing(sqlite3.connect(database.as_uri() + "?mode=ro", uri=True)) as db:
+            if db.execute("SELECT 1 FROM sqlite_master WHERE name='provider_state'").fetchone():
+                row = db.execute("SELECT value FROM provider_state WHERE id=1").fetchone()
+                config = json.loads(row[0]).get("config", {}) if row else {}
+                if config.get("protocol") != "ollama" and config.get("base_url"):
+                    provider_key = credentials.read(config["base_url"])[0]
+                    if provider_key:
+                        secrets.append(provider_key)
+        return tuple(dict.fromkeys(secrets))
+
     def search(self, query, test=False):
         if not isinstance(query, str) or not 1 <= len(query.strip()) <= 512:
             raise ValueError("The model must provide one search query of at most 512 characters.")
@@ -154,6 +189,7 @@ class WebSearch:
                 raise ValueError("Enter a valid API key without control or non-ASCII characters.")
             if key in query:
                 raise ValueError("A search query must not contain the Ollama credential.")
+            source_secrets = self._source_secrets(key)
             summary = self.summary(state)
             if not test and not state["config"]["enabled"]:
                 raise ValueError("Automatic web search is disabled in Settings.")
@@ -199,21 +235,33 @@ class WebSearch:
             data = json.loads(body)
             if not isinstance(data, dict) or not isinstance(data.get("results"), list):
                 raise ValueError("Ollama search returned an invalid result list.")
+            # Retain the request's credential across rotations; decoded safety views
+            # must be checked before any source fields reach inference or public storage.
+            from backend.context_policy import contains_url_secret, contains_source_secret
+
             results = []
+            completeness = []
             for item in data["results"][:max_results]:
                 if not isinstance(item, dict) or not all(isinstance(item.get(k), str) for k in ("title", "url", "content")):
                     continue
-                if len(item["url"]) > 2048 or key in item["url"] or key in unquote(item["url"]) or not safe_url(item["url"]):
+                if (contains_url_secret(item["url"], source_secrets)
+                        or contains_source_secret(item["url"], source_secrets) or not safe_url(item["url"])):
                     continue
-                results.append({"title": credentials.redact(item["title"], key)[:200], "url": item["url"],
-                                "content": credentials.redact(item["content"], key)[:1200]})
+                clean = {field: item[field] for field in ("title", "content")}
+                for secret in source_secrets:
+                    clean = {field: credentials.redact(value, secret) for field, value in clean.items()}
+                if any(contains_source_secret(value, source_secrets) for value in clean.values()):
+                    continue
+                results.append({"title": clean["title"][:200], "url": item["url"], "content": clean["content"][:1200]})
+                completeness.append({"maestro_truncated": len(clean["content"]) > 1200, "full_page": False})
             if not results:
                 raise ValueError("Ollama search returned no usable public sources. No answer was generated from search.")
             with self.transaction() as state:
                 next(entry for entry in state["ledger"] if entry["id"] == request_id)["status"] = "completed"
                 if test and credentials.read(ENDPOINT)[0] == key:
                     state["tested_at"] = self.now().isoformat()
-            return {"query": query.strip(), "at": self.now().isoformat(), "sources": results}
+            return {"query": query.strip(), "at": self.now().isoformat(), "sources": results,
+                    "completeness": completeness}
         except Exception as error:
             with self.transaction() as state:
                 next(entry for entry in state["ledger"] if entry["id"] == request_id)["status"] = "failed"

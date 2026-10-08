@@ -1,6 +1,7 @@
 """Private storage, preview migration and local access checks with synthetic data."""
 
 from pathlib import Path
+from datetime import datetime, timezone
 from contextlib import closing
 from concurrent.futures import ThreadPoolExecutor
 import hashlib
@@ -66,7 +67,7 @@ class WorkspaceTests(unittest.TestCase):
         with patch.object(Provider, "chat") as generate:
             response = self.client.post("/api/chat", headers=self.headers, json={"chat_id": chat_id, "text": text})
             self.assertEqual(response.status_code, 200, response.text)
-            generate.assert_called_once_with(text, chat_id, "", "chat")
+            generate.assert_called_once_with(text, chat_id, "", "chat", "prefer_saved")
             too_long = self.client.post("/api/chat", headers=self.headers, json={"chat_id": chat_id, "text": text + "a"})
             self.assertEqual(too_long.status_code, 422, too_long.text)
             self.assertEqual(generate.call_count, 1)
@@ -472,6 +473,48 @@ class WorkspaceTests(unittest.TestCase):
             response = self.save(changed)
             self.assertEqual(response.status_code, 422, response.text)
             self.assertEqual(self.client.get("/api/context").json()["config"], config)
+
+    def test_connection_test_results_are_captured_under_broad_policy(self):
+        config = self.client.get("/api/context").json()["config"]
+        self.assertEqual(self.save({**config, "enabled": True}).status_code, 200)
+        result = {"query": "Ollama official web search documentation", "at": datetime.now(timezone.utc).isoformat(),
+                  "sources": [{"title": "Public synthetic search guide", "url": "https://new.example.org/guide", "content": "Public synthetic tool documentation."}]}
+        with patch.object(WebSearch, "search", return_value=result) as search:
+            response = self.client.post("/api/web-search/test", headers=self.headers, json={})
+        self.assertEqual(response.status_code, 200, response.text)
+        search.assert_called_once_with(result["query"], test=True)
+        status = self.client.get("/api/context").json()
+        self.assertEqual(status["indexed_count"], 1)
+        self.assertEqual(status["last_capture"]["sources_saved"], 1)
+        self.assertGreater(status["last_capture"]["new_bytes"], 0)
+
+    def test_connection_test_preserves_search_excerpt_truncation_metadata(self):
+        config = self.client.get("/api/context").json()["config"]
+        self.assertEqual(self.save({**config, "enabled": True}).status_code, 200)
+        result = {"query": "Ollama official web search documentation", "at": datetime.now(timezone.utc).isoformat(),
+                  "sources": [{"title": "Public synthetic guide", "url": "https://new.example.org/guide", "content": "A bounded excerpt."}],
+                  "completeness": [{"maestro_truncated": True}]}
+        with patch.object(WebSearch, "search", return_value=result):
+            response = self.client.post("/api/web-search/test", headers=self.headers, json={})
+        self.assertEqual(response.status_code, 200, response.text)
+        captures = self.client.post("/api/context/search", headers=self.headers,
+                                    json={"query": "bounded excerpt"}).json()
+        source = self.client.get("/api/context/sources/" + captures["sources"][0]["capture_id"]).json()
+        self.assertTrue(source["completeness"]["maestro_truncated"])
+        self.assertFalse(source["completeness"]["full_page"])
+
+    def test_connection_test_preserves_legacy_restricted_capture_behavior(self):
+        config = self.client.get("/api/context").json()["config"]
+        configured = {**config, "enabled": True, "capture_policy": "approved_sources", "public_sources": ["https://docs.example.org/"]}
+        self.assertEqual(self.save(configured).status_code, 200)
+        result = {"query": "Ollama official web search documentation", "at": datetime.now(timezone.utc).isoformat(),
+                  "sources": [{"title": "Synthetic documentation", "url": "https://docs.example.org/guide", "content": "Public synthetic evidence."}]}
+        with patch.object(WebSearch, "search", return_value=result):
+            response = self.client.post("/api/web-search/test", headers=self.headers, json={})
+        self.assertEqual(response.status_code, 200, response.text)
+        status = self.client.get("/api/context").json()
+        self.assertEqual(status["indexed_count"], 0)
+        self.assertIsNone(status["last_capture"])
 
     def test_archive_configure_does_not_block_private_validation_holding_sqlite(self):
         # Reflection validates drafts while holding the private write transaction.
