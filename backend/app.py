@@ -1,6 +1,6 @@
 """Local workspace with configurable live chat and persistent to-dos."""
 
-from contextlib import closing, contextmanager, asynccontextmanager
+from contextlib import closing, contextmanager, asynccontextmanager, ExitStack
 import asyncio
 from datetime import datetime
 import hashlib
@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Literal
 import secrets
 import sqlite3
+import threading
 import uuid
 from zoneinfo import ZoneInfo
 
@@ -24,6 +25,8 @@ from backend.provider import Provider
 from backend import credentials
 from backend.capabilities import CAPABILITIES
 from backend.web_search import WebSearch, ENDPOINT as SEARCH_ENDPOINT
+from backend.context_store import ContextStore
+from backend.context_policy import configuration as archive_configuration, contains_source_secret
 from backend.storage import workspace_owner
 from backend.memory import MAX_CONTENT, MemoryStore
 from backend.work_config import WorkConfig, config_value
@@ -152,6 +155,7 @@ def snapshot(state: dict, chat_id: str | None = None) -> dict:
         "usage": service.usage(provider_state),
         "provider": service.status(provider_state),
         "web_search": WebSearch(DATABASE, TIMEZONE).status(),
+        "context_archive": context_store().status(),
         "memories": MemoryStore(DATABASE, TIMEZONE).list(),
         "work": work_status(state),
         "capabilities": {"mode": "local", **CAPABILITIES, "secure_credentials": os.name == "nt"},
@@ -241,6 +245,30 @@ class WebSearchSetup(StrictModel):
     persist: bool = True
 
 
+class ContextArchiveConfig(StrictModel):
+    enabled: bool = Field(default=False, strict=True)
+    capture_policy: Literal["approved_sources", "all_public"] = "approved_sources"
+    public_sources: list[str] = Field(default_factory=list, max_length=100)
+    reuse_hours: int = Field(default=24, ge=1, le=168, strict=True)
+    max_bytes: int = Field(default=10737418240, ge=1048576, le=107374182400, strict=True)
+    max_items: int = Field(default=200000, ge=100, le=200000, strict=True)
+
+
+_context_lock = threading.RLock()
+_archive_config_lock = threading.RLock()
+
+
+def context_store():
+    # The same instance owns the archive across lifespan, provider and API threads.
+    identity = (str(DATABASE.resolve()), os.environ.get("MAESTRO_CONTEXT_ARCHIVE_DIR", ""))
+    with _context_lock:
+        current = getattr(app.state, "context_store", None)
+        if current is None or getattr(app.state, "context_store_identity", None) != identity:
+            current = ContextStore(DATABASE)
+            app.state.context_store, app.state.context_store_identity = current, identity
+        return current
+
+
 def provider():
     return Provider(DATABASE, TIMEZONE)
 
@@ -255,21 +283,36 @@ def conflict_errors():
 
 @asynccontextmanager
 async def lifespan(application):
-    with workspace_owner(DATABASE.parent):
+    with workspace_owner(DATABASE.parent), ExitStack() as archive_ownership:
         read_workspace()
-        provider().recover()
-        WebSearch(DATABASE, TIMEZONE).recover()
-        MemoryStore(DATABASE, TIMEZONE).initialize()
-        reflection = ReflectionStore(DATABASE, TIMEZONE)
-        reflection.initialize()
-        reflection.recover()
-        stop = asyncio.Event()
-        worker = asyncio.create_task(ReflectionWorker(reflection, provider(), safe_private_content).run(stop))
+        store = context_store()
+        application.state.archive_ownership = archive_ownership
+        application.state.archive_owner = False
         try:
-            yield
+            if store.status()["config"]["enabled"]:
+                try:
+                    archive_ownership.enter_context(store.archive_owner())
+                    store.initialize()
+                    application.state.archive_owner = True
+                except (ValueError, OSError):
+                    archive_ownership.close()
+                    store.record_error()
+            provider().recover()
+            WebSearch(DATABASE, TIMEZONE).recover()
+            MemoryStore(DATABASE, TIMEZONE).initialize()
+            reflection = ReflectionStore(DATABASE, TIMEZONE)
+            reflection.initialize()
+            reflection.recover()
+            stop = asyncio.Event()
+            worker = asyncio.create_task(ReflectionWorker(reflection, provider(), safe_private_content).run(stop))
+            try:
+                yield
+            finally:
+                stop.set()
+                await worker
         finally:
-            stop.set()
-            await worker
+            application.state.archive_ownership = None
+            application.state.archive_owner = False
 
 
 app = FastAPI(title="Maestro", docs_url=None, redoc_url=None, openapi_url=None, lifespan=lifespan)
@@ -365,7 +408,7 @@ def safe_private_content(content):
             key = credentials.read(endpoint)[0]
         except ValueError:
             continue
-        if key and key in content:
+        if contains_source_secret(content, (key,)):
             raise ValueError("Remove credentials before saving.")
     return content
 
@@ -486,6 +529,47 @@ def get_provider():
 @app.get("/api/web-search")
 def get_web_search():
     return WebSearch(DATABASE, TIMEZONE).status()
+
+
+@app.get("/api/context")
+def get_context_archive():
+    return context_store().status()
+
+
+@app.put("/api/context")
+def configure_context_archive(entry: ContextArchiveConfig):
+    # Factory access must remain available to reflection validators holding SQLite.
+    with conflict_errors(), _archive_config_lock:
+        for scope in entry.public_sources:
+            safe_private_content(scope)
+        config = archive_configuration(entry.model_dump())
+        store = context_store()
+        ownership = getattr(app.state, "archive_ownership", None)
+        # Order the initial claim failure receipt with direct store retries too.
+        with store._write_lock:
+            acquired = False
+            try:
+                if config["enabled"] and ownership is not None and not getattr(app.state, "archive_owner", False):
+                    try:
+                        ownership.enter_context(store.archive_owner())
+                    except (ValueError, OSError):
+                        try:
+                            store.record_error()
+                        except (OSError, sqlite3.Error):
+                            pass
+                        raise ValueError("The context archive is unavailable. Check its directory and writer ownership.") from None
+                    acquired = True
+                result = store.configure(config)
+                if ownership is not None:
+                    if not config["enabled"]:
+                        ownership.close()
+                    app.state.archive_owner = config["enabled"]
+                return result
+            except Exception:
+                if acquired:
+                    ownership.close()
+                    app.state.archive_owner = False
+                raise
 
 
 @app.put("/api/web-search")
