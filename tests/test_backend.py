@@ -464,6 +464,196 @@ class WorkspaceTests(unittest.TestCase):
             self.assertFalse(claim.exists())
         self.assertFalse(claim.exists())
 
+    def test_initial_lifetime_claim_denial_marks_empty_archive_unavailable_and_retry_recovers(self):
+        store = backend.context_store()
+        store.archive.mkdir(parents=True)
+        store.initialize()
+        before = store.status()
+        self.assertTrue(before["available"])
+        claim = store.archive / "writer-owner.tmp"
+        config = {**before["config"], "enabled": True}
+        original_open = os.open
+
+        def denied_claim(path, *args, **kwargs):
+            if Path(path) == claim:
+                raise PermissionError("Synthetic private claim denial with a secret path")
+            return original_open(path, *args, **kwargs)
+
+        with self.client:
+            with patch("backend.storage.os.open", side_effect=denied_claim):
+                response = self.save(config)
+            self.assertEqual(response.status_code, 409, response.text)
+            unavailable = self.client.get("/api/context").json()
+            self.assertFalse(unavailable["available"])
+            self.assertEqual(unavailable["config"], before["config"])
+            self.assertTrue(unavailable["last_error"])
+            self.assertNotIn("Synthetic private", response.text + json.dumps(unavailable))
+            self.assertFalse(backend.app.state.archive_owner)
+            self.assertFalse(claim.exists())
+            with closing(sqlite3.connect(backend.DATABASE)) as db:
+                saved = json.loads(db.execute("SELECT value FROM context_state WHERE id=1").fetchone()[0])
+                self.assertTrue(saved["write_unavailable"])
+                self.assertEqual(saved["last_error"], unavailable["last_error"])
+                self.assertEqual(saved["config"], before["config"])
+                self.assertEqual(db.execute("SELECT * FROM context_queries").fetchall(), [])
+            recovered = self.save(config)
+            self.assertEqual(recovered.status_code, 200, recovered.text)
+            self.assertEqual((recovered.json()["available"], recovered.json()["last_error"]), (True, None))
+            self.assertTrue(backend.app.state.archive_owner)
+            self.assertIsNotNone(backend.app.state.archive_ownership)
+            self.assertTrue(claim.is_file())
+        self.assertFalse(claim.exists())
+        self.assertFalse(backend.app.state.archive_owner)
+        self.assertIsNone(backend.app.state.archive_ownership)
+
+    def test_semantically_invalid_archive_settings_do_not_attempt_initial_ownership(self):
+        store = backend.context_store()
+        store.archive.mkdir(parents=True)
+        store.initialize()
+        config = store.status()["config"]
+        invalid = [
+            {**config, "enabled": True, "capture_policy": "approved_sources", "public_sources": []},
+            {**config, "enabled": True, "public_sources": ["https://127.0.0.1/private/"]},
+        ]
+        with self.client:
+            before = self.client.get("/api/context").json()
+            with closing(sqlite3.connect(backend.DATABASE)) as db:
+                previous_state = db.execute("SELECT value FROM context_state WHERE id=1").fetchone()
+                previous_queries = db.execute("SELECT * FROM context_queries").fetchall()
+            with patch.object(store, "archive_owner", side_effect=AssertionError("Invalid settings attempted ownership")) as owner:
+                for settings in invalid:
+                    with self.subTest(policy=settings["capture_policy"]):
+                        response = self.save(settings)
+                        self.assertEqual(response.status_code, 409, response.text)
+                        self.assertEqual(self.client.get("/api/context").json(), before)
+                        self.assertFalse(backend.app.state.archive_owner)
+                        self.assertFalse((store.archive / "writer-owner.tmp").exists())
+            owner.assert_not_called()
+            with closing(sqlite3.connect(backend.DATABASE)) as db:
+                self.assertEqual(db.execute("SELECT value FROM context_state WHERE id=1").fetchone(), previous_state)
+                self.assertEqual(db.execute("SELECT * FROM context_queries").fetchall(), previous_queries)
+
+    def test_raw_initial_ownership_oserror_is_bounded_and_preserves_pinned_sources(self):
+        store = backend.context_store()
+        # Seed after disabled startup so the next API save still needs its first
+        # lifespan claim, while an existing capture and query pin can be checked.
+        with self.client:
+            config = {**store.status()["config"], "enabled": True}
+            store.configure(config)
+            source = store.capture("Synthetic API ownership evidence", store.now().isoformat(), [{
+                "title": "Synthetic public evidence", "url": "https://docs.example.org/public/evidence",
+                "content": "Synthetic immutable excerpt retained through a writer failure.", "maestro_truncated": False,
+            }], 3, ())["sources"][0]
+            before = store.status()
+            with closing(sqlite3.connect(backend.DATABASE)) as db:
+                pins = db.execute("SELECT * FROM context_queries").fetchall()
+            self.assertTrue(pins)
+            private_error = "Synthetic private storage path and secret diagnostic"
+            with patch.object(store, "archive_owner", side_effect=OSError(private_error)):
+                response = self.save(config)
+            self.assertEqual(response.status_code, 409, response.text)
+            unavailable = self.client.get("/api/context").json()
+            self.assertEqual((unavailable["available"], unavailable["config"]), (False, before["config"]))
+            self.assertTrue(unavailable["last_error"])
+            self.assertNotIn(private_error, response.text + json.dumps(unavailable))
+            self.assertFalse(backend.app.state.archive_owner)
+            self.assertFalse((store.archive / "writer-owner.tmp").exists())
+            self.assertEqual(store.get_capture(source["capture_id"], source["content_hash"], source["manifest_hash"]), source)
+            with closing(sqlite3.connect(backend.DATABASE)) as db:
+                self.assertEqual(db.execute("SELECT * FROM context_queries").fetchall(), pins)
+                saved = json.loads(db.execute("SELECT value FROM context_state WHERE id=1").fetchone()[0])
+                self.assertEqual((saved["write_unavailable"], saved["last_error"]), (True, unavailable["last_error"]))
+                self.assertNotIn(private_error, json.dumps(saved))
+            recovered = self.save(config)
+            self.assertEqual(recovered.status_code, 200, recovered.text)
+            self.assertEqual((recovered.json()["available"], recovered.json()["last_error"]), (True, None))
+            self.assertTrue(backend.app.state.archive_owner)
+            self.assertTrue((store.archive / "writer-owner.tmp").is_file())
+            with closing(sqlite3.connect(backend.DATABASE)) as db:
+                self.assertEqual(db.execute("SELECT * FROM context_queries").fetchall(), pins)
+            self.assertEqual(store.get_capture(source["capture_id"], source["content_hash"], source["manifest_hash"]), source)
+        self.assertFalse((store.archive / "writer-owner.tmp").exists())
+
+    def test_initial_claim_failure_receipt_cannot_overwrite_a_successful_direct_retry(self):
+        store = backend.context_store()
+        store.archive.mkdir(parents=True)
+        store.initialize()
+        config = {**store.status()["config"], "enabled": True}
+        claim = store.archive / "writer-owner.tmp"
+        original_open, original_error = os.open, store.record_error
+        paused, release = threading.Event(), threading.Event()
+        denied, responses, errors = [], [], []
+
+        def deny_first_claim(path, *args, **kwargs):
+            if Path(path) == claim and not denied:
+                denied.append(True)
+                raise PermissionError("Synthetic first API claim denial")
+            return original_open(path, *args, **kwargs)
+
+        def paused_error(*args, **kwargs):
+            paused.set()
+            if not release.wait(5):
+                raise TimeoutError("The API failure receipt was not released.")
+            return original_error(*args, **kwargs)
+
+        def save_failing():
+            try:
+                responses.append(self.save(config))
+            except Exception as error:
+                errors.append(error)
+
+        with self.client, patch("backend.storage.os.open", side_effect=deny_first_claim), \
+                patch.object(store, "record_error", side_effect=paused_error):
+            worker = threading.Thread(target=save_failing, daemon=True)
+            acquired = False
+            try:
+                worker.start()
+                self.assertTrue(paused.wait(5), "The initial API failure did not record its receipt.")
+                acquired = store._write_lock.acquire(blocking=False)
+                if acquired:
+                    self.assertTrue(store.configure(config)["available"])
+            finally:
+                if acquired:
+                    store._write_lock.release()
+                release.set()
+                worker.join(5)
+            self.assertFalse(worker.is_alive(), "The API failure receipt did not finish.")
+            self.assertEqual(errors, [], repr(errors))
+            self.assertEqual([response.status_code for response in responses], [409])
+            if not acquired:
+                self.assertTrue(store.configure(config)["available"])
+            final = store.status()
+            self.assertEqual((final["available"], final["last_error"], final["config"]), (True, None, config))
+            self.assertFalse(claim.exists())
+
+    def test_initial_claim_refusal_stays_bounded_when_failure_receipt_cannot_be_saved(self):
+        store = backend.context_store()
+        store.archive.mkdir(parents=True)
+        store.initialize()
+        config = store.status()["config"]
+        private_error = "Synthetic private ownership diagnostic"
+        with self.client:
+            with closing(sqlite3.connect(backend.DATABASE)) as db:
+                previous_state = db.execute("SELECT value FROM context_state WHERE id=1").fetchone()
+                previous_queries = db.execute("SELECT * FROM context_queries").fetchall()
+            for failure in (PermissionError("Synthetic private receipt path"),
+                            sqlite3.OperationalError("Synthetic private database diagnostic")):
+                with self.subTest(receipt_failure=type(failure).__name__), \
+                        patch.object(store, "archive_owner", side_effect=ValueError(private_error)), \
+                        patch.object(store, "record_error", side_effect=failure) as record:
+                    response = self.save({**config, "enabled": True})
+                self.assertEqual(response.status_code, 409, response.text)
+                self.assertNotIn(private_error, response.text)
+                self.assertNotIn(str(failure), response.text)
+                self.assertLess(len(response.json()["detail"]), 200)
+                record.assert_called_once_with()
+                self.assertFalse(backend.app.state.archive_owner)
+                self.assertFalse((store.archive / "writer-owner.tmp").exists())
+                self.assertEqual(self.client.get("/api/context").json()["config"], config)
+                with closing(sqlite3.connect(backend.DATABASE)) as db:
+                    self.assertEqual(db.execute("SELECT value FROM context_state WHERE id=1").fetchone(), previous_state)
+                    self.assertEqual(db.execute("SELECT * FROM context_queries").fetchall(), previous_queries)
+
     def test_capture_measurements_are_owned_by_the_server(self):
         config = self.client.get("/api/context").json()["config"]
         for changed in ({**config, "capture_policy": "all_private"},

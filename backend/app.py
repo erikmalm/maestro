@@ -26,7 +26,7 @@ from backend import credentials
 from backend.capabilities import CAPABILITIES
 from backend.web_search import WebSearch, ENDPOINT as SEARCH_ENDPOINT
 from backend.context_store import ContextStore
-from backend.context_policy import contains_source_secret
+from backend.context_policy import configuration as archive_configuration, contains_source_secret
 from backend.storage import workspace_owner
 from backend.memory import MAX_CONTENT, MemoryStore
 from backend.work_config import WorkConfig, config_value
@@ -542,24 +542,34 @@ def configure_context_archive(entry: ContextArchiveConfig):
     with conflict_errors(), _archive_config_lock:
         for scope in entry.public_sources:
             safe_private_content(scope)
+        config = archive_configuration(entry.model_dump())
         store = context_store()
         ownership = getattr(app.state, "archive_ownership", None)
-        acquired = False
-        try:
-            if entry.enabled and ownership is not None and not getattr(app.state, "archive_owner", False):
-                ownership.enter_context(store.archive_owner())
-                acquired = True
-            result = store.configure(entry.model_dump())
-            if ownership is not None:
-                if not entry.enabled:
+        # Order the initial claim failure receipt with direct store retries too.
+        with store._write_lock:
+            acquired = False
+            try:
+                if config["enabled"] and ownership is not None and not getattr(app.state, "archive_owner", False):
+                    try:
+                        ownership.enter_context(store.archive_owner())
+                    except (ValueError, OSError):
+                        try:
+                            store.record_error()
+                        except (OSError, sqlite3.Error):
+                            pass
+                        raise ValueError("The context archive is unavailable. Check its directory and writer ownership.") from None
+                    acquired = True
+                result = store.configure(config)
+                if ownership is not None:
+                    if not config["enabled"]:
+                        ownership.close()
+                    app.state.archive_owner = config["enabled"]
+                return result
+            except Exception:
+                if acquired:
                     ownership.close()
-                app.state.archive_owner = entry.enabled
-            return result
-        except Exception:
-            if acquired:
-                ownership.close()
-                app.state.archive_owner = False
-            raise
+                    app.state.archive_owner = False
+                raise
 
 
 @app.put("/api/web-search")
