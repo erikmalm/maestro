@@ -24,6 +24,8 @@ Cold construction/state/status reads create no storage. Enabled initialization r
 
 API configuration validates source scopes and limits before claiming lifetime ownership. Initial claim refusals record unavailable status and a fixed error while retaining the previous settings; failure recording shares the mutation lock with retries. A successful enable clears the error, and invalid settings leave readiness and ownership unchanged.
 
+API scope checks inspect both the original input and normalized URLs before saving. Source-list and pinned-read responses recheck their fields against current provider/search credentials, including encoded forms and normalized source URLs: credentials may have been configured after capture. Listing skips blocked metadata while preserving its continuation cursor and performs no source-body read. Pinned opening rejects blocked captures with a generic unavailable response rather than redacting bytes presented as exact evidence. These checks do not modify archived files or hashes.
+
 ## File access and publication
 
 Callers supply a resolved archive root, enforce ownership/capacity and choose read limits. Paths reject traversal, drive/alternate-stream syntax, reserved Windows names, symlinks and junctions, including replaced roots and ancestors. Reads consume at most the limit plus one byte and reject oversized or excessively nested JSON documents.
