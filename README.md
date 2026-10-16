@@ -2,6 +2,8 @@
 
 A local web interface for persistent chats with your chosen model, usage tracking and to-dos. Workspace, Tasks, Memory and Settings expose live conversation, user-created and reviewed AI-created tasks, private memory and configuration.
 
+The [architectural overview](docs/ARCHITECTURE.md) defines the planned reviewed search workflow, source storage and shared limits separately from implemented behavior. New UI work follows its [React page and component composition](docs/ARCHITECTURE.md#frontend-composition-and-visible-increments), using small JS/JSX pages, cohesive data hooks and reusable parameterized components.
+
 Maestro saves one provider connection with chat and orchestrator models. Local chat can use either as its default, with per-message model choices, Markdown and private memory. Opt-in background reflection curates reviewed memories automatically, maintains working notes and provides a private journal. It can also create independently reviewed task suggestions. Task execution and delegation remain future work. Optional Ollama web search is the only model-selected tool. The [development plan](DEVELOPMENT_PLAN.md) and [memory/reflection architecture](docs/MEMORY_AND_REFLECTION.md) describe working behavior and the next increments.
 
 ## Run locally
