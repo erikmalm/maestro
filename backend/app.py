@@ -26,7 +26,7 @@ from backend import credentials
 from backend.capabilities import CAPABILITIES
 from backend.web_search import WebSearch, ENDPOINT as SEARCH_ENDPOINT
 from backend.context_store import ContextStore
-from backend.context_policy import configuration as archive_configuration, contains_source_secret
+from backend.context_policy import configuration as archive_configuration, contains_source_secret, public_url
 from backend.storage import workspace_owner
 from backend.memory import MAX_CONTENT, MemoryStore
 from backend.work_config import WorkConfig, config_value
@@ -400,7 +400,7 @@ def delete_chat(chat_id: str):
 
 
 def safe_private_content(content):
-    # Memory and model choices must not turn configured credentials into context.
+    # Keep configured credentials out of saved content and source responses.
     config = provider().read_state()["config"]
     endpoints = (() if config["protocol"] == "ollama" else (config["base_url"],)) + (SEARCH_ENDPOINT,)
     for endpoint in endpoints:
@@ -411,6 +411,14 @@ def safe_private_content(content):
         if contains_source_secret(content, (key,)):
             raise ValueError("Remove credentials before saving.")
     return content
+
+
+def safe_archived_source(source):
+    """Screen current credentials without changing archived fields or pins."""
+    fields = (source["title"], source["url"],
+              public_url(source["url"], allow_query=True, allow_http=True), source.get("content", ""))
+    safe_private_content("\n".join(fields))
+    return source
 
 
 @app.patch("/api/chats/{chat_id}/messages/{message_id}/feedback")
@@ -542,9 +550,16 @@ def list_context_sources(limit: int = Query(default=25, ge=1, le=50),
     with conflict_errors():
         store = context_store()
     try:
-        return store.list_captures(limit, cursor)
+        result = store.list_captures(limit, cursor)
     except ValueError:
         raise HTTPException(422, "Use a valid source page cursor.") from None
+    visible = []
+    for source in result["sources"]:
+        try:
+            visible.append(safe_archived_source(source))
+        except ValueError:
+            result["skipped_count"] += 1
+    return {**result, "sources": visible}
 
 
 @app.get("/api/context/sources/{capture_id}")
@@ -552,7 +567,7 @@ def get_context_source(capture_id: str,
                        content_hash: str = Query(pattern=r"^[a-f0-9]{64}$"),
                        manifest_hash: str = Query(pattern=r"^[a-f0-9]{64}$")):
     try:
-        return context_store().get_capture(capture_id, content_hash, manifest_hash)
+        return safe_archived_source(context_store().get_capture(capture_id, content_hash, manifest_hash))
     except (KeyError, OSError, sqlite3.Error, ValueError, TypeError, UnicodeError):
         raise HTTPException(404, "This saved source is unavailable or no longer eligible. Refresh the source list.") from None
 
@@ -564,6 +579,8 @@ def configure_context_archive(entry: ContextArchiveConfig):
         for scope in entry.public_sources:
             safe_private_content(scope)
         config = archive_configuration(entry.model_dump())
+        for scope in config["public_sources"]:
+            safe_private_content(scope)
         store = context_store()
         ownership = getattr(app.state, "archive_ownership", None)
         # Order the initial claim failure receipt with direct store retries too.

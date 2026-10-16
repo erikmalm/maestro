@@ -729,6 +729,36 @@ class WorkspaceTests(unittest.TestCase):
                 self.assertEqual(self.client.get("/api/context").json()["config"], config)
         dispatch.assert_not_called()
 
+    def test_normalized_public_source_scope_cannot_store_a_known_search_credential(self):
+        key = "synthetic-normalized-search-key"
+        raw_scope = "https://" + key + ".example.org/public/"
+        uppercase_scope = "https://" + key.upper() + ".EXAMPLE.ORG/public/"
+        self.enterContext(patch.object(backend.credentials, "read", return_value=(key, "synthetic")))
+        store = backend.context_store()
+        with self.client:
+            before_status = self.client.get("/api/context").json()
+            config = before_status["config"]
+            self.assertEqual(backend.archive_configuration({**config, "public_sources": [uppercase_scope]})["public_sources"],
+                             [raw_scope])
+            before_workspace = self.workspace()
+            before_database = backend.DATABASE.read_bytes()
+            with (patch.object(store, "archive_owner", wraps=store.archive_owner) as owner,
+                  patch.object(store, "configure", wraps=store.configure) as configure):
+                for scope in (raw_scope, uppercase_scope):
+                    for enabled in (False, True):
+                        with self.subTest(normalized=scope == uppercase_scope, enabled=enabled):
+                            response = self.save({**config, "enabled": enabled, "public_sources": [scope]})
+                            self.assertEqual(response.status_code, 409, response.text)
+                            self.assertNotIn(key, response.text)
+                            self.assertNotIn(scope, response.text)
+                            owner.assert_not_called()
+                            configure.assert_not_called()
+                            self.assertEqual(self.client.get("/api/context").json(), before_status)
+                            self.assertEqual(self.workspace(), before_workspace)
+                            self.assertEqual(backend.DATABASE.read_bytes(), before_database)
+                            self.assertFalse(backend.app.state.archive_owner)
+                            self.assertFalse(store.archive.exists())
+
 
 if __name__ == "__main__":
     unittest.main()
