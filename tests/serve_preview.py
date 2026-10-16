@@ -71,16 +71,14 @@ with tempfile.TemporaryDirectory(prefix="maestro-browser-") as directory:
                     assert request["options"]["num_predict"] <= 64
                     return self.reply(200, {"done": True, "message": {"role": "assistant", "content": self.title(request["messages"][1:])},
                         "prompt_eval_count": 20, "eval_count": 5})
+                if request["messages"][-1]["role"] == "tool":
+                    return self.reply(200, {"done": True, "message": {"role": "assistant", "content": "Synthetic search-assisted answer [1]"},
+                        "prompt_eval_count": 100, "eval_count": 20})
                 current = next(message["content"] for message in reversed(request["messages"]) if message["role"] == "user")
                 if request.get("tools") and current == "Find current Ollama web search documentation":
                     return self.reply(200, {"done": True, "message": {"role": "assistant", "content": "",
                         "tool_calls": [{"function": {"name": "web_search", "arguments": {"query": "Ollama official web search documentation"}}}]},
                         "prompt_eval_count": 100, "eval_count": 10})
-                if request["messages"][-1]["role"] == "tool":
-                    if request.get("tools"):
-                        return self.reply(400, {"error": "Unexpected second tool round"})
-                    return self.reply(200, {"done": True, "message": {"role": "assistant", "content": "Synthetic search-assisted answer [1]"},
-                        "prompt_eval_count": 100, "eval_count": 20})
                 history = [message for message in request["messages"] if message["role"] != "system"]
                 reply = "Synthetic Ollama received: " + history[-1]["content"]
                 if len(history) > 1:

@@ -844,6 +844,9 @@ test("verified search key enables bounded local-model search with persistent sou
   await page
     .getByLabel("Orchestrator default model")
     .selectOption("synthetic-devstral:latest");
+  await page.getByText("Local worker settings", { exact: true }).click();
+  await page.getByLabel("Context size (tokens)").fill("32768");
+  await page.getByLabel("Maximum output tokens per reply").fill("4096");
   await page
     .getByRole("button", { name: "Save connection", exact: true })
     .click();

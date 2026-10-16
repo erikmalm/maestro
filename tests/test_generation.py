@@ -11,6 +11,7 @@ from unittest.mock import patch
 
 from backend.memory import MemoryStore
 from backend.provider import DEFAULT, LocalUncertain, Provider, ProviderFailure
+from backend.web_search import DEFAULT as SEARCH_DEFAULT
 
 
 class GenerationTests(unittest.TestCase):
@@ -454,7 +455,7 @@ class GenerationTests(unittest.TestCase):
                 db.execute("UPDATE workspace SET value=?", (json.dumps(workspace),))
             self.provider.generate("", "synthetic-chat", title_for=result)
             with patch("backend.provider.WebSearch") as search:
-                search.return_value.read_state.return_value = {"config": {"enabled": True}}
+                search.return_value.read_state.return_value = {"config": {**SEARCH_DEFAULT, "enabled": True}}
                 search.return_value.status.return_value = {"credentials_present": True, "tested_at": "tested",
                                                            "remaining_today": 1, "paused_until": None}
                 self.provider.configure({**self.config, "ollama_context_tokens": 8192}, "", False)
@@ -510,7 +511,7 @@ class GenerationTests(unittest.TestCase):
         ledger = self.provider.read_state()["ledger"]
         self.provider.configure({**self.config, "ollama_context_tokens": 8192}, "", False)
         with patch("backend.provider.WebSearch") as search, patch("backend.provider.network", side_effect=self.network) as network:
-            search.return_value.read_state.return_value = {"config": {"enabled": True}}
+            search.return_value.read_state.return_value = {"config": {**SEARCH_DEFAULT, "enabled": True}}
             search.return_value.status.return_value = {"credentials_present": True, "tested_at": "tested",
                                                        "remaining_today": 1, "paused_until": None}
             with self.assertRaisesRegex(ValueError, "Start a new chat"):
