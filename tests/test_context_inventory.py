@@ -180,6 +180,25 @@ class ContextInventoryTests(unittest.TestCase):
                 with closing(sqlite3.connect(self.store.index)) as db, db:
                     db.execute(f"UPDATE captures SET {field}=?", (saved,))
 
+    def test_redirected_index_manifest_paths_are_skipped_before_any_archive_read(self):
+        redirected, legitimate = self.seed(2)
+        legitimate_path = self.manifest_path(legitimate).relative_to(self.archive).as_posix()
+        object_path = ("objects/sha256/" + redirected["content_hash"][:2] + "/"
+                       + redirected["content_hash"] + ".txt")
+        for wrong_path in (object_path, legitimate_path):
+            with self.subTest(wrong_path=wrong_path):
+                with closing(sqlite3.connect(self.store.index)) as db, db:
+                    db.execute("UPDATE captures SET manifest=? WHERE id=?", (wrong_path, redirected["capture_id"]))
+                with (patch("backend.context_store.read_archive_json", wraps=storage.read_archive_json) as json_read,
+                      patch("backend.storage.read_archive", wraps=storage.read_archive) as archive_read):
+                    result = self.store.list_captures()
+                self.assertEqual(result["state"], "ready")
+                self.assertEqual(result["skipped_count"], 1)
+                self.assertEqual([source["capture_id"] for source in result["sources"]], [legitimate["capture_id"]])
+                expected_read = (self.archive, legitimate_path, MANIFEST_BYTES)
+                self.assertEqual([call.args for call in json_read.call_args_list], [expected_read])
+                self.assertEqual([call.args for call in archive_read.call_args_list], [expected_read])
+
     def test_missing_oversized_and_invalid_manifests_are_skipped(self):
         source = self.seed()[0]
         path = self.manifest_path(source)

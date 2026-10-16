@@ -182,6 +182,11 @@ class ContextStore:
                 previous = self._state()["config"]
                 if config["enabled"]:
                     self._format()
+                    # Upgrade an existing local index during explicit setup,
+                    # never as a side effect of read-only inventory requests.
+                    if self.index.is_file():
+                        with closing(self._index_connection()) as db, db:
+                            pass
                     # Saving a lower cap remains possible for an already larger archive.
                     total, items, _ = archive_inventory(self.archive, MAX_ARCHIVE_ITEMS * 2)
                 with self._transaction() as (state, db):
@@ -205,6 +210,7 @@ class ContextStore:
             db.execute("CREATE TABLE IF NOT EXISTS captures(id TEXT PRIMARY KEY,manifest TEXT NOT NULL,title TEXT NOT NULL,url TEXT NOT NULL,content TEXT NOT NULL,at TEXT NOT NULL,manifest_hash TEXT)")
             if "manifest_hash" not in {row[1] for row in db.execute("PRAGMA table_info(captures)")}:
                 db.execute("ALTER TABLE captures ADD COLUMN manifest_hash TEXT")
+            db.execute("CREATE INDEX IF NOT EXISTS captures_by_retrieval ON captures(at DESC,id DESC)")
             db.execute("CREATE VIRTUAL TABLE IF NOT EXISTS captures_fts USING fts5(id UNINDEXED,title,content)")
         except sqlite3.Error:
             db.close()
@@ -250,7 +256,7 @@ class ContextStore:
                     return {**result, "state": "disabled"}
                 if not self.archive.is_dir() or not self.index.is_file():
                     raise ValueError()
-                clause, parameters = ("WHERE at < ? OR (at = ? AND id < ?)", [position[0], *position]) if position else ("", [])
+                clause, parameters = ("WHERE (at,id) < (?,?)", position) if position else ("", ())
                 with closing(sqlite3.connect(self.index.as_uri() + "?mode=ro", uri=True)) as db:
                     deadline, steps = time.monotonic() + 2, 0
 
@@ -261,7 +267,7 @@ class ContextStore:
 
                     db.set_progress_handler(bounded_query, 1000)
                     rows = db.execute(
-                        "SELECT id,manifest,title,url,at,manifest_hash FROM captures " + clause +
+                        "SELECT id,manifest,title,url,at,manifest_hash FROM captures INDEXED BY captures_by_retrieval " + clause +
                         " ORDER BY at DESC,id DESC LIMIT ?", [*parameters, INVENTORY_SCAN_LIMIT + 1]).fetchall()
                 consumed, last = 0, None
                 for capture_id, relative, title, url, at, digest in rows[:INVENTORY_SCAN_LIMIT]:
@@ -272,6 +278,8 @@ class ContextStore:
                     consumed += 1
                     last = (at, capture_id)
                     try:
+                        if relative != "records/captures/" + at[:7] + "/" + capture_id + ".json":
+                            raise ValueError()
                         manifest = validate_capture_manifest(read_archive_json(self.archive, relative, MANIFEST_BYTES), relative, config)
                         if (self._deleted(capture_id) or manifest_hash(manifest) != digest
                                 or (manifest["capture_id"], manifest["title"], manifest["source_url"], manifest["retrieved_at"])
