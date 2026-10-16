@@ -155,7 +155,7 @@ def snapshot(state: dict, chat_id: str | None = None) -> dict:
         "usage": service.usage(provider_state),
         "provider": service.status(provider_state),
         "web_search": WebSearch(DATABASE, TIMEZONE).status(),
-        "context_archive": context_store().status(),
+        "context_archive": safe_archive_status(context_store().status()),
         "memories": MemoryStore(DATABASE, TIMEZONE).list(),
         "work": work_status(state),
         "capabilities": {"mode": "local", **CAPABILITIES, "secure_credentials": os.name == "nt"},
@@ -399,7 +399,7 @@ def delete_chat(chat_id: str):
     return snapshot(state)
 
 
-def safe_private_content(content):
+def safe_private_content(content, *additional_content):
     # Keep configured credentials out of saved content and source responses.
     config = provider().read_state()["config"]
     endpoints = (() if config["protocol"] == "ollama" else (config["base_url"],)) + (SEARCH_ENDPOINT,)
@@ -408,7 +408,7 @@ def safe_private_content(content):
             key = credentials.read(endpoint)[0]
         except ValueError:
             continue
-        if contains_source_secret(content, (key,)):
+        if any(contains_source_secret(value, (key,)) for value in (content, *additional_content)):
             raise ValueError("Remove credentials before saving.")
     return content
 
@@ -419,6 +419,16 @@ def safe_archived_source(source):
               public_url(source["url"], allow_query=True, allow_http=True), source.get("content", ""))
     safe_private_content("\n".join(fields))
     return source
+
+
+def safe_archive_status(status):
+    """Withhold unsafe settings without changing the stored source permissions."""
+    try:
+        safe_private_content("", *status["config"]["public_sources"])
+    except ValueError:
+        return {**status, "config": None,
+                "config_error": "Archive settings are hidden because a saved source scope matches a current credential."}
+    return {**status, "config_error": None}
 
 
 @app.patch("/api/chats/{chat_id}/messages/{message_id}/feedback")
@@ -541,7 +551,7 @@ def get_web_search():
 
 @app.get("/api/context")
 def get_context_archive():
-    return context_store().status()
+    return safe_archive_status(context_store().status())
 
 
 @app.get("/api/context/sources")
@@ -602,7 +612,7 @@ def configure_context_archive(entry: ContextArchiveConfig):
                     if not config["enabled"]:
                         ownership.close()
                     app.state.archive_owner = config["enabled"]
-                return result
+                return safe_archive_status(result)
             except Exception:
                 if acquired:
                     ownership.close()

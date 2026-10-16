@@ -23,9 +23,10 @@ class EvidenceCredentialTests(unittest.TestCase):
                                       (self.keys.get(endpoint), "synthetic" if endpoint in self.keys else "missing")))
         self.client = self.enterContext(TestClient(backend.app))
         csrf = self.client.get("/api/session").json()["csrf"]
+        self.headers = {"X-Maestro-CSRF": csrf}
         config = self.client.get("/api/context").json()["config"]
         enabled = self.client.put("/api/context", json={**config, "enabled": True},
-                                  headers={"X-Maestro-CSRF": csrf})
+                                  headers=self.headers)
         self.assertEqual(enabled.status_code, 200, enabled.text)
         self.provider_url = "https://provider.example.org/v1"
         with backend.provider().transaction() as state:
@@ -134,6 +135,79 @@ class EvidenceCredentialTests(unittest.TestCase):
             opened = self.open_source(original)
             self.assertEqual(opened.status_code, 200, opened.text)
             self.assertEqual(opened.json(), original)
+        self.assertEqual(self.snapshot(), before)
+
+    def test_archive_status_withholds_scopes_matching_later_credentials_without_mutation(self):
+        self.capture()
+        config = backend.context_store().status()["config"]
+        errors = []
+        for endpoint, secret in self.credentials.items():
+            forms = {
+                "raw": secret,
+                "percent": "".join(f"%{ord(character):02X}" for character in secret),
+                "html": quote("".join(f"&#{ord(character)};" for character in secret), safe=""),
+            }
+            for form, value in forms.items():
+                with self.subTest(endpoint=endpoint, form=form):
+                    # The scope is legitimate when stored; the key only exists later.
+                    self.keys.clear()
+                    scope = "https://scopes.example.org/public/" + value + "/"
+                    stored = {**config, "capture_policy": "approved_sources",
+                              "public_sources": ["https://reports.example.org/", scope]}
+                    saved = self.client.put("/api/context", json=stored, headers=self.headers)
+                    self.assertEqual(saved.status_code, 200, saved.text)
+                    safe_status = self.client.get("/api/context").json()
+                    self.assertEqual(safe_status["config"], stored)
+                    self.assertIsNone(safe_status.get("config_error"))
+                    before = self.snapshot()
+                    self.keys[endpoint] = secret
+                    for path in ("/api/context", "/api/workspace"):
+                        response = self.client.get(path)
+                        self.assertEqual(response.status_code, 200, response.text)
+                        status = response.json() if path == "/api/context" else response.json()["context_archive"]
+                        self.assertIsNone(status["config"])
+                        self.assertIsInstance(status["config_error"], str)
+                        self.assertTrue(status["config_error"])
+                        errors.append(status["config_error"])
+                        self.assertNotIn(secret, response.text)
+                        self.assertNotIn(value, response.text)
+                        self.assertNotIn(scope, response.text)
+                        expected = {field: item for field, item in safe_status.items()
+                                    if field not in ("config", "config_error")}
+                        self.assertEqual({field: item for field, item in status.items()
+                                          if field not in ("config", "config_error")}, expected)
+                    self.assertEqual(backend.context_store().status()["config"], stored)
+                    self.assertEqual(self.snapshot(), before)
+                    del self.keys[endpoint]
+                    for path in ("/api/context", "/api/workspace"):
+                        response = self.client.get(path)
+                        self.assertEqual(response.status_code, 200, response.text)
+                        restored = response.json() if path == "/api/context" else response.json()["context_archive"]
+                        self.assertEqual(restored, safe_status)
+                        self.assertIn("config_error", restored)
+                        self.assertIsNone(restored["config_error"])
+                    self.assertEqual(self.snapshot(), before)
+        self.assertEqual(len(set(errors)), 1, "Credential errors must use one fixed safe message.")
+
+    def test_large_safe_scope_list_stays_visible_when_credentials_are_added(self):
+        self.capture()
+        scopes = [f"https://scopes.example.org/public/{number}/" + "a" * 1400 + "/" for number in range(100)]
+        self.assertGreater(sum(map(len, scopes)), 131072)
+        self.assertTrue(all(len(scope) <= 2048 for scope in scopes))
+        config = {**backend.context_store().status()["config"], "public_sources": scopes}
+        saved = self.client.put("/api/context", json=config, headers=self.headers)
+        self.assertEqual(saved.status_code, 200, saved.text)
+        before_status = self.client.get("/api/context").json()
+        self.assertEqual(before_status["config"], config)
+        before = self.snapshot()
+        self.keys.update(self.credentials)
+        for path in ("/api/context", "/api/workspace"):
+            with self.subTest(path=path):
+                response = self.client.get(path)
+                self.assertEqual(response.status_code, 200, response.text)
+                status = response.json() if path == "/api/context" else response.json()["context_archive"]
+                self.assertEqual(status, before_status)
+                self.assertIsNone(status["config_error"])
         self.assertEqual(self.snapshot(), before)
 
 
