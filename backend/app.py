@@ -15,7 +15,7 @@ import threading
 import uuid
 from zoneinfo import ZoneInfo
 
-from fastapi import FastAPI, HTTPException, Request, Response
+from fastapi import FastAPI, HTTPException, Query, Request, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -534,6 +534,27 @@ def get_web_search():
 @app.get("/api/context")
 def get_context_archive():
     return context_store().status()
+
+
+@app.get("/api/context/sources")
+def list_context_sources(limit: int = Query(default=25, ge=1, le=50),
+                         cursor: str | None = Query(default=None, max_length=256)):
+    with conflict_errors():
+        store = context_store()
+    try:
+        return store.list_captures(limit, cursor)
+    except ValueError:
+        raise HTTPException(422, "Use a valid source page cursor.") from None
+
+
+@app.get("/api/context/sources/{capture_id}")
+def get_context_source(capture_id: str,
+                       content_hash: str = Query(pattern=r"^[a-f0-9]{64}$"),
+                       manifest_hash: str = Query(pattern=r"^[a-f0-9]{64}$")):
+    try:
+        return context_store().get_capture(capture_id, content_hash, manifest_hash)
+    except (KeyError, OSError, sqlite3.Error, ValueError, TypeError, UnicodeError):
+        raise HTTPException(404, "This saved source is unavailable or no longer eligible. Refresh the source list.") from None
 
 
 @app.put("/api/context")
