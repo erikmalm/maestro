@@ -2,6 +2,7 @@
 from contextlib import closing, contextmanager
 from datetime import datetime, timezone
 from functools import wraps
+import base64
 import hashlib
 import json
 import os
@@ -9,6 +10,7 @@ from pathlib import Path
 import shutil
 import sqlite3
 import threading
+import time
 import uuid
 
 from backend.context_policy import (
@@ -21,6 +23,28 @@ from backend.storage import (archive_available, archive_inventory, archive_owner
 
 
 ROOT = Path(__file__).resolve().parent.parent
+INVENTORY_SCAN_LIMIT = 100
+
+
+def _inventory_position(cursor):
+    if cursor is None:
+        return None
+    try:
+        if not isinstance(cursor, str) or not 1 <= len(cursor) <= 160:
+            raise ValueError()
+        values = json.loads(base64.b64decode(cursor + "=" * (-len(cursor) % 4), altchars=b"-_", validate=True))
+        if (not isinstance(values, list) or len(values) != 2
+                or not isinstance(values[0], str) or not 1 <= len(values[0]) <= 64
+                or timestamp(values[0]) != values[0]
+                or not isinstance(values[1], str) or not ID.fullmatch(values[1])):
+            raise ValueError()
+        return tuple(values)
+    except (ValueError, TypeError, UnicodeError):
+        raise ValueError("Use a valid saved-evidence page cursor.") from None
+
+
+def _inventory_cursor(at, capture_id):
+    return base64.urlsafe_b64encode(json.dumps([at, capture_id], separators=(",", ":")).encode()).decode().rstrip("=")
 
 
 def storage_errors(action):
@@ -158,6 +182,11 @@ class ContextStore:
                 previous = self._state()["config"]
                 if config["enabled"]:
                     self._format()
+                    # Upgrade an existing local index during explicit setup,
+                    # never as a side effect of read-only inventory requests.
+                    if self.index.is_file():
+                        with closing(self._index_connection()) as db, db:
+                            pass
                     # Saving a lower cap remains possible for an already larger archive.
                     total, items, _ = archive_inventory(self.archive, MAX_ARCHIVE_ITEMS * 2)
                 with self._transaction() as (state, db):
@@ -181,6 +210,7 @@ class ContextStore:
             db.execute("CREATE TABLE IF NOT EXISTS captures(id TEXT PRIMARY KEY,manifest TEXT NOT NULL,title TEXT NOT NULL,url TEXT NOT NULL,content TEXT NOT NULL,at TEXT NOT NULL,manifest_hash TEXT)")
             if "manifest_hash" not in {row[1] for row in db.execute("PRAGMA table_info(captures)")}:
                 db.execute("ALTER TABLE captures ADD COLUMN manifest_hash TEXT")
+            db.execute("CREATE INDEX IF NOT EXISTS captures_by_retrieval ON captures(at DESC,id DESC)")
             db.execute("CREATE VIRTUAL TABLE IF NOT EXISTS captures_fts USING fts5(id UNINDEXED,title,content)")
         except sqlite3.Error:
             db.close()
@@ -210,6 +240,68 @@ class ContextStore:
         if type(max_results) is not int or not 1 <= max_results <= 3:
             raise ValueError("Choose one to three search results.")
         return hashlib.sha256(json.dumps([normalize_query(query), max_results, "ollama_web_search", SCHEMA]).encode()).hexdigest()
+
+    def list_captures(self, limit=25, cursor=None):
+        """Page indexed metadata only; source bodies are verified when opened."""
+        if type(limit) is not int or not 1 <= limit <= 50:
+            raise ValueError("Choose one to fifty saved evidence records.")
+        position = _inventory_position(cursor)
+        result = {"state": "ready", "sources": [], "next_cursor": None, "skipped_count": 0}
+        with self._write_lock:
+            try:
+                if self.archive is None:
+                    return {**result, "state": "unconfigured"}
+                config = configuration(self._state()["config"])
+                if not config["enabled"]:
+                    return {**result, "state": "disabled"}
+                if not self.archive.is_dir() or not self.index.is_file():
+                    raise ValueError()
+                clause, parameters = ("WHERE (at,id) < (?,?)", position) if position else ("", ())
+                with closing(sqlite3.connect(self.index.as_uri() + "?mode=ro", uri=True)) as db:
+                    deadline, steps = time.monotonic() + 2, 0
+
+                    def bounded_query():
+                        nonlocal steps
+                        steps += 1000
+                        return int(steps > 10000000 or time.monotonic() > deadline)
+
+                    db.set_progress_handler(bounded_query, 1000)
+                    rows = db.execute(
+                        "SELECT id,manifest,title,url,at,manifest_hash FROM captures INDEXED BY captures_by_retrieval " + clause +
+                        " ORDER BY at DESC,id DESC LIMIT ?", [*parameters, INVENTORY_SCAN_LIMIT + 1]).fetchall()
+                consumed, last = 0, None
+                for capture_id, relative, title, url, at, digest in rows[:INVENTORY_SCAN_LIMIT]:
+                    # Invalid ordering keys cannot yield a safe continuation.
+                    if (not isinstance(at, str) or len(at) > 64 or timestamp(at) != at
+                            or not isinstance(capture_id, str) or not ID.fullmatch(capture_id)):
+                        raise ValueError()
+                    consumed += 1
+                    last = (at, capture_id)
+                    try:
+                        if relative != "records/captures/" + at[:7] + "/" + capture_id + ".json":
+                            raise ValueError()
+                        manifest = validate_capture_manifest(read_archive_json(self.archive, relative, MANIFEST_BYTES), relative, config)
+                        if (self._deleted(capture_id) or manifest_hash(manifest) != digest
+                                or (manifest["capture_id"], manifest["title"], manifest["source_url"], manifest["retrieved_at"])
+                                != (capture_id, title, url, at)):
+                            raise ValueError()
+                    except (OSError, ValueError, KeyError, TypeError, UnicodeError):
+                        result["skipped_count"] += 1
+                        continue
+                    result["sources"].append({
+                        "capture_id": capture_id, "title": title, "url": url,
+                        **{field: manifest[field] for field in ("retrieved_at", "published_at", "modified_at", "content_kind", "completeness")},
+                        "content_hash": manifest["object"]["sha256"], "manifest_hash": digest,
+                        "content_bytes": manifest["object"]["bytes"], "body_verified": False,
+                    })
+                    if len(result["sources"]) == limit:
+                        break
+                if len(rows) > consumed and last is not None:
+                    result["next_cursor"] = _inventory_cursor(*last)
+                return result
+            except (OSError, sqlite3.Error, ValueError, KeyError, TypeError, UnicodeError):
+                return {"state": "unavailable", "sources": [], "next_cursor": None, "skipped_count": 0,
+                        "message": "Saved evidence is unavailable. Check the archive and local index, then retry."}
 
     def capture(self, query, at, sources, max_results, secrets=()):
         secrets = tuple(secret for secret in secrets if secret)
