@@ -1,6 +1,13 @@
 import { useEffect, useRef, useState } from "react";
 import * as api from "../../api";
 
+export const EVIDENCE_SYNC_INTERVAL_MS = 15_000;
+const emptyDetail = () => ({ source: null, loading: false, error: "" });
+const sameVersion = (left, right) =>
+  left?.capture_id === right?.capture_id &&
+  left?.content_hash === right?.content_hash &&
+  left?.manifest_hash === right?.manifest_hash;
+
 export function sourceDate(value) {
   const date = value ? new Date(value) : null;
   return date && Number.isFinite(date.getTime()) ? date.toLocaleString() : null;
@@ -22,88 +29,63 @@ export function sourceURL(value) {
 export default function useEvidence() {
   const [inventory, setInventory] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState("");
   const [selected, setSelected] = useState(null);
-  const [detail, setDetail] = useState({
-    source: null,
-    loading: false,
-    error: "",
-  });
+  const [detail, setDetail] = useState(emptyDetail);
+  const inventoryRef = useRef(null);
+  const selectedRef = useRef(null);
+  const loadedPageLimit = useRef(1);
+  const mounted = useRef(false);
   const listRevision = useRef(0);
   const detailRevision = useRef(0);
   const listBusy = useRef(false);
+  const pendingRefresh = useRef(false);
   const sourceButton = useRef(null);
 
   function closeSource(restoreFocus = false) {
     detailRevision.current += 1;
+    selectedRef.current = null;
     setSelected(null);
-    setDetail({ source: null, loading: false, error: "" });
+    setDetail(emptyDetail());
     if (restoreFocus && sourceButton.current?.isConnected)
       sourceButton.current.focus();
     sourceButton.current = null;
   }
 
-  async function load(cursor) {
-    const revision = ++listRevision.current;
-    listBusy.current = true;
-    setLoading(true);
-    setError("");
-    closeSource();
-    if (!cursor) {
-      setInventory(null);
-    }
-    try {
-      const next = await api.loadContextSources(25, cursor);
-      if (revision !== listRevision.current) return;
-      setInventory((previous) =>
-        cursor && previous?.state === "ready" && next.state === "ready"
-          ? {
-              ...next,
-              sources: [
-                ...new Map(
-                  [...previous.sources, ...next.sources].map((source) => [
-                    source.capture_id,
-                    source,
-                  ]),
-                ).values(),
-              ],
-              skipped_count: previous.skipped_count + next.skipped_count,
-            }
-          : next,
-      );
-    } catch (reason) {
-      if (revision !== listRevision.current) return;
-      closeSource();
-      setInventory(null);
-      setError(
-        reason instanceof Error
-          ? reason.message
-          : "Could not load saved sources.",
-      );
-    } finally {
-      if (revision === listRevision.current) {
-        listBusy.current = false;
-        setLoading(false);
-      }
-    }
+  function withholdDetail() {
+    // Snapshots started before a privacy boundary cannot publish afterward.
+    listRevision.current += 1;
+    detailRevision.current += 1;
+    setDetail({
+      source: null,
+      loading:
+        Boolean(selectedRef.current) && document.visibilityState === "visible",
+      error: "",
+    });
   }
 
-  async function openSource(source, button) {
-    if (listBusy.current) return;
-    sourceButton.current = button;
+  async function readSource(source, quiet = false) {
     const revision = ++detailRevision.current;
-    setSelected(source);
-    setDetail({ source: null, loading: true, error: "" });
+    setDetail((previous) => ({
+      source: quiet ? previous.source : null,
+      loading: !quiet || !previous.source,
+      error: "",
+    }));
     try {
       const capture = await api.loadContextCapture(
         source.capture_id,
         source.content_hash,
         source.manifest_hash,
       );
-      if (revision === detailRevision.current)
+      if (!sameVersion(capture, source))
+        throw new Error(
+          "This saved source version changed. Open it again from the list.",
+        );
+      if (mounted.current && revision === detailRevision.current)
         setDetail({ source: capture, loading: false, error: "" });
     } catch (reason) {
-      if (revision === detailRevision.current)
+      if (mounted.current && revision === detailRevision.current)
         setDetail({
           source: null,
           loading: false,
@@ -115,24 +97,141 @@ export default function useEvidence() {
     }
   }
 
+  async function load(mode = "refresh") {
+    if (listBusy.current) {
+      if (mode !== "append") pendingRefresh.current = true;
+      return;
+    }
+    let cursor =
+      mode === "append" ? inventoryRef.current?.next_cursor : undefined;
+    if (mode === "append" && !cursor) return;
+    const revision = ++listRevision.current;
+    listBusy.current = true;
+    pendingRefresh.current = false;
+    const foreground = mode !== "refresh" || !inventoryRef.current;
+    setLoading(foreground);
+    setRefreshing(!foreground);
+    setError("");
+    if (mode === "append") closeSource();
+    try {
+      let next = mode === "append" ? inventoryRef.current : null;
+      const pages = mode === "refresh" ? loadedPageLimit.current : 1;
+      for (let page = 0; page < pages; page += 1) {
+        const result = await api.loadContextSources(25, cursor);
+        if (
+          !mounted.current ||
+          revision !== listRevision.current ||
+          document.visibilityState !== "visible"
+        )
+          return;
+        next =
+          next?.state === "ready" && result.state === "ready"
+            ? {
+                ...result,
+                sources: [
+                  ...new Map(
+                    [...next.sources, ...result.sources].map((source) => [
+                      source.capture_id,
+                      source,
+                    ]),
+                  ).values(),
+                ],
+                skipped_count: next.skipped_count + result.skipped_count,
+              }
+            : result;
+        cursor = result.next_cursor;
+        if (result.state !== "ready" || !cursor) break;
+      }
+      if (mode === "append" && next.state === "ready")
+        loadedPageLimit.current += 1;
+      inventoryRef.current = next;
+      setInventory(next);
+      const current = selectedRef.current;
+      if (
+        current &&
+        (next.state !== "ready" ||
+          !next.sources.some((source) => sameVersion(source, current)))
+      ) {
+        closeSource();
+      } else if (
+        current &&
+        document.visibilityState === "visible" &&
+        !pendingRefresh.current
+      ) {
+        await readSource(current, true);
+      }
+    } catch (reason) {
+      if (!mounted.current || revision !== listRevision.current) return;
+      closeSource();
+      inventoryRef.current = null;
+      setInventory(null);
+      setError(
+        reason instanceof Error
+          ? reason.message
+          : "Could not load saved sources.",
+      );
+    } finally {
+      listBusy.current = false;
+      if (mounted.current && revision === listRevision.current) {
+        setLoading(false);
+        setRefreshing(false);
+      }
+      const repeat = pendingRefresh.current;
+      pendingRefresh.current = false;
+      if (mounted.current && document.visibilityState === "visible" && repeat)
+        void load();
+    }
+  }
+
+  function openSource(source, button) {
+    if (document.visibilityState !== "visible") return;
+    sourceButton.current = button;
+    selectedRef.current = source;
+    setSelected(source);
+    void readSource(source);
+  }
+
   useEffect(() => {
-    void load();
+    mounted.current = true;
+    let timer;
+    const sync = (withhold = false) => {
+      if (document.visibilityState !== "visible") return;
+      if (withhold) withholdDetail();
+      void load();
+    };
+    const focus = () => sync(true);
+    const visibility = () => {
+      clearInterval(timer);
+      if (document.visibilityState === "visible") {
+        timer = setInterval(() => sync(), EVIDENCE_SYNC_INTERVAL_MS);
+        sync(true);
+      } else {
+        withholdDetail();
+      }
+    };
+    window.addEventListener("focus", focus);
+    document.addEventListener("visibilitychange", visibility);
+    visibility();
     return () => {
+      mounted.current = false;
+      clearInterval(timer);
+      window.removeEventListener("focus", focus);
+      document.removeEventListener("visibilitychange", visibility);
       listRevision.current += 1;
       detailRevision.current += 1;
+      pendingRefresh.current = false;
     };
   }, []);
 
   return {
     inventory,
     loading,
+    refreshing,
     error,
     selected,
     detail,
-    refresh: () => void load(),
     loadMore: () => {
-      if (!listBusy.current && inventory?.next_cursor)
-        void load(inventory.next_cursor);
+      if (!listBusy.current) void load("append");
     },
     openSource,
     closeSource: () => closeSource(true),

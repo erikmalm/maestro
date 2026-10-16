@@ -11,7 +11,7 @@ const stateMessages = {
 
 export default function Evidence() {
   const data = useEvidence();
-  const { inventory, loading, error, selected, detail } = data;
+  const { inventory, loading, refreshing, error, selected, detail } = data;
   return (
     <main className="page-content evidence-page">
       <div className="page-heading">
@@ -22,13 +22,6 @@ export default function Evidence() {
             version.
           </p>
         </div>
-        <button
-          className="button secondary"
-          onClick={data.refresh}
-          disabled={loading}
-        >
-          Refresh evidence
-        </button>
       </div>
       <p className="page-note">
         Browsing saved evidence uses no searches. Retrieval time does not
@@ -71,7 +64,7 @@ export default function Evidence() {
           {inventory.next_cursor && (
             <button
               className="button secondary evidence-more"
-              disabled={loading}
+              disabled={loading || refreshing}
               onClick={data.loadMore}
             >
               Load more sources

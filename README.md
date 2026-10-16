@@ -68,7 +68,7 @@ Rejected key/account access disables automatic search until the key is successfu
 
 ## Saved evidence
 
-Open **Evidence** in the sidebar to inspect source versions already saved in the configured archive and local index. The table loads metadata; **View saved text** checks the exact saved version before displaying its text. Retrieval dates, unknown publication dates and excerpt/truncation labels describe the evidence available. Browsing uses no searches or model calls.
+Open **Evidence** in the sidebar to inspect source versions already saved in the configured archive and local index. The list updates automatically while the view is open. The table loads metadata; **View saved text** checks the exact saved version before displaying its text. Retrieval dates, unknown publication dates and excerpt/truncation labels describe the evidence available. Browsing uses no searches or model calls.
 
 This first increment is read-only. It distinguishes disabled, unconfigured and unavailable storage from an empty index. Connecting the revised search flow to source capture follows separately; this page does not import old archives or change memory handling.
 
