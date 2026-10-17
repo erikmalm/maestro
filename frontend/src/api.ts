@@ -92,9 +92,11 @@ async function request<T>(
   path: string,
   method = "GET",
   body?: unknown,
+  signal?: AbortSignal,
 ): Promise<T> {
   const response = await fetch(`/api${path}`, {
     method,
+    signal,
     credentials: "same-origin",
     headers: {
       "Content-Type": "application/json",
@@ -262,6 +264,52 @@ export const testWebSearch = () =>
   request<WebSearchStatus>("/web-search/test", "POST", {});
 export const deleteWebSearchKey = () =>
   request<WebSearchStatus>("/web-search/key", "DELETE");
+
+export type ContextSource = {
+  capture_id: string;
+  title: string;
+  url: string;
+  retrieved_at: string;
+  published_at: string | null;
+  modified_at: string | null;
+  content_kind: "search_excerpt";
+  completeness: { maestro_truncated: boolean; full_page: false };
+  content_hash: string;
+  manifest_hash: string;
+};
+export type ContextInventory = {
+  state: "ready" | "disabled" | "unconfigured" | "unavailable";
+  sources: (ContextSource & { content_bytes: number; body_verified: false })[];
+  next_cursor: string | null;
+  skipped_count: number;
+  message?: string;
+};
+export type ContextCapture = ContextSource & {
+  content: string;
+  archive_status: "saved";
+};
+export const loadContextSources = (limit = 25, cursor?: string) => {
+  const query = new URLSearchParams({ limit: String(limit) });
+  if (cursor) query.set("cursor", cursor);
+  return request<ContextInventory>(`/context/sources?${query}`);
+};
+export const loadContextCapture = (
+  id: string,
+  contentHash: string,
+  manifestHash: string,
+  signal?: AbortSignal,
+) => {
+  const query = new URLSearchParams({
+    content_hash: contentHash,
+    manifest_hash: manifestHash,
+  });
+  return request<ContextCapture>(
+    `/context/sources/${encodeURIComponent(id)}?${query}`,
+    "GET",
+    undefined,
+    signal,
+  );
+};
 
 export type Memory = {
   id: string;

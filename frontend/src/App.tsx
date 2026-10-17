@@ -5,12 +5,14 @@ import AnswerFeedback from "./AnswerFeedback";
 import MemorySetup from "./MemorySetup";
 import WorkSetup from "./WorkSetup";
 import ReflectionJournal from "./ReflectionJournal";
+import Evidence from "./pages/Evidence";
 import {
   ArrowRight,
   Check,
   ChevronDown,
   CheckSquare,
   Coins,
+  Database,
   LoaderCircle,
   Menu,
   MessageCircle,
@@ -36,7 +38,7 @@ import type {
 import ProviderSetup from "./ProviderSetup";
 import OllamaSearchSetup from "./OllamaSearchSetup";
 
-type Page = "workspace" | "tasks" | "memory" | "settings";
+type Page = "workspace" | "tasks" | "memory" | "evidence" | "settings";
 type Panel = "task" | "usage" | "rename-chat" | "delete-chat" | null;
 const money = (value: number) =>
   `$${value.toFixed(value > 0 && value < 0.01 ? 4 : 2)}`;
@@ -46,6 +48,7 @@ const navigation = [
   { id: "workspace", name: "Workspace", icon: MessageCircle },
   { id: "tasks", name: "Tasks", icon: CheckSquare },
   { id: "memory", name: "Memory", icon: Network },
+  { id: "evidence", name: "Evidence", icon: Database },
   { id: "settings", name: "Settings", icon: Settings2 },
 ] as const;
 
@@ -1182,6 +1185,7 @@ export default function App() {
           </main>
         )}
 
+        {page === "evidence" && <Evidence />}
         {reflectionVisible && (
           <main className="page-content" hidden={page !== "settings"}>
             <div className="page-heading">

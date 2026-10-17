@@ -66,6 +66,12 @@ Search attempts, including tests, failures and interrupted requests, count towar
 
 Rejected key/account access disables automatic search until the key is successfully retested and search is explicitly enabled again. Ordinary local chat remains available.
 
+## Saved evidence
+
+Open **Evidence** in the sidebar to inspect source versions already saved in the configured archive and local index. The list updates automatically while the view is open. The table loads metadata; **View saved text** checks the exact saved version before displaying its text. Retrieval dates, unknown publication dates and excerpt/truncation labels describe the evidence available. Browsing uses no searches or model calls.
+
+This first increment is read-only. It distinguishes disabled, unconfigured and unavailable storage from an empty index. Connecting the revised search flow to source capture follows separately; this page does not import old archives or change memory handling.
+
 ## Private memory
 
 Open **Memory** from the sidebar or **Open memory** in Settings to explore the map of facts, preferences, working identity and lessons. Select a memory to read its sources, edit it or forget it. Search and scope filters narrow the map; **List** provides a text view. You can also save a fact/preference for all local chats or just the current conversation. Facts/preferences use scoped keyword recall; working notes share the configured recall allowance. Memory stays in local Ollama chat without hosted search. Saving memory makes no model call.
