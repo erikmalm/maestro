@@ -1,8 +1,181 @@
 # Maestro architecture
 
-Maestro's current runtime is a local chat application with persistent user-created and reviewed AI-created tasks, private memory and opt-in background reflection. It has one active provider connection, direct/orchestrator local chat defaults and bounded local recall. Task execution, separate coordinator assessment and delegation remain planned.
+Architectural direction agreed 2026-10-16; implementation checkpoint updated 2026-10-17. Maestro is intended to be a personal AI coordinator that turns requests into bounded, reviewed work and maintains reusable evidence. The research milestone is a factual search database: searches, their returned source material, original versions and decisions about using them. A later curated knowledge database is a separate capability. For research requests, inspect existing source records, establish what is missing or unsuitable, acquire evidence, and review an answer against the original request. Finance and local football are examples of domains using this shared workflow.
 
-The proposed [chat assessment and delegation design](CHAT_ORCHESTRATION.md) adds a coordinator assessment before each response and durable status events for direct answers, necessary clarifications, and specialist assignments. It is a future workflow; the current chat endpoint waits for the selected model's reply.
+This overview defines the target direction and separates it from the implemented runtime below. The [chat design](CHAT_ORCHESTRATION.md) develops assessment, run status and later specialist execution; the [storage design](SEARCH_CONTEXT_STORAGE.md) develops capture, retrieval and archive integrity. The [development plan](../DEVELOPMENT_PLAN.md) tracks delivery and verification. This documentation update does not implement the target workflow or establish that a working-tree change is deployed.
+
+## Target research workflow
+
+The orchestrator owns the original request and its completion criteria throughout the run. Ordinary conversational requests can take a direct-answer route; necessary clarification precedes dependent research. The following branch applies when an answer requires evidence.
+
+```mermaid
+flowchart TD
+    Request[Incoming request] --> Requirements[Define requirements and freshness]
+    Requirements --> Retrieve[Retrieve local evidence candidates]
+    Retrieve --> Assess[Orchestrator reviews coverage and suitability]
+    Assess -->|Enough evidence| Writer[Generate answer from selected evidence]
+    Assess -->|Specific evidence gaps| Research[Targeted external acquisition]
+    Research --> Ingest[Store eligible evidence and update index]
+    Ingest --> Assess
+    Writer --> Review[Review answer against request and evidence]
+    Review -->|Pass| Answer[Deliver reviewed answer]
+    Review -->|Writing correction| Writer
+    Review -->|Evidence gap| Research
+    Assess -->|Blocked or limit reached| Partial[Return qualified result with remaining gaps]
+    Review -->|Blocked or limit reached| Partial
+```
+
+1. **Define requirements.** Record the subject/entity, requested facts, relevant dates or reporting periods, acceptable freshness, preferred or required source types, and expected output. Resolve material ambiguity before dependent work. For a stock request, identify the security and distinguish a quote from reported revenue, profit and announcements; record currency and units where applicable.
+2. **Retrieve candidates locally.** Keep local retrieval separate from online acquisition. Inspect available evidence even when current information is required, so useful stable or historical material can be retained and exact gaps identified. Retrieval returns candidates with provenance, dates and completeness; a match alone does not establish adequacy. An unavailable or bounded lookup is recorded rather than described as an exhaustive miss.
+3. **Assess each requirement.** The orchestrator records selected evidence, support locations, rejection reasons and gaps. Requirements may be covered, missing, stale for this request, conflicting or unavailable. Reuse valid evidence and supplement or refresh the affected parts. An old report may support a reporting-period fact while a quote needs a new observation.
+4. **Acquire missing evidence.** A researcher chooses permitted searches or source connectors for explicit gaps. Record attempts and outcomes, obtain useful source content, and distinguish discovery, document retrieval and origin revalidation. Checking an old URL does not discover a newer report elsewhere; a latest-information request may require fresh discovery.
+5. **Ingest before composition.** Save eligible acquired evidence and its acquisition metadata before generating the answer, then update derived indexes. A failed answer must not discard a successful capture. Capture failure or disabled saving is explicit; an otherwise permitted transient answer retains its available provenance and `not_saved` status. A requirement for durable evidence remains unmet if saving fails.
+6. **Write from selected evidence.** Supply the writer with the request, requirements and relevant evidence passages or structured observations. Preserve source-version references and distinguish source facts, calculations and interpretation. Stored information outside the supplied evidence cannot be claimed as support for that answer.
+7. **Review before delivery.** Check fulfillment of the original requirements, support for factual claims, dates, quantities, units, citations and contradictions. Bind claims about performed actions to backend outcomes. A writing problem returns to composition; an evidence problem returns to targeted research. Model agreement and a valid citation identifier alone do not establish support or truth.
+
+Decisions and handoffs should use validated structured records, including requirement IDs, evidence references, reasons, gaps and the next permitted action. Application code enforces permissions, source integrity, budgets and state transitions. Model assessments supplement those checks. This is a target contract; exact schemas and API changes belong to implementation increments.
+
+### Responsibilities and model roles
+
+| Responsibility | Owns | Initial implementation direction |
+| --- | --- | --- |
+| Orchestrator | Request requirements, coverage decisions, next actions and final acceptance. | Explicit assessment and review stages with recorded decisions. |
+| Evidence / DB service | Retrieval, validated ingestion, versioning, indexing, deduplication and provenance. | Deterministic application services; a model may propose extractions but does not freely mutate storage. |
+| Researcher | Queries, source selection and acquisition for specific missing evidence. | Model-directed tools and configured source connectors within the run's permissions. |
+| Answer writer | A coherent answer from the selected evidence and original requirements. | A separate composition stage with an explicit evidence packet. |
+| Verifier | Requirement fulfillment, claim support, freshness and contradictions. | Initially an explicit orchestrator review phase; a separate reviewer model is optional. |
+
+These are logical responsibilities, not a requirement for five models, independent conversations, processes or specialist child jobs. Start with sequential inference through the existing generation service. The same installed model can serve several roles with distinct instructions and selected context. Evaluate a different reviewer or specialist where it improves measured outcomes. The evidence workflow does not depend on implementing general task delegation first.
+
+### Shared limits in code and agent instructions
+
+The application owns one cumulative allowance for the whole research run, not a fresh allowance for each stage. Before each assessment, acquisition, writing, review or revision, it checks and reserves the remaining calls, tokens, time, estimated model spend and permitted hosted searches. Keep the initial one-hosted-search/run limit and the shared configured daily allowance of at most 20 during this rollout, honoring lower user settings. Reserve enough allowance to finish composition and review before optional further work. Foreground run ownership spans stage boundaries so another stage cannot accidentally start an independent budget or let background work take its reserved place.
+
+Every necessary model stage receives a server-authored snapshot relevant to its assignment: the shared objective, completed/remaining work, total limits, cumulative consumed/reserved amounts, remaining allowance, deadline and available actions. Instructions tell the model to choose a useful next action within that allowance and report a gap when it cannot finish. Do not provide private keys, unrelated accounting history or unnecessary personal context. Application code recomputes authoritative balances at dispatch; a model cannot raise a limit, reset a counter, grant permissions or authorize a call by claiming that resources remain.
+
+Keep actual token/call/search counts separate from money estimates. Model charges use the existing recorded pricing and usage; unknown hosted-search charges remain unknown and are not reported as free. Local model API charges do not estimate hardware or electricity. Extend the existing generation service with a narrow owned research-stage contract before the first typed stage, rather than impersonating a reflection job or adding another provider client. These are target requirements, not claims about the present per-call runtime.
+
+### Completion, revision and runtime ownership
+
+A fully satisfied result meets every mandatory criterion to its specified standard, including any qualification the request permits. An unavailable required item produces a terminal partial or inability-to-verify outcome, not full acceptance. Approval must refer to those criteria rather than an unrecorded judgment that the agent is satisfied. Conflicting evidence remains visible and may justify further research or a qualified result.
+
+Every iteration must have a specific purpose: acquire evidence for a named gap or correct an identified answer defect. Enforce run-wide search, call, token, time and spend limits in application code and reserve allowance for final composition and review. Stop when the criteria are met, the user cancels, permitted resources are exhausted, a dependency is unavailable, or another round yields no useful progress. An unreviewed draft must not become an approved answer merely because the limit was reached; return a truthful partial or inability-to-verify result.
+
+Persist the run's requirements, attempts, decisions, selected evidence, review outcome and actual stage transitions in private storage. Cancellation, reconnect and restart must not duplicate external acquisition or final answers, and stale attempts cannot commit. Uncertain external outcomes remain explicit. Extend the existing ownership and accounting contracts before introducing an independently dispatching worker; see the [chat runtime design](CHAT_ORCHESTRATION.md).
+
+## Target factual search and source storage
+
+Preserve the separation between private local databases and immutable source content. Keep canonical search, result, run and decision records in durable private tables, complete eligible acquired content in the archive, and derived keyword indexes in rebuildable local storage. "Factual" identifies source material to assess, not a claim that every source statement is proven true. A separate database per role or domain is unnecessary. The following are logical records, not a committed SQL schema. Source-linked observations and entity annotations can enrich the factual records later; an autonomous consolidated knowledge/memory database is outside the initial search rollout and must not block it. Existing private user memory remains a separate subsystem.
+
+| Record | Essential information |
+| --- | --- |
+| Research run and requirement | Original request, subject, facts requested, relevant period, freshness/source criteria, coverage, decisions and final outcome. |
+| Acquisition attempt | Query or requested resource, provider, relevant parameters, intent/requirement references, attempt time, status, returned references and failure or limit reason. |
+| Source and source version | Stable source identity, exact observed locator/provider ID, publisher when known, content reference/hash, acquisition method, dates and completeness. Preserve observed URLs when normalizing identities. |
+| Evidence item or observation | Supporting passage or structured value, subject, metric, units/currency, applicable time/period, source-version reference and support location. Retain extraction method/version for derived records. |
+| Entity and relationship | Stable identity, type, aliases, topics and typed connections, with supporting evidence or an explicit inferred-association basis. |
+| Answer and review provenance | Evidence actually supplied to the writer, claim/support references, calculations and inputs, review findings and backend action receipts. |
+| Derived index | Searchable text and later measured retrieval enhancements, rebuildable from canonical records and source versions. |
+
+Document identity, content identity and acquisition identity are distinct. Identical bytes can share one content object while recurring acquisitions preserve their own timestamps and provenance. Changed content creates a new saved version. A new version does not rewrite an earlier answer's evidence. Canonical search links, annotations and review decisions must survive an index rebuild. Generated answers and summaries are derived artifacts linked to evidence; they do not become independent primary evidence by being stored.
+
+### Proposed OneDrive archive and local working files
+
+Use a fresh proposed source-file root at `C:\Users\malme\OneDrive\Maestro-SearchArchive`. The earlier scaffold/archive can be ignored by the revised implementation; no automatic import, move or deletion is implied. This path is a proposal for implementation, not an already-created folder or a runtime configuration change. Keep the private live SQLite databases, search/query mappings, run/accounting records and derived indexes in the configured local Maestro data directory outside OneDrive and Git. The index may consume additional local space beyond the archived files.
+
+OneDrive is cloud-backed synced storage, not additional local disk or model memory. Files created on the PC initially consume local disk; reading an online-only file downloads it. Files On-Demand can later release local file contents while retaining cloud files, whereas "Always keep on this device" retains a local copy. Newly acquired files therefore still require free local staging space, and cloud quota does not remove local disk constraints. Keep archive lookup bounded so a metadata listing cannot accidentally download the collection. See [Microsoft Files On-Demand](https://support.microsoft.com/en-us/onedrive/save-disk-space-with-onedrive-files-on-demand-for-windows).
+
+Expose separately the archive's logical bytes, actual locally allocated bytes when measurable without hydration, local index/staging usage, free local disk and known sync/availability state. Cloud quota and cloud upload completion require their own verified observations; a configured allowance or filename is not evidence of either. The user's estimated cloud capacity is not a verified quota and should not become a hardcoded allocation. Exact archival/local-cache allowances can be chosen from observed capacity during implementation. Compression and automatic local-cache management are later optimizations.
+
+### Content acquisition and model context
+
+Store as much complete useful acquired evidence as reasonably permitted by eligibility, free space and configured acquisition/archive limits. Warn about unusually large payloads rather than imposing an arbitrary tiny excerpt limit on storage. Retain finite configurable hard protections for extreme response/document sizes, decoded/extracted growth, processing time and minimum local free space; warnings alone cannot prevent an out-of-memory or full-disk failure. Refusals, partial captures and known truncation must be explicit. These source-file protections are independent of the model's input allowance.
+
+Keep complete eligible provider content independently of the smaller passages selected for a model. Record whether content is a search excerpt, provider-extracted page, original document or structured API response; record known truncation and extraction limitations. A search snippet is a discovery lead and may support only the limited claims it actually contains. The archive does not need semantic indexing, model-generated compression or file compression to become useful.
+
+The local integration working tree already archives complete sanitized search extracts before fitting model evidence to at most 1,200 characters per source; not all of this is merged on main. That prefix limit describes what the model receives, not the intended archive capacity. Replace it in the revised path with bounded requirement-relevant passages selected anywhere in the saved text. Preserve validated source offsets, capture/content hashes and passage hashes, and use the same selected packet for coverage, writing and review. Preserve legacy prefix-based follow-ups while their callers migrate. A fixture must find and reuse support beyond character 1,200 without a hosted search. Increasing storage, result count or context alone does not turn snippets into complete original documents. Ollama exposes separate search and page-fetch capabilities; its fetch response contains main page content rather than an original-byte archival contract. See [Ollama web search and fetch](https://docs.ollama.com/capabilities/web-search).
+
+Preserve original response/document bytes when an acquisition method actually provides them, extracted readable content separately, and extraction versions so derived material can be regenerated. Full-page/PDF acquisition needs the transport and parser boundaries in the [storage design](SEARCH_CONTEXT_STORAGE.md#full-source-downloads). Never relabel an older excerpt as a full document or regenerate missing historical bytes from a current page.
+
+### Freshness and historical value
+
+Treat `stale_after` as a best-before date: evidence may need checking before it supports a current-information answer, but remains stored and can still support historical questions. Freshness is suitability for a particular requirement, independent of retention. Use information-type and domain policies rather than one universal reuse window. Set actual durations later; the minimum early policy preserves known dates/periods and treats unsupported currentness as a gap.
+
+| Field | Meaning |
+| --- | --- |
+| `retrieved_at` | When Maestro acquired the observation; local reuse does not reset it. |
+| `published_at` / `modified_at` | Source-reported dates when known, with their basis and precision; unknown dates remain unknown. |
+| `as_of` / reporting period | When a claim or structured value applies. Different observations in one document may have different periods. |
+| `last_verified_at` | When a particular source representation or observation was checked again, with method and outcome. Revalidation does not independently prove factual truth. |
+| `stale_after` | A policy-derived threshold for requiring refresh for a specified use, with the relevant policy/version or requirement context. |
+
+Fetching an old article today does not make its contents current. A past financial report can remain useful for a historical request after becoming unsuitable for the latest-results requirement. Quotes, reporting-period figures, future fixtures and completed match results need different policies. Explicit source modes, fresh-search instructions and no-search instructions remain enforced; inspecting saved metadata must not silently replace a required fresh acquisition or authorize a forbidden one.
+
+Repeated checks and newer observations can mark an earlier record stale, superseded, obsolete or disputed, with the reason and supporting version retained. Preserve the old bytes and their dates rather than overwrite them. Derived publication/validity assessments belong in private records referencing immutable captures, or a deliberately versioned new format with backward readers; do not rewrite old manifests pinned by earlier answers. Eviction is a separate future process that may consider very overdue stale dates, confirmed obsolescence, space pressure and dependencies. A stale date, new contradictory result or code refactor does not by itself authorize physical deletion. No automatic eviction is part of the first rollout.
+
+### Three separate cleanup decisions
+
+| Kind | What changes | When and why |
+| --- | --- | --- |
+| Program-code retirement | Remove unused old routing, prompts, adapters and duplicate UI after replacements and callers pass checks. | During each replacement PR and a final removal-only gate, to keep one maintained implementation. Does not delete saved source or memory records. |
+| Local-copy release | OneDrive releases downloaded contents while retaining the cloud file. | A separate future local-cache policy or user action after sync/availability checks, to recover local disk. This is not archive deletion. |
+| Archive eviction | Remove retained source versions/content according to reference-aware retention rules. | A later explicitly configured process; may consider very overdue best-before dates or demonstrated obsolescence. Keep reasons/history and protected references. No automatic source-file deletion now. |
+
+### Reuse and unnecessary-search prevention
+
+Separate evidence reuse from acquisition deduplication. Evidence reuse asks whether existing observations satisfy a requirement. Acquisition deduplication asks whether an equivalent permitted search or fetch was recently completed or is already in progress.
+
+Compare entity identity, requested metrics, relevant period, freshness requirement, provider and material parameters. Query text alone misses equivalent requests; semantic similarity alone can incorrectly merge different securities, currencies or periods. Record recent and in-progress attempts and their outcomes, and share acquisition results only when each request's criteria and privacy scope permit it. A failed or empty search must not suppress needed research indefinitely. Preserve source timestamps when reusing results.
+
+### Domains, table view and graph view
+
+Finance, football and future domains initially share this evidence model and run pipeline. Configure their preferred sources/connectors, terminology, freshness rules, extraction schemas and review criteria. Introduce separate specialist agents when their work requires a distinct capability or materially different workflow; avoid isolated databases that prevent shared entities and evidence from connecting.
+
+Provide two views over the same canonical records:
+
+- **Table:** inspect source/version to stored content and extracted observations, linked searches, relevant dates, completeness, freshness for a selected use, and answer usage. Support filtering and opening the exact saved version.
+- **Graph:** first explore recorded request -> search/acquisition -> exact source-version links. Later add source-backed entity/topic annotations and observations, such as company -> issued -> financial report or club -> participates in -> competition, when those records exist. That later enrichment is not a prerequisite for the factual search store or its first graph.
+
+Selecting a node or edge should expose its source/version, supporting passage or derivation, relevant dates and review status. Visually distinguish sourced relationships from inferred topic associations. An associative edge is useful navigation, not factual evidence by itself. The existing private-memory map remains a separate view and does not already implement this research graph.
+
+A graph UI can use ordinary entity and edge tables in SQLite; adopting a graph database is not an initial requirement. Retain the current keyword index, and add semantic retrieval or graph infrastructure only when measured retrieval misses, traversal needs or scale justify them.
+
+### Frontend composition and visible increments
+
+Follow the composition used by the Argus Stock page: a small page entry arranges domain sections, cohesive hooks own data/request state, and reusable presentation components receive narrow parameter props and callbacks. Use JS/JSX for new React pages/components and JS for their hooks. The merged Evidence page already follows this approach with minimal JS build compatibility. Existing TS/TSX modules and the typed API client can remain; do not turn this into a repository-wide language migration.
+
+The Evidence view uses `frontend/src/pages/Evidence/index.jsx`, its data hook and a small source table/detail composition. Keep domain components beside the page. Put a component in shared `components/` only when it has a real reusable responsibility or a second consumer. Shared presentation does not fetch data. Reuse existing CSS/theme and navigation machinery; add no UI framework, generic table engine or query library for the searchable index or graph.
+
+The delivered read-only view uses only a bounded metadata list and pinned saved-source read API over the capture core. It does not require the old Settings finder, keyword engine, source deletion/rebuild controls, composer globe modes or combined chat continuation. It updates automatically while visible and on return, retains loaded-page capacity and independently revalidates selected pinned text. Explicit closing resolves the current opener or falls back to the Evidence heading. Preserve truthful empty/unavailable/loading states, valid zero/unknown dates and late-response fences as the page grows. The searchable index (#43) and graph (#34) are optional inspection increments; neither blocks the first research loop.
+
+Every feature slice should have a visible acceptance demonstration where useful. Remove replaced program code in that slice once its callers and behavior are covered. Share components through small meaningful props rather than speculative abstraction, and compare total production/test line changes so extraction is not mistaken for reduced complexity. Code removal is current work; automatic archive eviction, knowledge consolidation and OneDrive local-copy management remain separate later infrastructure.
+
+### Trust and data boundaries
+
+The new workflow inherits existing public-archive eligibility, credential screening, local-only memory, source-mode and tool-permission boundaries. Private requests, query mappings, generated answers, decisions and private relationships stay in private storage; only eligible public evidence and portable source metadata enter the optional synced archive. A domain role or an orchestrator decision cannot grant additional access. Acquired documents are untrusted evidence and cannot issue tool instructions.
+
+Source hashes establish byte integrity; publisher identity, retrieved dates and model approval each establish different things. Recheck evidence availability, eligibility and pinned provenance before dispatch and commit. Deleted or corrupted pinned captures and revoked eligibility must not support a delayed answer. Acquiring a newer version or observing a changed live page does not by itself invalidate an eligible historical capture; later refreshes must not alter historical references.
+
+## Evaluation of the target workflow
+
+Use dated, public-safe fixtures to compare the reviewed research path with the current direct/source-tool path. Include exact repeats and differently worded equivalent requests, similar requests for different entities or periods, partial coverage, stale current data versus valid historical data, contradictory sources, missing evidence, concurrent equivalent requests, storage failures, and cancellation/restart. Exercise finance and football examples alongside unrelated topics so a domain-specific guard cannot stand in for general verification.
+
+Measure requirement coverage, supported claims, freshness violations, incorrect evidence reuse, unnecessary searches, no-progress loops, latency and token/cost overhead. Check that a writing correction makes no unnecessary hosted request, failed answer generation preserves successful captures, repeated local lookup does not refresh dates, and table/graph views resolve the same source versions. Use deterministic provenance, value and action-receipt checks alongside bounded semantic review. Synthetic success establishes behavior on those fixtures, not source truth or live-provider quality.
+
+## Current implementation and target gaps
+
+At main `555591e`, #17 provides archive configuration/ownership, #41 provides bounded metadata inventory and pinned source reads, and #42 provides the automatically updating Evidence browser. Fresh validation passes 417 backend tests, 83 browser tests including 12 Evidence cases, and the frontend build. Permanent normal-store setup and disposable-store restart proof remain #36. The target research branch above remains planned; historical draft #8 capabilities are not assumed to be merged.
+
+| Area | Implemented foundation | Target addition |
+| --- | --- | --- |
+| Coordination | Selecting the orchestrator model uses the ordinary synchronous chat/source-tool path. | Explicit requirements, evidence decisions, separate composition and final review. |
+| Retrieval and acquisition | One hosted-search round in chat; a saved-source catalogue/FTS exists but no keyword-query API is wired. | Bounded local candidate lookup (#22), then per-requirement review and targeted acquisition. |
+| Storage | Capture core, immutable objects, private catalogue/query records, configuration/ownership and pinned read APIs. Chat does not yet call archive capture. | Permanent setup/restart proof (#36), research run/decision records and later supported observations. |
+| Freshness and verification | Pinned byte/manifest integrity and current credential/eligibility checks; publication dates remain unknown. | Date/period suitability, best-before policies, claim support and request-fulfillment review. |
+| Inspection | Read-only Evidence table/detail with automatic updates; private-memory map remains separate. | Searchable index (#43) and bounded provenance graph (#34), optionally enriched later. |
+| Execution | One generation slot, shared accounting and existing reflection jobs. | Observable research runs and ownership-aware recovery; general task execution and specialist delegation remain later work. |
+
+The following sections describe the merged main runtime. The [storage design](SEARCH_CONTEXT_STORAGE.md) separately labels older draft/preview behavior, including cache modes, source replay and multi-lookup continuation. None of those historical paths is a prerequisite to merge wholesale.
 
 ## Implemented boundaries
 
@@ -17,6 +190,8 @@ flowchart LR
         DB[(Private SQLite workspace)]
         Keys[Windows credentials or server memory]
         Ollama[Local Ollama model]
+        Context[Capture core and saved-source API]
+        Index[(Private search index)]
         UI --> API
         API --> DB
         API --> Chat
@@ -29,16 +204,19 @@ flowchart LR
         Memory --> DB
         Chat --> Keys
         Chat --> Ollama
+        API --> Context
+        Context --> Index
     end
+    Context --> Archive[(Opt-in public OneDrive archive)]
     Chat --> Remote[Configured Responses or Chat Completions API]
     Chat --> Search[Optional hosted Ollama web search]
 ```
 
-The built frontend is served by FastAPI on one loopback origin. Workspace contains chat, Tasks contains attributed to-dos, and Memory contains the map/list, source evidence, proposals and reflection journal. Settings configures models, credentials, search, reflection and limits, with links to Memory and usage. The header and usage view report actual model usage and estimated spend.
+The built frontend is served by FastAPI on one loopback origin. Workspace contains chat, Tasks contains attributed to-dos, Memory contains its separate map/list and reflection journal, and Evidence browses saved source metadata and exact text versions. Settings configures models, credentials, search, reflection and limits. The header and usage view report actual model usage and estimated spend.
 
-`backend/app.py` owns session/CSRF protection, validation, CRUD and the application lifespan. `backend/provider.py` owns the single connection, shared generation slot and usage ledger. `backend/reflection.py` owns durable idle jobs, source validation, two-stage curation, scheduled working notes and a private journal. `backend/work_config.py` validates private task models and worker policy; `backend/memory.py` owns accepted records and read-only recall. `backend/web_search.py` owns search readiness and limits. Reads avoid writes after initialization. SQLite writes use immediate transactions; generation runs outside locks. One worker runs inside the sole API process under exclusive workspace ownership.
+`backend/app.py` owns session/CSRF protection, validation, CRUD and application lifespan. `backend/provider.py` owns the single connection, shared generation slot and usage ledger. `backend/reflection.py` owns durable idle jobs and reviewed memory/working notes. `backend/work_config.py` validates task models and worker policy; `backend/memory.py` owns accepted records and read-only recall. `backend/web_search.py` owns hosted search readiness and limits. `backend/context_store.py` owns capture eligibility, immutable objects/manifests, private indexing, bounded metadata listing, pinned readback and archive ownership. Inventory reads do not repair or initialize storage; an explicit write-side setup maintains the ordered pagination index. SQLite writes use immediate transactions; generation runs outside locks. One worker runs inside the sole API process under exclusive workspace ownership.
 
-Ollama uses its native loopback API, accepts installed local models and has no cloud fallback. Other adapters use Responses or Chat Completions. The UI uses the chat role with a direct/orchestrator default and a per-message model picker. Blank orchestrator choices fall back to the chat model; explicit choices take precedence. This selects one reply model without adding assessment calls or delegation. Chat sends the selected conversation and optional local memory; the frontend progressively reveals the completed backend reply and renders safe Markdown. Reflection receives explicitly selected bounded evidence/memory, without implicit recall, tools, hosted search or conversation titles. Chat curation forms then reviews facts/preferences; scheduled reflection forms then reviews identity/lesson notes. Both use one shared slot and at most two calls.
+Ollama uses its native loopback API, accepts installed local models and has no cloud fallback. Other adapters use Responses or Chat Completions. The UI always uses the chat role. Saved `chat_routing` selects the direct chat default or configured orchestrator model for local chat; a blank orchestrator selection uses the chat model and an explicit per-message choice wins. Existing connections default to direct routing. Coordinator instructions use the existing source-tool path, without another assessment call or specialist dispatch. Chat sends the selected conversation and optional local memory; the frontend progressively reveals the completed backend reply and renders safe Markdown. Reflection receives explicitly selected bounded evidence/memory, without implicit recall, tools, hosted search or conversation titles. Chat curation forms then reviews facts/preferences; scheduled reflection forms then reviews identity/lesson notes. Both use one shared slot and at most two calls.
 
 Chats have stable IDs, separate message lists and editable titles. Workspace responses include chat summaries, `active_chat_id` and the selected chat's messages; generation captures an explicit chat ID. New chat preserves existing conversations. Deletion removes a chat's content while retaining the shared usage ledger, and is blocked while that chat has a reserved request. Previous live history migrates once into one conversation. Projects remain a later feature.
 
@@ -60,15 +238,19 @@ Local model API charges are zero; hardware and electricity costs are outside thi
 
 ## Optional search
 
-When automatic search is explicitly enabled and a separate search key has been tested, a tool-capable local Ollama model may request one `web_search`. The backend accepts only that tool, sends the chosen query to `https://ollama.com/api/web_search`, then supplies bounded, untrusted excerpts to one final local generation with tools removed. Query and source links persist beside the answer.
+When automatic search is enabled and a separate search key has been tested, a tool-capable local Ollama model may request one `web_search` round. The backend calls only `https://ollama.com/api/web_search`, supplies bounded untrusted excerpts and performs at most one final answer-model continuation. Both model calls share the reply allowance and accounting. Query/source links persist beside the answer; main does not yet look up saved evidence or call archive capture from this flow.
 
-At most one search and two model calls are allowed for an answer; a one-time title call may use the remaining request allowance. The answer calls share the output allowance and cumulative token check; known usage remains accounted if search or the final response fails. Search tests and interrupted/failed attempts count toward the daily cap. One in-flight search, five-second spacing, a 30-second timeout, response-size limits and provider cooldowns apply. There are no automatic retries or result-page fetches. Hosted search fees are unknown and excluded from local inference's zero API cost.
+Search tests and dispatched failures/interrupted attempts count toward the configured daily cap. One in-flight search, five-second spacing, a 30-second timeout, response-size limits and provider cooldowns apply. Failed attempts are not automatically retried. The default daily cap is 20; the reviewed-research rollout retains 20 or a lower user setting. A one-time title call may use remaining allowance. Result pages are not fetched. Hosted search fees remain unknown and excluded from local inference's zero API charge.
 
 This is a bounded tool call inside chat. It does not delegate a task or create an autonomous agent.
+
+The separate opt-in [capture core](SEARCH_CONTEXT_STORAGE.md) can save eligible public excerpts in immutable files, deduplicate content and maintain a private catalogue/FTS. Configuration defaults are disabled `all_public` capture with 10 GiB/200,000 file-and-directory allowances; persisted restricted policies remain unchanged. Configuration, metadata listing and pinned text APIs are merged. They screen current credentials and enforce source eligibility without changing saved bytes. Evidence uses these read APIs, makes no hosted/model calls, and treats inventory metadata as unverified until opening the exact version. Local search/reuse, automatic chat capture, full-document downloads and automatic retention remain future work.
 
 ## Private state and credentials
 
 Tasks, live messages, typed memories, reflection journals, limits, settings and ledgers live in SQLite outside the checkout. The default directory is `%LOCALAPPDATA%\Maestro\preview`; `MAESTRO_DATA_DIR` must also resolve outside the repository. Provider/search credentials live in Windows Credential Manager, server memory or mounted secret files. The OpenAI endpoint can use a server-environment key fallback. Read APIs expose credential presence, never values.
+
+The separate `MAESTRO_CONTEXT_ARCHIVE_DIR` holds only eligible public source excerpts and portable metadata under the enabled capture policy. Queries and capture references stay in the workspace database; the private index lives alongside it at `context/index.sqlite3`. Neither private workspace data nor a live SQLite file belongs in the synced archive. #36 will establish and verify the dedicated persistent native/container setup; this document does not change active paths.
 
 The API validates Host and Origin, requires a local session and protects mutations with CSRF checks. Remote provider requests send the selected conversation history to that provider; Ollama sends it to the local server. OpenAI requests set `store: false`. The repository and synthetic test fixtures contain no private workspace records or personal credentials.
 
@@ -90,20 +272,26 @@ The memory map is a frontend view of those records: type groups, bounded selecta
 | `GET /api/work-config`, `PUT /api/work-config` | Saved task models, recall allowances and reflection enable/pause policy. |
 | `GET /api/reflection` | Read-only worker status, daily usage, current memories, journal and legacy proposals. |
 | `POST /api/reflection/candidates/{id}/accept`, `DELETE /api/reflection/candidates/{id}` | Accept a source-backed proposal into scoped private memory or reject it. |
-| `GET /api/provider`, `PUT /api/provider`, `POST /api/provider/test`, `DELETE /api/provider/key` | Active connection settings, model-list access and credential removal. |
+| `GET /api/provider`, `PUT /api/provider`, `POST /api/provider/test`, `DELETE /api/provider/key` | Active connection settings including local chat routing, model-list access and credential removal. |
 | `POST /api/provider/charges/{id}/reconcile` | Settle a provider-verified uncertain amount. |
 | `GET /api/web-search`, `PUT /api/web-search`, `POST /api/web-search/test`, `DELETE /api/web-search/key` | Search readiness, settings and separate credential lifecycle. |
+| `GET /api/context`, `PUT /api/context` | Archive readiness, validated configuration/scopes, storage limits and ownership lifecycle. |
+| `GET /api/context/sources` | Bounded read-only metadata pagination with opaque continuation; no source-body read, repair, model or hosted request. |
+| `GET /api/context/sources/{id}` | Open a saved excerpt with required content/manifest hashes; verify exact bytes, eligibility and current credential screening. |
 | `PUT /api/limits` | Save the enforced chat spend/token allowances. |
 
 ## Next build sequence
 
 The [Podman deployment checklist](../DEVELOPMENT_PLAN.md#podman-deployment) runs alongside this functional sequence. The [container runbook](CONTAINERS.md) covers one application container, persistent private storage and host Ollama. Native and container runtimes acquire an exclusive workspace lock before recovery; keep one API owner per workspace until worker ownership and leases are implemented. Local chat and planning roles can choose distinct models through the same reservation ledger; named endpoint profiles and task routing remain separate work.
 
-1. **Shared generation foundation — implemented.** `Provider.generate_context` accepts bounded selected context and an installed local model, using the same dispatch, captured settings and ledger as chat. It has no tools, search, title or chat persistence. Named profiles and durable attempt ownership remain future work.
-2. **One durable task worker.** Start a separate Maestro process that claims a manually queued text-only task, generates with local Ollama and saves a result. Persist claims, attempt ownership, leases, progress, pause/cancel and cumulative call/token/time limits. Keep one generation slot initially, allowing chat between task steps. Make reservation recovery ownership-aware: API restart must not release a live worker's reservation, and stale attempts cannot commit a result after a newer claim. Verify completion with the browser closed, pause, limits and restart recovery before adding more execution paths.
-3. **Multiple saved profiles.** Store named local/remote model connections with endpoint-scoped credential references and explicit context-sharing choices. Select a profile for a task and record it per call. Verify installed-model capabilities, switching and one-model residency, accounting and local-only restrictions before automatic selection. Measure memory and task quality to choose role defaults.
-4. **Bounded delegation and review.** Give a coordinator a typed way to assign one child task with selected context, profile, criteria and a share of the parent's allowance. Persist the handoff and result. Add reviewer-driven revision only with shared call/token/time limits and completion, cancellation and no-progress stops. Prove different profiles can serve distinct assignments before expanding the agent tree.
+The shared generation foundation is implemented: `Provider.generate_context` accepts bounded selected context and an installed local model through the same ledger as chat, without tools, titles or chat persistence.
 
-Observable chat runs and assessment can precede specialist execution. The first local child can reuse validated local model selections once durable attempt ownership works; named profiles broaden routing afterward. [CHAT-01 through CHAT-04](CHAT_ORCHESTRATION.md#implementation-increments) describe the user experience, status delivery, shared generation slot, cancellation, and recovery requirements.
+The existing next review is documentation [PR #40](https://github.com/erikmalm/maestro/pull/40) for #19. #17/#41/#42 are merged, and #35 is closed with fresh current-main verification. Older fixture PR #39 is closed as superseded for this rollout; it belongs to draft #8. The next functional task, [#36](https://github.com/erikmalm/maestro/issues/36), has no implementation PR yet: establish permanent archive/local-database paths and connect the existing Evidence browser to that normal store. Prove restart persistence with synthetic sources in a separate disposable store, without populating or migrating personal storage. The normal archive may remain empty until acquisition is wired. Do not import or delete the earlier scaffold.
 
-Explicit memory and [durable background reflection](MEMORY_AND_REFLECTION.md) are usable before task execution. Automatic promotion, scheduled working notes and reviewed task creation are optional; broader quality evaluation remains. Scoped integrations and isolated coding need the execution path. The [development plan](../DEVELOPMENT_PLAN.md) records acceptance checks; [local model research](LOCAL_MODELS.md) records preliminary measurements.
+Next add local saved-source lookup ([#22](https://github.com/erikmalm/maestro/issues/22)) and complete the first saved-source research pipeline: owned runs (#23), shared model-stage/allowance contract (#37), requirements and evidence decisions (#24/#25), then writer and final review (#26/#27). Keep minimum date/best-before reasoning and relevant saved passages in that path. Code and model instructions share cumulative limits. Live stages appear only when recorded. Routine checks and small intended-local-model trials use fixed sources without hosted searches.
+
+A searchable Evidence index ([#43](https://github.com/erikmalm/maestro/issues/43)) and recorded request/search/source-version graph ([#34](https://github.com/erikmalm/maestro/issues/34)) can proceed in parallel or later; they do not gate a functioning research loop. Entity annotations (#33), a graph database engine and curated knowledge remain separate later choices. Controlled acquisition (#28–#30) follows the attempt journal and initially permits one hosted search/run within 20/day or a lower user limit. Validate routing/caller migration (#38) before final obsolete-code removal (#31), preserving private memory and source content. Full documents, compression and automatic eviction remain later policies. [Tracker #18](https://github.com/erikmalm/maestro/issues/18) owns the detailed dependencies.
+
+The [development plan](../DEVELOPMENT_PLAN.md#next-delivery-sequence) owns delivery and acceptance. [CHAT-01 and CHAT-02](CHAT_ORCHESTRATION.md#implementation-increments) supply status and assessment foundations; the research branch adds the evidence decisions and final-review stages described here. CHAT-03 and CHAT-04 remain later specialist increments. Bind source claims to evidence and action claims to backend outcomes before broader acquisition or delegation; model agreement alone is not verification. Exact schemas, thresholds, migrations and graph technology are implementation decisions to validate against this overview.
+
+Task execution requires durable claims, leases and ownership-aware recovery: API restart must not release a live worker's reservation, and stale attempts cannot commit after a newer claim. Descendants share the parent's bounded context, tools and call/token/time/spend allowance, with cancellation and no-progress stops. A first local specialist can reuse saved model choices once attempt ownership works; named profiles broaden routing afterward. Explicit memory and [durable background reflection](MEMORY_AND_REFLECTION.md) are already usable independently; automatic promotion, scheduled notes and reviewed task suggestions are optional, with broader quality evaluation still needed. Scoped integrations and isolated coding require the execution path. [Local model research](LOCAL_MODELS.md) records preliminary measurements.

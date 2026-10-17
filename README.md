@@ -1,6 +1,8 @@
 # Maestro
 
-A local web interface for persistent chats with your chosen model, usage tracking and to-dos. Workspace, Tasks, Memory and Settings expose live conversation, user-created and reviewed AI-created tasks, private memory and configuration.
+A local web interface for persistent chats with your chosen model, usage tracking and to-dos. Workspace, Tasks, Memory, Evidence and Settings expose live conversation, user-created and reviewed AI-created tasks, private memory, saved source versions and configuration.
+
+The [architectural overview](docs/ARCHITECTURE.md) defines the planned reviewed search workflow, source storage and shared limits separately from implemented behavior. New UI work follows its [React page and component composition](docs/ARCHITECTURE.md#frontend-composition-and-visible-increments), using small JS/JSX pages, cohesive data hooks and reusable parameterized components.
 
 Maestro saves one provider connection with chat and orchestrator models. Local chat can use either as its default, with per-message model choices, Markdown and private memory. Opt-in background reflection curates reviewed memories automatically, maintains working notes and provides a private journal. It can also create independently reviewed task suggestions. Task execution and delegation remain future work. Optional Ollama web search is the only model-selected tool. The [development plan](DEVELOPMENT_PLAN.md) and [memory/reflection architecture](docs/MEMORY_AND_REFLECTION.md) describe working behavior and the next increments.
 
@@ -70,7 +72,7 @@ Rejected key/account access disables automatic search until the key is successfu
 
 Open **Evidence** in the sidebar to inspect source versions already saved in the configured archive and local index. The list updates automatically while the view is open. The table loads metadata; **View saved text** checks the exact saved version before displaying its text. Retrieval dates, unknown publication dates and excerpt/truncation labels describe the evidence available. Browsing uses no searches or model calls.
 
-This first increment is read-only. It distinguishes disabled, unconfigured and unavailable storage from an empty index. Connecting the revised search flow to source capture follows separately; this page does not import old archives or change memory handling.
+This increment is read-only. It distinguishes disabled, unconfigured and unavailable storage from an empty index. Archive configuration, the read APIs and this browser are merged through PRs #17, #41 and #42. Permanent setup is the next functional task ([#36](https://github.com/erikmalm/maestro/issues/36)); it has no implementation PR yet. Restart checks use a separate disposable test store, and the normal archive may remain empty until capture is connected. Saved lookup and the reviewed research loop follow without waiting for a searchable index or graph. The page does not import old archives or change memory handling. See the [delivery plan](DEVELOPMENT_PLAN.md#next-delivery-sequence) for the next reviewable PR and ordered work.
 
 ## Private memory
 
