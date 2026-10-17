@@ -1,3 +1,4 @@
+import { fulfillUnconfiguredArchiveRead } from "./archive-fixture";
 import { expect, test, type Page, type Route } from "@playwright/test";
 import type { Memory, Workspace } from "../src/api";
 
@@ -47,6 +48,7 @@ async function reflectionFixture(page: Page) {
   let holdNext = false;
   let polls = 0;
   await page.route("**/api/**", async (route) => {
+    if (await fulfillUnconfiguredArchiveRead(route)) return;
     const path = new URL(route.request().url()).pathname;
     if (path === "/api/session")
       await route.fulfill({ json: { csrf: "synthetic-csrf" } });

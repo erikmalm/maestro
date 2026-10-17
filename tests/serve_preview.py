@@ -17,6 +17,7 @@ with tempfile.TemporaryDirectory(prefix="maestro-browser-") as directory:
     assert Path(directory).resolve().parent == Path(tempfile.gettempdir()).resolve()
     os.environ["MAESTRO_DATA_DIR"] = directory
     os.environ["MAESTRO_PORT"] = "8777"
+    os.environ.pop("MAESTRO_CONTEXT_ARCHIVE_DIR", None)  # Never use a personal archive in browser fixtures.
     os.environ.pop("OPENAI_API_KEY", None)  # Browser checks must never inherit a paid provider credential.
     from backend import app as backend, credentials
     from backend.web_search import ENDPOINT, WebSearch

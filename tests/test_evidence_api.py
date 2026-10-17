@@ -79,6 +79,8 @@ class EvidenceApiTests(unittest.TestCase):
         config = self.client.get("/api/context").json()["config"]
         self.client.put("/api/context", json={**config, "enabled": True}, headers=self.headers)
         store = backend.context_store()
+        # Explicit fixture damage after empty-archive initialization.
+        store.index.unlink()
         self.assertFalse(store.index.exists())
         self.assertEqual(self.client.get("/api/context/sources").json()["state"], "unavailable")
         self.assertFalse(store.index.exists())

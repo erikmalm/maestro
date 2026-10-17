@@ -2,6 +2,7 @@ import { useRef } from "react";
 import useEvidence from "./useEvidence";
 import SourceTable from "./SourceTable";
 import SourceDetail from "./SourceDetail";
+import ArchiveSettings from "../ArchiveSettings";
 import "./styles.css";
 
 const stateMessages = {
@@ -10,7 +11,7 @@ const stateMessages = {
   unavailable: "Source archive is unavailable.",
 };
 
-export default function Evidence() {
+export default function Evidence({ archive, onOpenSettings }) {
   const page = useRef(null);
   const data = useEvidence((source) => {
     const opener =
@@ -42,6 +43,7 @@ export default function Evidence() {
         Browsing saved evidence uses no searches. Retrieval time does not
         establish when its facts were current.
       </p>
+      <ArchiveSettings data={archive} onOpenSettings={onOpenSettings} />
       {loading && <p role="status">Loading saved sources…</p>}
       {error && (
         <p className="error-banner" role="alert">

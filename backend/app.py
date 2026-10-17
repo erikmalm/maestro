@@ -254,6 +254,10 @@ class ContextArchiveConfig(StrictModel):
     max_items: int = Field(default=200000, ge=100, le=200000, strict=True)
 
 
+class ContextArchiveEnabled(StrictModel):
+    enabled: bool = Field(strict=True)
+
+
 _context_lock = threading.RLock()
 _archive_config_lock = threading.RLock()
 
@@ -264,7 +268,13 @@ def context_store():
     with _context_lock:
         current = getattr(app.state, "context_store", None)
         if current is None or getattr(app.state, "context_store_identity", None) != identity:
-            current = ContextStore(DATABASE)
+            try:
+                current = ContextStore(DATABASE)
+            except (ValueError, OSError, RuntimeError):
+                # A bad optional archive path must not prevent local chat from
+                # starting or overwrite the private archive configuration.
+                current = ContextStore(DATABASE, archive_dir="")
+                current.path_error = "The source archive path is invalid. Check its startup setting and restart Maestro."
             app.state.context_store, app.state.context_store_identity = current, identity
         return current
 
@@ -289,7 +299,7 @@ async def lifespan(application):
         application.state.archive_ownership = archive_ownership
         application.state.archive_owner = False
         try:
-            if store.status()["config"]["enabled"]:
+            if not store.path_error and store.status()["config"]["enabled"]:
                 try:
                     archive_ownership.enter_context(store.archive_owner())
                     store.initialize()
@@ -327,8 +337,18 @@ async def invalid_entry(request: Request, error: RequestValidationError):
 
 @app.get("/health")
 def health():
+    archive_root = os.environ.get("MAESTRO_CONTEXT_ARCHIVE_DIR", "")
+    try:
+        archive_identity = "none"
+        if archive_root:
+            archive_path = Path(archive_root).expanduser()
+            archive_identity = ("path:" + os.path.normcase(str(archive_path.resolve()))
+                                if archive_path.is_absolute() else "invalid:" + archive_root)
+    except (OSError, ValueError, RuntimeError):
+        archive_identity = "invalid:" + archive_root
     return {"application": "maestro", "mode": "local", "launch_id": os.environ.get("MAESTRO_LAUNCH_ID"),
-            "workspace_id": hashlib.sha256(os.path.normcase(str(DATA_DIR)).encode()).hexdigest()}
+            "workspace_id": hashlib.sha256(os.path.normcase(str(DATA_DIR)).encode()).hexdigest(),
+            "archive_id": hashlib.sha256(archive_identity.encode()).hexdigest()}
 
 
 @app.middleware("http")
@@ -423,12 +443,21 @@ def safe_archived_source(source):
 
 def safe_archive_status(status):
     """Withhold unsafe settings without changing the stored source permissions."""
+    result = {**status}
+    for field in ("path", "database_path", "index_path"):
+        if result.get(field) is None:
+            continue
+        try:
+            safe_private_content(result[field])
+        except ValueError:
+            result[field] = None
+            result["path_error"] = "Some storage paths are hidden because they match a current credential."
     try:
         safe_private_content("", *status["config"]["public_sources"])
     except ValueError:
-        return {**status, "config": None,
+        return {**result, "config": None,
                 "config_error": "Archive settings are hidden because a saved source scope matches a current credential."}
-    return {**status, "config_error": None}
+    return {**result, "config_error": None}
 
 
 @app.patch("/api/chats/{chat_id}/messages/{message_id}/feedback")
@@ -592,6 +621,8 @@ def configure_context_archive(entry: ContextArchiveConfig):
         for scope in config["public_sources"]:
             safe_private_content(scope)
         store = context_store()
+        if store.path_error:
+            raise ValueError(store.path_error)
         ownership = getattr(app.state, "archive_ownership", None)
         # Order the initial claim failure receipt with direct store retries too.
         with store._write_lock:
@@ -618,6 +649,20 @@ def configure_context_archive(entry: ContextArchiveConfig):
                     ownership.close()
                     app.state.archive_owner = False
                 raise
+
+
+@app.patch("/api/context")
+def set_context_archive_enabled(entry: ContextArchiveEnabled):
+    # Toggle authoritative settings, never an earlier browser's settings copy.
+    with conflict_errors(), _archive_config_lock:
+        store = context_store()
+        with store._write_lock:
+            status = safe_archive_status(store.status())
+            if status["config"] is None:
+                raise ValueError(status["config_error"])
+            if status["path_error"]:
+                raise ValueError(status["path_error"])
+            return configure_context_archive(ContextArchiveConfig(**{**status["config"], "enabled": entry.enabled}))
 
 
 @app.put("/api/web-search")

@@ -31,6 +31,26 @@ powercfg /a
 
 The native launcher, `scripts/start.ps1 -NoBrowser`, starts a hidden server process. The container launcher starts Maestro detached and sets `--restart unless-stopped`. Neither launcher installs a Windows service or scheduled task. The container restart policy does not start the Windows Ollama process, the Podman machine or a missing Windows SSH tunnel.
 
+### Permanent source archive on Windows
+
+Keep the same `MAESTRO_DATA_DIR` used by your existing workspace. The private database and source index remain there. Select a separate absolute public-source archive path through `MAESTRO_CONTEXT_ARCHIVE_DIR` in the server's environment. Maestro does not load `.env` files automatically.
+
+For native startup, run from the checkout that owns the current server:
+
+```powershell
+.\scripts\stop.ps1
+$env:MAESTRO_CONTEXT_ARCHIVE_DIR = Join-Path $env:USERPROFILE 'OneDrive\Maestro-SearchArchive'
+.\scripts\start.ps1 -NoBrowser
+```
+
+Adjust the path if your OneDrive root is elsewhere. This example sets the current PowerShell session only; start later sessions with the same data and archive paths. It does not import or scan the earlier `web-content` scaffold. Changing the archive path requires a server restart; rerunning the launcher against a different or unverified active archive configuration asks you to stop the old instance first.
+
+In **Settings**, inspect the actual archive, private database and index locations, then enable source saving. The initial control preserves the existing capture policy and approved sources. A disabled archive retains its files. Invalid paths, unavailable storage and withheld configuration have separate explanations; configuration withheld by credential checks cannot be edited as an empty replacement.
+
+The **Evidence** page reads the configured archive and index, including an honest empty state after new archive setup. Normal chat searches are not automatically captured yet; that acquisition wiring is a separate increment. Enabling storage or browsing Evidence makes no hosted search or model call. Restart verification uses synthetic captures in a separate disposable store, never demo records inserted into a personal archive.
+
+The displayed archive bytes are the last recorded logical size. They do not establish local disk allocation, cloud quota or upload completion. This increment does not release local OneDrive copies or evict archived content. The current container launcher does not configure this Windows archive mount; use native setup for this first slice rather than treating a host path as an automatically mounted container directory.
+
 After a Windows restart, start Ollama and the Podman machine, then run the container launcher with the same name, volume, image and port/tunnel arguments. See [CONTAINERS.md](CONTAINERS.md). Following sleep, check connection health and rerun the matching launcher if forwarding has been lost; the tunnel has no automatic reconnect supervisor.
 
 Automatic restart at Windows sign-in is a separate integration task. A future Task Scheduler entry should run the launcher as the same user, with the same workspace and container arguments, after checking dependencies. A logon task is sufficient for a locked session; operation after sign-out or before login needs separately tested service/dependency setup. Microsoft's [Task Scheduler guidance](https://learn.microsoft.com/en-us/windows/win32/taskschd/about-the-task-scheduler) supports event-triggered startup without frequent polling.

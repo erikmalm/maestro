@@ -6,6 +6,8 @@ import MemorySetup from "./MemorySetup";
 import WorkSetup from "./WorkSetup";
 import ReflectionJournal from "./ReflectionJournal";
 import Evidence from "./pages/Evidence";
+import ArchiveSettings from "./pages/ArchiveSettings";
+import useArchiveSettings from "./pages/ArchiveSettings/useArchiveSettings";
 import {
   ArrowRight,
   Check,
@@ -390,6 +392,10 @@ function TaskRow({
 export default function App() {
   const [workspace, setWorkspace] = useState<Workspace | null>(null);
   const [page, setPage] = useState<Page>("workspace");
+  const archive = useArchiveSettings(
+    page === "settings" || page === "evidence",
+    page === "settings",
+  );
   const [panel, setPanel] = useState<Panel>(null);
   const [busy, setBusy] = useState("");
   const [toast, setToast] = useState("");
@@ -1185,7 +1191,12 @@ export default function App() {
           </main>
         )}
 
-        {page === "evidence" && <Evidence />}
+        {page === "evidence" && (
+          <Evidence
+            archive={archive}
+            onOpenSettings={() => navigate("settings")}
+          />
+        )}
         {reflectionVisible && (
           <main className="page-content" hidden={page !== "settings"}>
             <div className="page-heading">
@@ -1217,6 +1228,7 @@ export default function App() {
                 </button>
               </div>
               <div className="settings-side">
+                <ArchiveSettings data={archive} editable />
                 {workspace.work && (
                   <WorkSetup
                     initialStatus={workspace.work}

@@ -265,6 +265,37 @@ export const testWebSearch = () =>
 export const deleteWebSearchKey = () =>
   request<WebSearchStatus>("/web-search/key", "DELETE");
 
+export type ContextArchiveConfig = {
+  enabled: boolean;
+  capture_policy: "approved_sources" | "all_public";
+  public_sources: string[];
+  reuse_hours: number;
+  max_bytes: number;
+  max_items: number;
+};
+export type ContextArchive = {
+  configured: boolean;
+  available: boolean;
+  database_path: string | null;
+  index_path: string | null;
+  path: string | null;
+  path_error: string | null;
+  config: ContextArchiveConfig | null;
+  config_error: string | null;
+  indexed_count: number;
+  archive_bytes: number;
+  archive_items: number;
+  missing_count: number;
+  corrupt_count: number;
+  last_indexed_at: string | null;
+  last_capture: { retrieved_at: string | null } | null;
+  last_error: string | null;
+};
+export const loadContextArchive = (signal?: AbortSignal) =>
+  request<ContextArchive>("/context", "GET", undefined, signal);
+export const saveContextArchive = (enabled: boolean) =>
+  request<ContextArchive>("/context", "PATCH", { enabled });
+
 export type ContextSource = {
   capture_id: string;
   title: string;

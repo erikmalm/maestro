@@ -13,11 +13,26 @@ if ($dataAbsolute -eq $repoAbsolute -or $dataAbsolute.StartsWith($repoAbsolute +
 $identityPython = if (Test-Path -LiteralPath $pythonPath) { $pythonPath } else { 'python' }
 $workspaceId = & $identityPython -c "from pathlib import Path; import hashlib, os, sys; repo = Path(sys.argv[1]).resolve(); data = Path(sys.argv[2]).expanduser().resolve(); sys.exit(1) if data == repo or repo in data.parents else None; print(hashlib.sha256(os.path.normcase(str(data)).encode()).hexdigest())" $repoDirectory $dataDirectory
 if ($LASTEXITCODE -ne 0) { throw 'The resolved private data directory must be outside the Git checkout.' }
+$archiveId = & $identityPython -c @'
+from pathlib import Path
+import hashlib, os
+raw = os.environ.get('MAESTRO_CONTEXT_ARCHIVE_DIR', '')
+try:
+    identity = 'none'
+    if raw:
+        path = Path(raw).expanduser()
+        identity = 'path:' + os.path.normcase(str(path.resolve())) if path.is_absolute() else 'invalid:' + raw
+except (OSError, ValueError, RuntimeError):
+    identity = 'invalid:' + raw
+print(hashlib.sha256(identity.encode()).hexdigest())
+'@
+if ($LASTEXITCODE -ne 0) { throw 'Could not identify the configured source archive. Check MAESTRO_CONTEXT_ARCHIVE_DIR.' }
 $previewUrl = 'http://127.0.0.1:8765'
 try { $health = Invoke-RestMethod -Uri "$previewUrl/health" -TimeoutSec 2; $healthAvailable = $true } catch { $healthAvailable = $false }
 if ($healthAvailable) {
     if ($health.application -ne 'maestro' -or $health.mode -notin @('local', 'preview')) { throw 'Port 8765 is occupied by another application.' }
     if ($health.workspace_id -ne $workspaceId) { throw 'Maestro is already running with a different or unverified private data directory. Stop that instance using its original MAESTRO_DATA_DIR before starting this workspace.' }
+    if ($health.archive_id -ne $archiveId) { throw 'Maestro is already running with a different or unverified source archive. Stop that instance, then restart Maestro with the intended MAESTRO_CONTEXT_ARCHIVE_DIR.' }
     Write-Output "Maestro is already running at $previewUrl"
     if (-not $NoBrowser) { Start-Process $previewUrl }
     return
@@ -55,7 +70,7 @@ try {
             if ($serverProcess.HasExited) { throw "Maestro could not start. Check $dataDirectory\server.stderr.log" }
             try {
                 $health = Invoke-RestMethod -Uri "$previewUrl/health" -TimeoutSec 1
-                if ($health.application -eq 'maestro' -and $health.mode -in @('local', 'preview') -and $health.launch_id -eq $env:MAESTRO_LAUNCH_ID -and -not $serverProcess.HasExited) { $ready = $true; break }
+                if ($health.application -eq 'maestro' -and $health.mode -in @('local', 'preview') -and $health.launch_id -eq $env:MAESTRO_LAUNCH_ID -and $health.archive_id -eq $archiveId -and -not $serverProcess.HasExited) { $ready = $true; break }
             } catch { }
             Start-Sleep -Milliseconds 200
         }

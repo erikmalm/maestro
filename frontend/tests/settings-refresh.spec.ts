@@ -1,3 +1,4 @@
+import { fulfillUnconfiguredArchiveRead } from "./archive-fixture";
 import { expect, test, type Page, type Route } from "@playwright/test";
 import type { Workspace } from "../src/api";
 
@@ -63,6 +64,7 @@ async function mockSettings(
 ) {
   let pending: Route | undefined;
   await page.route("**/api/**", async (route) => {
+    if (await fulfillUnconfiguredArchiveRead(route)) return;
     const path = new URL(route.request().url()).pathname;
     if (path === hold && route.request().method() !== "GET") pending = route;
     else if (path === "/api/session") {
@@ -844,6 +846,7 @@ for (const [name, order, failed] of [
     const pending: { route: Route; snapshot: Workspace }[] = [];
     let loaded = false;
     await page.route("**/api/**", async (route) => {
+      if (await fulfillUnconfiguredArchiveRead(route)) return;
       const path = new URL(route.request().url()).pathname;
       if (path === "/api/session") {
         await route.fulfill({ json: { csrf: "synthetic-csrf" } });
@@ -925,6 +928,7 @@ test("a delayed limits save keeps newer provider settings", async ({
   let saved: { route: Route; snapshot: Workspace } | undefined;
   let reads = 0;
   await page.route("**/api/**", async (route) => {
+    if (await fulfillUnconfiguredArchiveRead(route)) return;
     const path = new URL(route.request().url()).pathname;
     if (path === "/api/session") {
       await route.fulfill({ json: { csrf: "synthetic-csrf" } });
@@ -979,6 +983,7 @@ test("settings refreshes preserve an explicitly selected new chat", async ({
   const pending: { route: Route; snapshot: Workspace }[] = [];
   let loaded = false;
   await page.route("**/api/**", async (route) => {
+    if (await fulfillUnconfiguredArchiveRead(route)) return;
     const url = new URL(route.request().url());
     if (url.pathname === "/api/session") {
       await route.fulfill({ json: { csrf: "synthetic-csrf" } });

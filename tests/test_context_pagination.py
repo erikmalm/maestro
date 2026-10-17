@@ -161,8 +161,11 @@ class ContextPaginationTests(unittest.TestCase):
         self.assertIn("captures_by_retrieval", self.index_names())
         self.assertEqual([row for row in self.rows() if row[0] != saved["capture_id"]], records)
 
-    def test_fresh_configuration_and_inventory_do_not_create_a_missing_index(self):
+    def test_explicit_empty_setup_creates_index_but_inventory_never_repairs_its_loss(self):
         self.store.configure(self.config)
+        self.assertTrue(self.store.index.is_file())
+        self.assertEqual(self.store.list_captures()["state"], "ready")
+        self.store.index.unlink()
         self.assertFalse(self.store.index.exists())
         before = self.store.database.read_bytes()
         self.assertEqual(self.store.list_captures()["state"], "unavailable")
