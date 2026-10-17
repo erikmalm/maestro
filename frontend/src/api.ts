@@ -92,9 +92,11 @@ async function request<T>(
   path: string,
   method = "GET",
   body?: unknown,
+  signal?: AbortSignal,
 ): Promise<T> {
   const response = await fetch(`/api${path}`, {
     method,
+    signal,
     credentials: "same-origin",
     headers: {
       "Content-Type": "application/json",
@@ -295,6 +297,7 @@ export const loadContextCapture = (
   id: string,
   contentHash: string,
   manifestHash: string,
+  signal?: AbortSignal,
 ) => {
   const query = new URLSearchParams({
     content_hash: contentHash,
@@ -302,6 +305,9 @@ export const loadContextCapture = (
   });
   return request<ContextCapture>(
     `/context/sources/${encodeURIComponent(id)}?${query}`,
+    "GET",
+    undefined,
+    signal,
   );
 };
 

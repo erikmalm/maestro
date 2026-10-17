@@ -39,12 +39,21 @@ export default function useEvidence() {
   const mounted = useRef(false);
   const listRevision = useRef(0);
   const detailRevision = useRef(0);
+  const detailRequest = useRef(null);
+  const selectedOffPage = useRef(false);
   const listBusy = useRef(false);
   const pendingRefresh = useRef(false);
   const sourceButton = useRef(null);
 
-  function closeSource(restoreFocus = false) {
+  function cancelDetail() {
     detailRevision.current += 1;
+    detailRequest.current?.controller.abort();
+    detailRequest.current = null;
+  }
+
+  function closeSource(restoreFocus = false) {
+    cancelDetail();
+    selectedOffPage.current = false;
     selectedRef.current = null;
     setSelected(null);
     setDetail(emptyDetail());
@@ -56,7 +65,7 @@ export default function useEvidence() {
   function withholdDetail() {
     // Snapshots started before a privacy boundary cannot publish afterward.
     listRevision.current += 1;
-    detailRevision.current += 1;
+    cancelDetail();
     setDetail({
       source: null,
       loading:
@@ -66,7 +75,14 @@ export default function useEvidence() {
   }
 
   async function readSource(source, quiet = false) {
-    const revision = ++detailRevision.current;
+    if (sameVersion(detailRequest.current?.source, source)) return;
+    cancelDetail();
+    const request = {
+      source,
+      revision: detailRevision.current,
+      controller: new AbortController(),
+    };
+    detailRequest.current = request;
     setDetail((previous) => ({
       source: quiet ? previous.source : null,
       loading: !quiet || !previous.source,
@@ -77,15 +93,16 @@ export default function useEvidence() {
         source.capture_id,
         source.content_hash,
         source.manifest_hash,
+        request.controller.signal,
       );
       if (!sameVersion(capture, source))
         throw new Error(
           "This saved source version changed. Open it again from the list.",
         );
-      if (mounted.current && revision === detailRevision.current)
+      if (mounted.current && request.revision === detailRevision.current)
         setDetail({ source: capture, loading: false, error: "" });
     } catch (reason) {
-      if (mounted.current && revision === detailRevision.current)
+      if (mounted.current && request.revision === detailRevision.current)
         setDetail({
           source: null,
           loading: false,
@@ -94,6 +111,8 @@ export default function useEvidence() {
               ? reason.message
               : "Could not open this saved source.",
         });
+    } finally {
+      if (detailRequest.current === request) detailRequest.current = null;
     }
   }
 
@@ -147,18 +166,18 @@ export default function useEvidence() {
       inventoryRef.current = next;
       setInventory(next);
       const current = selectedRef.current;
-      if (
-        current &&
-        (next.state !== "ready" ||
-          !next.sources.some((source) => sameVersion(source, current)))
-      ) {
+      if (current && next.state !== "ready") {
         closeSource();
-      } else if (
-        current &&
-        document.visibilityState === "visible" &&
-        !pendingRefresh.current
-      ) {
-        await readSource(current, true);
+      } else if (current && document.visibilityState === "visible") {
+        const listed = next.sources.some((source) =>
+          sameVersion(source, current),
+        );
+        if (!listed && !selectedOffPage.current) {
+          cancelDetail();
+          setDetail({ source: null, loading: true, error: "" });
+        }
+        selectedOffPage.current = !listed;
+        void readSource(current, true);
       }
     } catch (reason) {
       if (!mounted.current || revision !== listRevision.current) return;
@@ -186,6 +205,7 @@ export default function useEvidence() {
   function openSource(source, button) {
     if (document.visibilityState !== "visible") return;
     sourceButton.current = button;
+    selectedOffPage.current = false;
     selectedRef.current = source;
     setSelected(source);
     void readSource(source);
@@ -218,7 +238,7 @@ export default function useEvidence() {
       window.removeEventListener("focus", focus);
       document.removeEventListener("visibilitychange", visibility);
       listRevision.current += 1;
-      detailRevision.current += 1;
+      cancelDetail();
       pendingRefresh.current = false;
     };
   }, []);

@@ -53,6 +53,10 @@
 .evidence-more {
   margin-top: 16px;
 }
+.evidence-more[aria-disabled="true"] {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
 .evidence-detail {
   margin-top: 24px;
   padding: 22px;

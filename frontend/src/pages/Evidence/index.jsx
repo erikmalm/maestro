@@ -64,7 +64,8 @@ export default function Evidence() {
           {inventory.next_cursor && (
             <button
               className="button secondary evidence-more"
-              disabled={loading || refreshing}
+              disabled={loading}
+              aria-disabled={refreshing || undefined}
               onClick={data.loadMore}
             >
               Load more sources
