@@ -55,6 +55,9 @@ class ContextInventoryTests(unittest.TestCase):
 
     def test_missing_index_is_unavailable_but_existing_empty_index_is_ready(self):
         self.store.configure(self.config)
+        # Setup explicitly creates an empty catalogue; remove it to exercise
+        # missing-index reads rather than relying on an uninitialized setup.
+        self.store.index.unlink()
         before = self.snapshot()
         result = self.store.list_captures()
         self.assertEqual(result["state"], "unavailable")

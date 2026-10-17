@@ -1,3 +1,4 @@
+import { fulfillUnconfiguredArchiveRead } from "./archive-fixture";
 import { expect, test, type Page, type Route } from "@playwright/test";
 import type { LocalRequest, Workspace } from "../src/api";
 
@@ -67,6 +68,7 @@ async function recoveryFixture(
   let workspaceReads = 0;
   const recoveries: { body: unknown; csrf: string | undefined }[] = [];
   await page.route("**/api/**", async (route) => {
+    if (await fulfillUnconfiguredArchiveRead(route)) return;
     const path = new URL(route.request().url()).pathname;
     if (path === "/api/session")
       await route.fulfill({ json: { csrf: "synthetic-csrf" } });

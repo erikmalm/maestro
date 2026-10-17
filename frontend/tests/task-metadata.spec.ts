@@ -1,3 +1,4 @@
+import { fulfillUnconfiguredArchiveRead } from "./archive-fixture";
 import { expect, test, type Page, type Route } from "@playwright/test";
 import type { Workspace } from "../src/api";
 
@@ -49,6 +50,7 @@ async function taskFixture(page: Page) {
   let holdNext = false;
   let held: Route | undefined;
   await page.route("**/api/**", async (route) => {
+    if (await fulfillUnconfiguredArchiveRead(route)) return;
     const path = new URL(route.request().url()).pathname;
     const method = route.request().method();
     if (path === "/api/session")

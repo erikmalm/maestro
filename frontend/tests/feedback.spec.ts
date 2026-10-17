@@ -1,3 +1,4 @@
+import { fulfillUnconfiguredArchiveRead } from "./archive-fixture";
 import { expect, test, type Page, type Route } from "@playwright/test";
 import type { Message, MessageFeedback, Workspace } from "../src/api";
 
@@ -53,6 +54,7 @@ async function feedbackFixture(page: Page) {
     messages: messages[id] ?? [],
   });
   await page.route("**/api/**", async (route) => {
+    if (await fulfillUnconfiguredArchiveRead(route)) return;
     const url = new URL(route.request().url());
     if (url.pathname === "/api/session") {
       await route.fulfill({ json: { csrf: "synthetic-csrf" } });
