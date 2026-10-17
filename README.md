@@ -1,6 +1,6 @@
 # Maestro
 
-A local web interface for persistent chats with your chosen model, usage tracking and to-dos. Workspace, Tasks, Memory and Settings expose live conversation, user-created and reviewed AI-created tasks, private memory and configuration.
+A local web interface for persistent chats with your chosen model, usage tracking and to-dos. Workspace, Tasks, Memory, Evidence and Settings expose live conversation, user-created and reviewed AI-created tasks, private memory, saved source versions and configuration.
 
 The [architectural overview](docs/ARCHITECTURE.md) defines the planned reviewed search workflow, source storage and shared limits separately from implemented behavior. New UI work follows its [React page and component composition](docs/ARCHITECTURE.md#frontend-composition-and-visible-increments), using small JS/JSX pages, cohesive data hooks and reusable parameterized components.
 
@@ -67,6 +67,12 @@ Automatic search sends the model's chosen query to Ollama.com; queries can conta
 Search attempts, including tests, failures and interrupted requests, count toward the daily cap. Requests are at least five seconds apart, have a 30-second search timeout and no automatic retry. Rate-limit responses pause further searches and respect `Retry-After` (60 seconds if absent). These controls use the hosted service normally and do not evade site or service restrictions. Search counts are visible in usage, and cooldowns appear beside the search controls in Settings; the search API supplies no billing feed, so search fees are not included in the local model's $0 inference figure. [Ollama's announcement](https://ollama.com/blog/web-search) describes free searches and subscription rate limits without a numerical quota or per-search price.
 
 Rejected key/account access disables automatic search until the key is successfully retested and search is explicitly enabled again. Ordinary local chat remains available.
+
+## Saved evidence
+
+Open **Evidence** in the sidebar to inspect source versions already saved in the configured archive and local index. The list updates automatically while the view is open. The table loads metadata; **View saved text** checks the exact saved version before displaying its text. Retrieval dates, unknown publication dates and excerpt/truncation labels describe the evidence available. Browsing uses no searches or model calls.
+
+This increment is read-only. It distinguishes disabled, unconfigured and unavailable storage from an empty index. Archive configuration, the read APIs and this browser are merged through PRs #17, #41 and #42. Permanent setup is the next functional task ([#36](https://github.com/erikmalm/maestro/issues/36)); it has no implementation PR yet. Restart checks use a separate disposable test store, and the normal archive may remain empty until capture is connected. Saved lookup and the reviewed research loop follow without waiting for a searchable index or graph. The page does not import old archives or change memory handling. See the [delivery plan](DEVELOPMENT_PLAN.md#next-delivery-sequence) for the next reviewable PR and ordered work.
 
 ## Private memory
 

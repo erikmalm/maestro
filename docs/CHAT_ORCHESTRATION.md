@@ -1,6 +1,6 @@
 # Chat assessment and delegation
 
-Design updated 2026-10-16. Local coordinator-model selection and bounded source-tool continuation are implemented. The separate assessment, research evidence review, final answer vetting, durable progress and specialist workflow below remain proposed.
+Design agreed 2026-10-16; main checkpoint updated 2026-10-17. Local coordinator-model selection, one hosted-search continuation and the separate read-only Evidence browser are implemented. Requirements assessment, evidence coverage review, final answer vetting, durable research progress and specialist execution below remain proposed.
 
 Each user message should first reach a coordinator that assesses the request and chooses how to handle it. The coordinator can answer directly, ask a necessary clarification, follow the research workflow, or assign a bounded task to an available specialist. The user sees useful progress as work happens and receives one coherent answer in the original conversation. The [target research workflow](ARCHITECTURE.md#target-research-workflow) is the architectural overview; this document describes its place in chat routing and the existing specialist design.
 
@@ -8,17 +8,17 @@ The first implementation should use local Ollama, one specialist at most when de
 
 ## Current behavior
 
-Implementation baseline: this section describes draft #8 and the local integration working tree, not every feature merged on main. Main retains its existing bounded hosted-search path; saved-source lookup and configurable one-to-five lookup continuation described below remain draft/local integration behavior. The proposed research review stages remain unimplemented on either baseline.
+Implementation baseline: main `555591e` includes archive configuration/ownership (#17), source inventory/pinned-read APIs (#41) and automatic Evidence updates (#42). Fresh main checks pass 417 backend tests and 83 browser tests, including 12 Evidence cases. These source reads do not implement question-specific retrieval or research review.
 
 The chat UI submits `role: chat` to `POST /api/chat`, which waits for `Provider.chat` to finish. Local **Chat routing** chooses the normal chat model or configured installed orchestrator model, with chat-model fallback for a blank orchestrator choice. An explicit per-message model overrides that route. Existing configurations default to `direct`; `orchestrator` applies to local Ollama only. The reply and ledger record the actual selected model.
 
-The selected model receives conversation context and optional private memory, chooses whether to use the available source tool and writes the answer. Web search and saved-source lookup share a configurable one-to-five lookup allowance per message and the existing output budget and generation slot. Reaching the allowance ends research and produces a reply from collected evidence with an explicit restriction notice. Local follow-ups can receive bounded server-authored prior-source evidence without another hosted search. Model selection does not add a separate typed assessment call or a worker handoff. The browser reveals the completed reply progressively; provider streaming and durable live stage events remain planned.
+The selected model receives conversation context and optional private memory, chooses whether to request the hosted search tool and writes the answer. Main permits one hosted-search round and at most two answer-model calls with shared accounting. It does not yet query saved evidence or automatically capture those results. Model selection adds no separate typed assessment or worker handoff. The browser reveals the completed reply progressively; provider streaming and durable semantic stage events remain planned. Evidence independently browses the saved-source catalogue, updates automatically and revalidates pinned text without model or hosted-search calls.
 
 Background reflection has its own fixed formation and review workflow. It can create attributed to-dos, but those records do not execute. The coordinator route is a synchronous chat option; general delegation is unavailable. See the [architecture](ARCHITECTURE.md) and [development plan](../DEVELOPMENT_PLAN.md).
 
 ## Target research branch
 
-This branch is proposed. Today, in default prefer-saved mode, freshness classified as current or unspecified bypasses saved lookup and goes to fresh acquisition; stable requests can reuse saved matches. Saved-only mode keeps its network prohibition. The same selected model then continues research or answers. There is no separate orchestrator decision that accepts DB candidates, no separate answer writer, and no final semantic vetting phase. Evidence integrity and storage checks remain necessary but do not establish that an answer satisfies the request.
+This branch is proposed. Main has no orchestrator decision accepting local candidates, separate answer writer or final semantic vetting phase. Older draft #8 demonstrated cache modes and source replay, but its routing is not a prerequisite to import. Evidence integrity and current-credential checks remain necessary and do not establish that a saved source answers a request.
 
 The target sequence is request requirements, DB candidates, orchestrator coverage and freshness review, targeted acquisition with ingestion, answer writing, and final vetting. The orchestrator retains the original request and its acceptance criteria through every phase.
 
@@ -154,6 +154,8 @@ All child attempts inherit the parent's remaining call, token, time, estimated s
 Publish persisted, ordered status events linked to the run. A proposed API returns a run ID promptly, provides a read endpoint for current state, and offers an authenticated server-sent event stream that can resume after the last event ID. Reuse local session checks, validate Origin on reads, and require CSRF protection for creation and cancellation. Implement snapshot polling first if it makes the initial increment smaller; the persistence and ordering contract is the same. Browser disconnect never cancels work by itself. Provider token streaming is a separate enhancement.
 
 ## Implementation increments
+
+The next existing review is documentation PR #40. Permanent real-store setup and restart proof (#36, no implementation PR yet) precede local candidate lookup (#22). Then complete the first saved-source pipeline through owned runs (#23), shared stage admission/limits (#37), requirements/coverage (#24/#25), writer and final review (#26/#27). The searchable Evidence index (#43) and provenance graph (#34) may proceed in parallel or later; neither blocks that loop. Current-main baseline #35 is verified; draft-specific fixture PR #39 is closed as superseded for this rollout, and the whole of #8 is not a prerequisite.
 
 Start the research branch as an explicit opt-in route. Automatic direct/research/clarification routing is a separate rollout increment with parity checks for current-information requests, source-preserving follow-ups, unavailable research and weather/date handling. Keep temporary adapters until supported callers have migrated. A later cleanup increment removes unused routing branches, prompt/tool-schema copies, compatibility shims and duplicate UI paths only after caller and regression checks. Cleanup means retiring superseded implementation code; it does not delete saved source content, source versions, historical citations, private-memory records or the memory subsystem.
 
