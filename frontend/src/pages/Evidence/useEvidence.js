@@ -26,7 +26,7 @@ export function sourceURL(value) {
   }
 }
 
-export default function useEvidence() {
+export default function useEvidence(onRestoreFocus) {
   const [inventory, setInventory] = useState(null);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -43,7 +43,6 @@ export default function useEvidence() {
   const selectedOffPage = useRef(false);
   const listBusy = useRef(false);
   const pendingRefresh = useRef(false);
-  const sourceButton = useRef(null);
 
   function cancelDetail() {
     detailRevision.current += 1;
@@ -52,14 +51,13 @@ export default function useEvidence() {
   }
 
   function closeSource(restoreFocus = false) {
+    const source = selectedRef.current;
     cancelDetail();
     selectedOffPage.current = false;
     selectedRef.current = null;
     setSelected(null);
     setDetail(emptyDetail());
-    if (restoreFocus && sourceButton.current?.isConnected)
-      sourceButton.current.focus();
-    sourceButton.current = null;
+    if (restoreFocus) onRestoreFocus?.(source);
   }
 
   function withholdDetail() {
@@ -202,9 +200,8 @@ export default function useEvidence() {
     }
   }
 
-  function openSource(source, button) {
+  function openSource(source) {
     if (document.visibilityState !== "visible") return;
-    sourceButton.current = button;
     selectedOffPage.current = false;
     selectedRef.current = source;
     setSelected(source);

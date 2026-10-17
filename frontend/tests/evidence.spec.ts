@@ -448,6 +448,67 @@ test("a selected version outside the refreshed page stays pinned and is checked 
   }
 });
 
+for (const reappears of [false, true]) {
+  test(`keyboard close restores focus after the selected source ${reappears ? "reappears with a new row button" : "moves outside the loaded page"}`, async ({
+    page,
+  }) => {
+    let stage = "listed";
+    const requests = await evidenceFixture(page, () =>
+      ready(
+        stage === "absent"
+          ? [anotherSource]
+          : stage === "returned"
+            ? [source, anotherSource]
+            : [source],
+        "more-sources",
+      ),
+    );
+    const content = page.getByLabel("Saved source content");
+    const close = page.getByRole("button", { name: "Close saved text" });
+    const currentOpen = page
+      .getByRole("row")
+      .filter({ hasText: source.title })
+      .getByRole("button", { name: "View saved text" });
+    const originalButton = await currentOpen.elementHandle();
+    expect(originalButton).not.toBeNull();
+    await currentOpen.click();
+    await expect(content).toHaveText(savedText);
+    await close.focus();
+
+    stage = "absent";
+    await page.clock.fastForward(15_000);
+    await expect(currentOpen).toHaveCount(0);
+    await expect.poll(() => requests.openings.length).toBe(2);
+    await expect(content).toHaveText(savedText);
+    await expect(close).toBeFocused();
+    expect(await originalButton!.evaluate((button) => button.isConnected)).toBe(
+      false,
+    );
+
+    if (reappears) {
+      stage = "returned";
+      await page.clock.fastForward(15_000);
+      await expect(currentOpen).toBeVisible();
+      await expect.poll(() => requests.openings.length).toBe(3);
+      await expect(content).toHaveText(savedText);
+      await expect(close).toBeFocused();
+      expect(
+        await originalButton!.evaluate((button) => button.isConnected),
+      ).toBe(false);
+    }
+
+    await page.keyboard.press("Enter");
+    await expect(content).toHaveCount(0);
+    await expect(close).toHaveCount(0);
+    await expect(
+      reappears
+        ? currentOpen
+        : page.getByRole("heading", { name: "Evidence", exact: true }),
+    ).toBeFocused();
+    await originalButton!.dispose();
+  });
+}
+
 test("slow selected-text validation neither blocks inventory and pagination nor overlaps or starves on later polls", async ({
   page,
 }) => {

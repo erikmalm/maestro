@@ -47,8 +47,9 @@ export default function SourceTable({ sources, loading, selected, onOpen }) {
               <td>
                 <button
                   className="button secondary"
+                  data-capture-id={source.capture_id}
                   disabled={loading}
-                  onClick={(event) => onOpen(source, event.currentTarget)}
+                  onClick={() => onOpen(source)}
                 >
                   View saved text
                 </button>

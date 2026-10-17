@@ -1,3 +1,4 @@
+import { useRef } from "react";
 import useEvidence from "./useEvidence";
 import SourceTable from "./SourceTable";
 import SourceDetail from "./SourceDetail";
@@ -10,13 +11,27 @@ const stateMessages = {
 };
 
 export default function Evidence() {
-  const data = useEvidence();
+  const page = useRef(null);
+  const data = useEvidence((source) => {
+    const opener =
+      source &&
+      page.current?.querySelector(
+        `button[data-capture-id="${CSS.escape(source.capture_id)}"]`,
+      );
+    const target =
+      opener &&
+      !opener.disabled &&
+      opener.getAttribute("aria-disabled") !== "true"
+        ? opener
+        : page.current?.querySelector("h1");
+    target?.focus();
+  });
   const { inventory, loading, refreshing, error, selected, detail } = data;
   return (
-    <main className="page-content evidence-page">
+    <main className="page-content evidence-page" ref={page}>
       <div className="page-heading">
         <div>
-          <h1>Evidence</h1>
+          <h1 tabIndex={-1}>Evidence</h1>
           <p>
             Inspect saved source versions. Opening saved text verifies that
             version.
