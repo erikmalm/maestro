@@ -1,3 +1,4 @@
+import { fulfillUnconfiguredArchiveRead } from "./archive-fixture";
 import { expect, test, type Page } from "@playwright/test";
 import { mkdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -104,6 +105,7 @@ async function mapFixture(page: Page, many = false) {
   state.work!.config.enabled = false;
   state.work!.config.auto_curate = true;
   await page.route("**/api/**", async (route) => {
+    if (await fulfillUnconfiguredArchiveRead(route)) return;
     const path = new URL(route.request().url()).pathname;
     if (path === "/api/session")
       await route.fulfill({ json: { csrf: "synthetic-csrf" } });

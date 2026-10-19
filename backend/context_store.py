@@ -85,6 +85,7 @@ class ContextStore:
             self.archive = path
         self._token = uuid.uuid4().hex
         self._write_lock = threading.RLock()
+        self.path_error = None
 
     def now(self):
         return datetime.now(timezone.utc)
@@ -150,7 +151,9 @@ class ContextStore:
             state = {**state, "last_error": "The local source index needs rebuilding."}
         available = not state.get("write_unavailable") and archive_available(self.archive, self._token)
         return {"configured": self.archive is not None, "available": available,
-                "path": str(self.archive) if self.archive else None, "config": state["config"], "indexed_count": count,
+                "path": str(self.archive) if self.archive else None,
+                "database_path": str(self.database), "index_path": str(self.index), "path_error": self.path_error,
+                "config": state["config"], "indexed_count": count,
                 **{field: state[field] for field in ("missing_count", "corrupt_count", "archive_bytes", "archive_items",
                                                     "last_error", "last_indexed_at", "last_capture", "rebuild_progress")}}
 
@@ -176,19 +179,22 @@ class ContextStore:
 
     @storage_errors
     def configure(self, config):
+        if self.path_error:
+            raise ValueError(self.path_error)
         config = configuration(config)
         try:
             with (self._writer() if config["enabled"] else self._write_lock):
                 previous = self._state()["config"]
                 if config["enabled"]:
                     self._format()
-                    # Upgrade an existing local index during explicit setup,
-                    # never as a side effect of read-only inventory requests.
-                    if self.index.is_file():
+                    # Inventory is already bounded and does not open captures.
+                    total, items, captures = archive_inventory(self.archive, MAX_ARCHIVE_ITEMS * 2)
+                    # Explicit setup can initialize a genuinely empty archive.
+                    # Existing captures without their index require recovery;
+                    # never hide them behind a newly created empty catalogue.
+                    if self.index.is_file() or not captures:
                         with closing(self._index_connection()) as db, db:
                             pass
-                    # Saving a lower cap remains possible for an already larger archive.
-                    total, items, _ = archive_inventory(self.archive, MAX_ARCHIVE_ITEMS * 2)
                 with self._transaction() as (state, db):
                     if any(config[field] != previous[field] for field in ("enabled", "capture_policy", "public_sources")):
                         db.execute("DELETE FROM context_queries")
@@ -249,6 +255,8 @@ class ContextStore:
         result = {"state": "ready", "sources": [], "next_cursor": None, "skipped_count": 0}
         with self._write_lock:
             try:
+                if self.path_error:
+                    raise ValueError()
                 if self.archive is None:
                     return {**result, "state": "unconfigured"}
                 config = configuration(self._state()["config"])

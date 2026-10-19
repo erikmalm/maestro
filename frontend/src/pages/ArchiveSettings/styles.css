@@ -1,0 +1,45 @@
+.archive-settings {
+  min-width: 0;
+  margin-bottom: 24px;
+}
+.settings-side > .archive-settings {
+  margin-bottom: 0;
+}
+.archive-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.archive-heading h2 {
+  margin: 0;
+}
+.archive-paths,
+.archive-statistics {
+  display: grid;
+  gap: 16px;
+  margin: 20px 0;
+}
+.archive-statistics {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+.archive-settings dt {
+  color: var(--muted);
+  font-size: 12px;
+  margin-bottom: 6px;
+}
+.archive-settings dd {
+  margin: 0;
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+.archive-paths code {
+  white-space: pre-wrap;
+}
+.archive-startup-note {
+  overflow-wrap: anywhere;
+}
+.archive-settings button[aria-disabled="true"] {
+  cursor: not-allowed;
+  opacity: 0.5;
+}

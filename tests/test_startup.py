@@ -16,9 +16,9 @@ class HealthTests(unittest.TestCase):
             result = subprocess.run(
                 [sys.executable, "-c", "from fastapi.testclient import TestClient; from backend.app import app; "
                  "response = TestClient(app).get('/health'); assert response.status_code == 200; "
-                 f"assert response.json() == {{'application': 'maestro', 'mode': 'local', 'launch_id': 'test-launch', 'workspace_id': '{workspace_id}'}}"],
+                 f"assert response.json() == {{'application': 'maestro', 'mode': 'local', 'launch_id': 'test-launch', 'workspace_id': '{workspace_id}', 'archive_id': '{hashlib.sha256(b'none').hexdigest()}'}}"],
                 cwd=Path(__file__).resolve().parent.parent,
-                env={**os.environ, "MAESTRO_DATA_DIR": directory, "MAESTRO_LAUNCH_ID": "test-launch"},
+                env={**os.environ, "MAESTRO_DATA_DIR": directory, "MAESTRO_LAUNCH_ID": "test-launch", "MAESTRO_CONTEXT_ARCHIVE_DIR": ""},
                 capture_output=True, text=True, timeout=20,
             )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
@@ -44,6 +44,26 @@ $identityStatements = $ast.EndBlock.Statements | Where-Object {
 $identify = [scriptblock]::Create(($identityStatements.Extent.Text -join "`n"))
 . $identify
 if ($workspaceId -ne $env:MAESTRO_EXPECTED_WORKSPACE_ID) { throw 'Launcher and backend workspace identities differ.' }
+if ($archiveId -ne $env:MAESTRO_EXPECTED_ARCHIVE_ID) { throw 'Launcher and backend blank archive identities differ.' }
+$blankArchiveId = $archiveId
+$env:MAESTRO_CONTEXT_ARCHIVE_DIR = 'relative/source-archive'
+. $identify
+$relativeArchiveId = $archiveId
+Push-Location $dataDirectory
+try { . $identify } finally { Pop-Location }
+if ($archiveId -ne $relativeArchiveId -or $archiveId -ne $env:MAESTRO_EXPECTED_RELATIVE_ARCHIVE_ID) { throw 'Invalid relative archive identity depended on the launcher working directory.' }
+$env:MAESTRO_CONTEXT_ARCHIVE_DIR = Join-Path (Split-Path -Parent $dataDirectory) 'maestro-archive-identity'
+. $identify
+$configuredArchiveId = $archiveId
+if ($configuredArchiveId -eq $blankArchiveId) { throw 'Configured archive reused the blank identity.' }
+$env:MAESTRO_CONTEXT_ARCHIVE_DIR = (Join-Path $env:MAESTRO_CONTEXT_ARCHIVE_DIR '.').ToUpperInvariant()
+. $identify
+if ($archiveId -ne $configuredArchiveId) { throw 'Equivalent archive paths changed archive identity.' }
+$env:MAESTRO_CONTEXT_ARCHIVE_DIR = Join-Path (Split-Path -Parent $dataDirectory) 'maestro-other-archive'
+. $identify
+if ($archiveId -eq $configuredArchiveId) { throw 'Another archive reused the archive identity.' }
+$env:MAESTRO_CONTEXT_ARCHIVE_DIR = ''
+. $identify
 $originalDirectory = $dataDirectory
 $dataDirectory = (Join-Path $dataDirectory '.').ToUpperInvariant()
 . $identify
@@ -84,16 +104,20 @@ function Start-Sleep { $script:sleeps++ }
 function Invoke-RestMethod {
     $script:polls++
     if ($mode -eq 'health-exit' -or ($mode -eq 'other-health-exit' -and $polls -eq 2)) { $fakeProcess.HasExited = $true }
-    if ($mode -in @('success', 'success-changed-pid', 'health-exit', 'retry-success', 'retry-stale', 'browser-failure', 'other-health', 'missing-health', 'other-health-exit', 'eventual-health')) {
-        $response = @{ application = 'maestro'; mode = 'local'; launch_id = $launchedNonce; workspace_id = $workspaceId }
+    if ($mode -in @('success', 'success-changed-pid', 'health-exit', 'retry-success', 'retry-stale', 'browser-failure', 'other-health', 'missing-health', 'other-health-exit', 'eventual-health', 'wrong-archive-health', 'missing-archive-health', 'eventual-archive-health')) {
+        $response = @{ application = 'maestro'; mode = 'local'; launch_id = $launchedNonce; workspace_id = $workspaceId; archive_id = $archiveId }
         if ($mode -like 'other-health*' -or ($mode -eq 'eventual-health' -and $polls -eq 1)) { $response.launch_id = 'another-launch' }
         if ($mode -eq 'missing-health') { $response.Remove('launch_id') }
+        if ($mode -eq 'wrong-archive-health' -or ($mode -eq 'eventual-archive-health' -and $polls -eq 1)) { $response.archive_id = 'another-archive' }
+        if ($mode -eq 'missing-archive-health') { $response.Remove('archive_id') }
         return $response
     }
     if ($mode -like 'reuse-*') {
-        $response = @{ application = 'maestro'; mode = 'local'; workspace_id = $workspaceId }
+        $response = @{ application = 'maestro'; mode = 'local'; workspace_id = $workspaceId; archive_id = $archiveId }
         if ($mode -eq 'reuse-different') { $response.workspace_id = 'another-workspace' }
         if ($mode -eq 'reuse-missing') { $response.Remove('workspace_id') }
+        if ($mode -eq 'reuse-archive-different') { $response.archive_id = 'another-archive' }
+        if ($mode -eq 'reuse-archive-missing') { $response.Remove('archive_id') }
         return $response
     }
     throw 'Synthetic health timeout'
@@ -116,12 +140,14 @@ $mode = 'browser-failure'; $NoBrowser = $false; $continued = $false; $failure = 
 try { . $healthProbe; $continued = $true } catch { $failure = $_.Exception.Message }
 if ($continued -or $failure -ne 'Synthetic browser failure') { throw 'Browser failure retried an already-running server.' }
 $NoBrowser = $true
-foreach ($mode in @('reuse-same', 'reuse-different', 'reuse-missing')) {
+foreach ($mode in @('reuse-same', 'reuse-different', 'reuse-missing', 'reuse-archive-different', 'reuse-archive-missing')) {
     $failure = $null; $launches = 0; $polls = 0; $output = $null
     try { $output = & $healthProbe } catch { $failure = $_.Exception.Message }
     if ($launches -or $polls -ne 1) { throw 'Workspace reuse started a process or retried a healthy server.' }
     if ($mode -eq 'reuse-same') {
         if ($failure -or $output -ne "Maestro is already running at $previewUrl") { throw 'Matching workspace did not reuse its healthy server.' }
+    } elseif ($mode -like 'reuse-archive-*') {
+        if ($failure -notlike '*different or unverified source archive*Stop*restart*MAESTRO_CONTEXT_ARCHIVE_DIR*' -or $stopped) { throw 'Archive mismatch was reused or stopped without an explicit restart.' }
     } elseif ($failure -notlike '*different or unverified private data directory*') { throw 'Workspace reuse accepted a conflicting or absent identity.' }
 }
 foreach ($mode in @('retry-success', 'retry-stale', 'retry-unrelated', 'cleanup-failure', 'cleanup-live')) {
@@ -134,22 +160,22 @@ foreach ($mode in @('retry-success', 'retry-stale', 'retry-unrelated', 'cleanup-
         if (($mode -eq 'retry-success') -ne $stopped) { throw 'Retry stopped an unexpected process.' }
     } elseif (-not $failure -or $launches -or $stopped -or (Get-Content -LiteralPath $pidPath) -ne '43210') { throw 'Retry replaced an unresolved process record.' }
 }
-foreach ($mode in @('exit', 'health-exit', 'timeout', 'cleanup-failure', 'cleanup-untracked', 'cleanup-changed-pid', 'cleanup-live', 'changed-pid', 'success-changed-pid', 'success', 'other-health', 'missing-health', 'other-health-exit', 'eventual-health')) {
+foreach ($mode in @('exit', 'health-exit', 'timeout', 'cleanup-failure', 'cleanup-untracked', 'cleanup-changed-pid', 'cleanup-live', 'changed-pid', 'success-changed-pid', 'success', 'other-health', 'missing-health', 'other-health-exit', 'eventual-health', 'wrong-archive-health', 'missing-archive-health', 'eventual-archive-health')) {
     $fakeProcess = [pscustomobject]@{ Id = 43210; HasExited = ($mode -eq 'exit') }
     $serverProcess = $null
     $stopped = $false; $polls = 0; $sleeps = 0; $failure = $null; $cleanupWarnings = 0
     Remove-Item -LiteralPath $pidPath -ErrorAction SilentlyContinue
-    if ($mode -notin @('success', 'success-changed-pid', 'cleanup-untracked', 'cleanup-live', 'eventual-health')) { Set-Content -LiteralPath $pidPath -Value $(if ($mode -in @('changed-pid', 'cleanup-changed-pid', 'other-health')) { 99999 } else { 43210 }) }
+    if ($mode -notin @('success', 'success-changed-pid', 'cleanup-untracked', 'cleanup-live', 'eventual-health', 'eventual-archive-health')) { Set-Content -LiteralPath $pidPath -Value $(if ($mode -in @('changed-pid', 'cleanup-changed-pid', 'other-health')) { 99999 } else { 43210 }) }
     try { . $launch } catch { $failure = $_.Exception.Message }
-    if ($mode -in @('success', 'eventual-health')) {
+    if ($mode -in @('success', 'eventual-health', 'eventual-archive-health')) {
         if ($failure -or $stopped -or $fakeProcess.HasExited -or (Get-Content -LiteralPath $pidPath) -ne '43210') { throw 'Success did not preserve its running server and PID.' }
-        if ($mode -eq 'eventual-health' -and ($polls -ne 2 -or $sleeps -ne 1)) { throw 'Readiness accepted another launch or failed to wait for its own server.' }
+        if ($mode -in @('eventual-health', 'eventual-archive-health') -and ($polls -ne 2 -or $sleeps -ne 1)) { throw 'Readiness accepted another launch/archive or failed to wait for its own server.' }
     } elseif ($mode -eq 'success-changed-pid') {
         if (-not $failure -or -not $stopped -or -not $fakeProcess.HasExited -or (Get-Content -LiteralPath $pidPath) -ne '99999') { throw 'Success replaced a concurrent launch PID.' }
     } else {
         $expected = if ($mode -in @('exit', 'health-exit', 'other-health-exit')) { "Maestro could not start. Check $dataDirectory\server.stderr.log" } else { "Maestro did not become ready. Check $dataDirectory\server.stderr.log" }
         if ($failure -ne $expected) { throw "Original startup failure was lost: $failure" }
-        if ($mode -in @('timeout', 'changed-pid', 'other-health', 'missing-health') -and (-not $stopped -or $polls -ne 30 -or $sleeps -ne 30)) { throw 'Unready launch did not stop its process tree after its bounded polls and waits.' }
+        if ($mode -in @('timeout', 'changed-pid', 'other-health', 'missing-health', 'wrong-archive-health', 'missing-archive-health') -and (-not $stopped -or $polls -ne 30 -or $sleeps -ne 30)) { throw 'Unready launch did not stop its process tree after its bounded polls and waits.' }
         if ($mode -like 'cleanup-*') {
             $tracked = if ($mode -eq 'cleanup-changed-pid') { '99999' } else { '43210' }
             if ($fakeProcess.HasExited -or $cleanupWarnings -ne 1 -or (Get-Content -LiteralPath $pidPath) -ne $tracked) { throw 'Surviving launch lost its own record or overwrote another PID.' }
@@ -175,8 +201,10 @@ Write-Output 'Startup cleanup scenarios passed.'
             result = subprocess.run(
                 ["powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", harness],
                 cwd=Path(__file__).resolve().parent.parent,
-                env={**os.environ, "MAESTRO_DATA_DIR": directory,
-                     "MAESTRO_EXPECTED_WORKSPACE_ID": hashlib.sha256(os.path.normcase(str(Path(directory).resolve())).encode()).hexdigest()},
+                env={**os.environ, "MAESTRO_DATA_DIR": directory, "MAESTRO_CONTEXT_ARCHIVE_DIR": "",
+                     "MAESTRO_EXPECTED_WORKSPACE_ID": hashlib.sha256(os.path.normcase(str(Path(directory).resolve())).encode()).hexdigest(),
+                     "MAESTRO_EXPECTED_ARCHIVE_ID": hashlib.sha256(b"none").hexdigest(),
+                     "MAESTRO_EXPECTED_RELATIVE_ARCHIVE_ID": hashlib.sha256(b"invalid:relative/source-archive").hexdigest()},
                 capture_output=True, text=True, timeout=20,
             )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
