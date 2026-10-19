@@ -12,6 +12,7 @@ from typing import Literal
 import secrets
 import sqlite3
 import threading
+import time
 import uuid
 from zoneinfo import ZoneInfo
 
@@ -21,11 +22,11 @@ from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field
 from starlette.middleware.trustedhost import TrustedHostMiddleware
-from backend.provider import Provider
+from backend.provider import Provider, DEFAULT as PROVIDER_DEFAULT
 from backend import credentials
 from backend.capabilities import CAPABILITIES
 from backend.web_search import WebSearch, ENDPOINT as SEARCH_ENDPOINT
-from backend.context_store import ContextStore
+from backend.context_store import ContextStore, validate_candidate_lookup
 from backend.context_policy import configuration as archive_configuration, contains_source_secret, public_url
 from backend.storage import workspace_owner
 from backend.memory import MAX_CONTENT, MemoryStore
@@ -46,6 +47,7 @@ SESSION = secrets.token_urlsafe(32)
 CSRF = secrets.token_urlsafe(32)
 PORT = int(os.environ.get("MAESTRO_PORT", "8765"))
 ORIGINS = {f"http://{host}:{port}" for host in ("127.0.0.1", "localhost") for port in (PORT, 5173, 4173)}
+SOURCE_CREDENTIAL_STATE_BYTES = 16 * 1024 ** 2
 
 
 def now() -> str:
@@ -258,6 +260,14 @@ class ContextArchiveEnabled(StrictModel):
     enabled: bool = Field(strict=True)
 
 
+class ContextCandidateSearch(StrictModel):
+    query: str = Field(default="", max_length=512, strict=True)
+    limit: int = Field(default=10, ge=1, le=20, strict=True)
+    domain: str | None = Field(default=None, min_length=1, max_length=253, strict=True)
+    retrieved_from: str | None = Field(default=None, pattern=r"^[0-9]{4}-[0-9]{2}-[0-9]{2}$", strict=True)
+    retrieved_to: str | None = Field(default=None, pattern=r"^[0-9]{4}-[0-9]{2}-[0-9]{2}$", strict=True)
+
+
 _context_lock = threading.RLock()
 _archive_config_lock = threading.RLock()
 
@@ -425,41 +435,75 @@ def delete_chat(chat_id: str):
     return snapshot(state)
 
 
-def safe_private_content(content, *additional_content):
-    # Keep configured credentials out of saved content and source responses.
-    config = provider().read_state()["config"]
+def source_secrets(*, bounded=True):
+    # A source read must not initialize an absent private database or schema.
+    config = PROVIDER_DEFAULT
+    if DATABASE.is_file():
+        with closing(sqlite3.connect(DATABASE.resolve().as_uri() + "?mode=ro", uri=True,
+                                    timeout=1 if bounded else 5)) as db:
+            if bounded:
+                deadline = time.monotonic() + 1
+                db.set_progress_handler(lambda: int(time.monotonic() >= deadline), 1000)
+            if db.execute("SELECT 1 FROM sqlite_master WHERE name='provider_state'").fetchone():
+                record_guard = (f"typeof(value)='text' AND length(CAST(value AS BLOB))<={SOURCE_CREDENTIAL_STATE_BYTES}"
+                                if bounded else "typeof(value)='text'")
+                row = db.execute(f"SELECT CASE WHEN {record_guard} THEN substr(json_extract(value,'$.config.protocol'),1,33) END, "
+                                 f"CASE WHEN {record_guard} THEN substr(json_extract(value,'$.config.base_url'),1,2049) END, "
+                                 f"{record_guard} "
+                                 "FROM provider_state WHERE id=1").fetchone()
+                if row:
+                    protocol, base_url, within_bound = row
+                    if (not within_bound
+                            or (protocol is not None and (not isinstance(protocol, str) or len(protocol) > 32))
+                            or (base_url is not None and (not isinstance(base_url, str) or len(base_url) > 2048))):
+                        raise ValueError("The provider credential scope is unavailable.")
+                    config = {**PROVIDER_DEFAULT,
+                              **({"protocol": protocol} if protocol is not None else {}),
+                              **({"base_url": base_url} if base_url is not None else {})}
     endpoints = (() if config["protocol"] == "ollama" else (config["base_url"],)) + (SEARCH_ENDPOINT,)
+    found = []
     for endpoint in endpoints:
         try:
             key = credentials.read(endpoint)[0]
         except ValueError:
             continue
-        if any(contains_source_secret(value, (key,)) for value in (content, *additional_content)):
-            raise ValueError("Remove credentials before saving.")
+        if key:
+            found.append(key)
+    return tuple(found)
+
+
+def safe_private_content(content, *additional_content, secrets=None):
+    # Keep configured credentials out of saved content and source responses.
+    current_secrets = source_secrets(bounded=False) if secrets is None else secrets
+    if any(contains_source_secret(value, current_secrets) for value in (content, *additional_content)):
+        raise ValueError("Remove credentials before saving.")
     return content
 
 
-def safe_archived_source(source):
+def safe_archived_source(source, *, secrets=None):
     """Screen current credentials without changing archived fields or pins."""
     fields = (source["title"], source["url"],
               public_url(source["url"], allow_query=True, allow_http=True), source.get("content", ""))
-    safe_private_content("\n".join(fields))
+    if secrets is None:
+        safe_private_content("\n".join(fields))
+    elif any(contains_source_secret(value, secrets) for value in fields):
+        raise ValueError("Remove credentials before saving.")
     return source
 
 
-def safe_archive_status(status):
+def safe_archive_status(status, *, secrets=None):
     """Withhold unsafe settings without changing the stored source permissions."""
     result = {**status}
     for field in ("path", "database_path", "index_path"):
         if result.get(field) is None:
             continue
         try:
-            safe_private_content(result[field])
+            safe_private_content(result[field], secrets=secrets)
         except ValueError:
             result[field] = None
             result["path_error"] = "Some storage paths are hidden because they match a current credential."
     try:
-        safe_private_content("", *status["config"]["public_sources"])
+        safe_private_content("", *status["config"]["public_sources"], secrets=secrets)
     except ValueError:
         return {**result, "config": None,
                 "config_error": "Archive settings are hidden because a saved source scope matches a current credential."}
@@ -587,6 +631,68 @@ def get_web_search():
 @app.get("/api/context")
 def get_context_archive():
     return safe_archive_status(context_store().status())
+
+
+@app.post("/api/context/search")
+def search_context_candidates(entry: ContextCandidateSearch):
+    invalid = "Check the saved-evidence search fields and try again."
+    unavailable = {"state": "unavailable", "candidates": [], "skipped_count": 0, "search_limited": False,
+                   "message": "Saved evidence is unavailable. Check the archive and local index, then retry."}
+    try:
+        parameters = validate_candidate_lookup(**entry.model_dump())
+    except (ValueError, TypeError, UnicodeError):
+        raise HTTPException(422, invalid) from None
+    try:
+        # Keep settings and eligibility stable through final response screening.
+        with _archive_config_lock:
+            store = context_store()
+            with store._write_lock:
+                def configuration_snapshot():
+                    return {
+                        "config": store._candidate_config(), "path_error": store.path_error,
+                        "path": str(store.archive) if store.archive is not None else None,
+                        "database_path": str(store.database), "index_path": str(store.index),
+                    }
+
+                operation_secrets = source_secrets()
+                if any(contains_source_secret(value, operation_secrets)
+                       for value in (entry.query, entry.domain or "", parameters["query"], parameters["domain"] or "")):
+                    raise HTTPException(422, invalid)
+                status = safe_archive_status(configuration_snapshot(), secrets=operation_secrets)
+                if status["path_error"] or status["config"] is None:
+                    return unavailable
+                selected_config = status["config"]
+                result = store.lookup_candidates(**parameters, secrets=operation_secrets)
+                screened = []
+                for candidate in result["candidates"]:
+                    try:
+                        screened.append(safe_archived_source(candidate, secrets=operation_secrets))
+                    except ValueError:
+                        result["skipped_count"] += 1
+                        result["state"], result["search_limited"] = "limited", True
+                status = configuration_snapshot()
+                # One final snapshot screens the whole response, including an
+                # earlier candidate if credentials changed during later checks.
+                response_secrets = (*operation_secrets, *source_secrets())
+                status = safe_archive_status(status, secrets=response_secrets)
+                if status["path_error"] or status["config"] is None:
+                    return unavailable
+                if status["config"] != selected_config:
+                    return ({"state": "disabled", "candidates": [], "skipped_count": 0, "search_limited": False}
+                            if not status["config"]["enabled"] else unavailable)
+                if any(contains_source_secret(value, response_secrets)
+                       for value in (entry.query, entry.domain or "", parameters["query"], parameters["domain"] or "")):
+                    raise HTTPException(422, invalid)
+                visible = []
+                for candidate in screened:
+                    try:
+                        visible.append(safe_archived_source(candidate, secrets=response_secrets))
+                    except ValueError:
+                        result["skipped_count"] += 1
+                        result["state"], result["search_limited"] = "limited", True
+                return {**result, "candidates": visible}
+    except (OSError, sqlite3.Error, ValueError, KeyError, TypeError, UnicodeError, RuntimeError):
+        return unavailable
 
 
 @app.get("/api/context/sources")

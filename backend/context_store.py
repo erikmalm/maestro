@@ -1,20 +1,23 @@
 """Opt-in public excerpt capture and pinned readback; private indexing stays local."""
 from contextlib import closing, contextmanager
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from functools import wraps
 import base64
 import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import sqlite3
 import threading
 import time
+import unicodedata
 import uuid
+from urllib.parse import urlsplit
 
 from backend.context_policy import (
-    DEFAULT, ID, MANIFEST_BYTES, MAX_ARCHIVE_ITEMS, SCHEMA, SOURCE_BYTES, capture_source,
+    DEFAULT, HASH, ID, MANIFEST_BYTES, MAX_ARCHIVE_ITEMS, SCHEMA, SOURCE_BYTES, capture_source,
     configuration, contains_source_secret, contains_url_secret, eligible,
     manifest_hash, public_url, timestamp, validate_capture_manifest,
 )
@@ -24,6 +27,57 @@ from backend.storage import (archive_available, archive_inventory, archive_owner
 
 ROOT = Path(__file__).resolve().parent.parent
 INVENTORY_SCAN_LIMIT = 100
+CANDIDATE_SCAN_LIMIT = 200
+CANDIDATE_SECONDS = 2
+CANDIDATE_SQL_STEPS = 10000000
+CANDIDATE_MAP_BYTES = 4096
+
+
+def _candidate_keywords(query):
+    return re.findall(r"[^\W_]+", unicodedata.normalize("NFC", query), re.UNICODE)
+
+
+def _candidate_literal_terms(value):
+    # Match case/diacritic-insensitive words independently of disposable FTS
+    # postings. Never let a stale posting supply a word absent from the source.
+    return {"".join(character for character in unicodedata.normalize("NFD", word.casefold())
+                    if unicodedata.category(character) != "Mn") for word in _candidate_keywords(value)}
+
+
+def validate_candidate_lookup(query="", *, limit=10, domain=None, retrieved_from=None, retrieved_to=None):
+    """Validate local lookup inputs before inspecting any storage."""
+    if not isinstance(query, str) or len(query) > 512:
+        raise ValueError("Use a query of at most 512 characters.")
+    query = " ".join(query.split())
+    terms = _candidate_keywords(query)
+    if query and not 1 <= len(terms) <= 16:
+        raise ValueError("Use one to sixteen literal keywords for saved evidence.")
+    if type(limit) is not int or not 1 <= limit <= 20:
+        raise ValueError("Choose one to twenty saved evidence candidates.")
+    if domain is not None:
+        try:
+            if (not isinstance(domain, str) or not 1 <= len(domain) <= 253
+                    or any(character in domain for character in "/\\:@?#*%[]")
+                    or any(ord(character) <= 32 or ord(character) == 127 for character in domain)):
+                raise ValueError()
+            domain = urlsplit(public_url("https://" + domain + "/")).hostname
+            if (not re.fullmatch(r"(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z](?:[a-z0-9-]*[a-z0-9])?", domain)
+                    or len(domain) > 253 or any(len(label) > 63 for label in domain.split("."))):
+                raise ValueError()
+        except (ValueError, TypeError, UnicodeError):
+            raise ValueError("Use an exact public hostname without a URL, port, path or wildcard.") from None
+    for value in (retrieved_from, retrieved_to):
+        if value is not None:
+            try:
+                if not isinstance(value, str) or not re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}", value):
+                    raise ValueError()
+                date.fromisoformat(value)
+            except ValueError:
+                raise ValueError("Use valid retrieval dates in YYYY-MM-DD format.") from None
+    if retrieved_from and retrieved_to and retrieved_from > retrieved_to:
+        raise ValueError("The retrieval start date must not follow its end date.")
+    return {"query": query, "limit": limit, "domain": domain,
+            "retrieved_from": retrieved_from, "retrieved_to": retrieved_to}
 
 
 def _inventory_position(cursor):
@@ -310,6 +364,225 @@ class ContextStore:
             except (OSError, sqlite3.Error, ValueError, KeyError, TypeError, UnicodeError):
                 return {"state": "unavailable", "sources": [], "next_cursor": None, "skipped_count": 0,
                         "message": "Saved evidence is unavailable. Check the archive and local index, then retry."}
+
+    def _candidate_config(self, db=None):
+        """Read bounded configuration only; a supplied connection shares its caller's work budget."""
+        config = {**DEFAULT, "public_sources": []}
+        if db is None:
+            with self._write_lock:
+                if not self.database.is_file():
+                    return config
+                deadline, steps = time.monotonic() + CANDIDATE_SECONDS, 0
+
+                def bounded_query():
+                    nonlocal steps
+                    steps += 1000
+                    return int(steps >= CANDIDATE_SQL_STEPS or time.monotonic() >= deadline)
+
+                with closing(sqlite3.connect(self.database.as_uri() + "?mode=ro", uri=True,
+                                            timeout=CANDIDATE_SECONDS)) as private:
+                    private.set_progress_handler(bounded_query, 1000)
+                    return self._candidate_config(private)
+        if db.execute("SELECT 1 FROM sqlite_master WHERE name='context_state'").fetchone():
+            row = db.execute("SELECT CASE WHEN typeof(value)='text' AND length(CAST(value AS BLOB))<=1048576 "
+                             "THEN value END FROM context_state WHERE id=1").fetchone()
+            if row:
+                saved = json.loads(row[0])["config"]
+                config = {**DEFAULT, **saved, "capture_policy": saved.get("capture_policy", "approved_sources")}
+        return configuration(config)
+
+    def lookup_candidates(self, query="", *, limit=10, domain=None, retrieved_from=None, retrieved_to=None, secrets=()):
+        """Read verified local candidates, without accepting their suitability or acquiring evidence."""
+        filters = validate_candidate_lookup(query, limit=limit, domain=domain,
+                                            retrieved_from=retrieved_from, retrieved_to=retrieved_to)
+        query, domain = filters["query"], filters["domain"]
+        secrets = tuple(secret for secret in secrets if secret)
+        result = {"state": "ready", "candidates": [], "skipped_count": 0, "search_limited": False}
+
+        class WorkLimit(Exception):
+            pass
+
+        with self._write_lock:
+            deadline, steps, examined = time.monotonic() + CANDIDATE_SECONDS, 0, 0
+            work_exceeded = False
+
+            def check_time():
+                nonlocal work_exceeded
+                if time.monotonic() >= deadline:
+                    work_exceeded = True
+                    raise WorkLimit()
+
+            def bounded_query():
+                nonlocal steps, work_exceeded
+                steps += 1000
+                work_exceeded = work_exceeded or steps >= CANDIDATE_SQL_STEPS or time.monotonic() >= deadline
+                return int(work_exceeded)
+
+            @contextmanager
+            def reader(path):
+                check_time()
+                with closing(sqlite3.connect(path.as_uri() + "?mode=ro", uri=True,
+                                            timeout=max(0, deadline - time.monotonic()))) as db:
+                    db.set_progress_handler(bounded_query, 1000)
+                    yield db
+
+            def bounded(column, maximum):
+                # Never fetch unbounded, disposable SQLite values into Python.
+                return (f"CASE WHEN typeof({column})='text' AND length(CAST({column} AS BLOB))<={maximum} "
+                        f"THEN {column} END")
+
+            def source_domain(value):
+                try:
+                    return urlsplit(public_url(value, allow_query=True, allow_http=True)).hostname
+                except (ValueError, TypeError):
+                    return None
+
+            def matches_filters(source):
+                day = source["retrieved_at"][:10]
+                return ((domain is None or source_domain(source["url"]) == domain)
+                        and (retrieved_from is None or day >= retrieved_from)
+                        and (retrieved_to is None or day <= retrieved_to))
+
+            try:
+                if self.path_error:
+                    raise ValueError()
+                if self.archive is None:
+                    return {**result, "state": "unconfigured"}
+                if not self.database.is_file():
+                    return {**result, "state": "disabled"}
+                with reader(self.database) as private:
+                    config = self._candidate_config(private)
+                    if not config["enabled"]:
+                        return {**result, "state": "disabled"}
+                    if not self.archive.is_dir() or not self.index.is_file():
+                        raise ValueError()
+                    with reader(self.index) as index:
+                        index.create_function("source_domain", 1, source_domain)
+                        fields = (("id", 32), ("manifest", 100), ("title", 800), ("url", 8192),
+                                  ("at", 64), ("manifest_hash", 64), ("content", SOURCE_BYTES))
+                        projection = ",".join(bounded("c." + field, maximum) for field, maximum in fields)
+                        verified, accepted = {}, set()
+                        now = self.now()
+
+                        def verify(row):
+                            nonlocal examined, work_exceeded
+                            check_time()
+                            capture_id = row[0] if row else None
+                            if examined >= CANDIDATE_SCAN_LIMIT:
+                                work_exceeded = True
+                                raise WorkLimit()
+                            examined += 1
+                            if capture_id in verified:
+                                return verified[capture_id]
+                            try:
+                                if row is None:
+                                    raise ValueError()
+                                capture_id, relative, title, url, at, digest, content = row[:7]
+                                if (not isinstance(capture_id, str) or not ID.fullmatch(capture_id)
+                                        or not isinstance(at, str) or timestamp(at) != at
+                                        or not isinstance(digest, str) or not HASH.fullmatch(digest)
+                                        or relative != "records/captures/" + at[:7] + "/" + capture_id + ".json"):
+                                    raise ValueError()
+                                manifest, body = self._manifest(relative, config)
+                                source = capture_source(manifest, body)
+                                if (capture_id, title, url, at, digest, content) != (
+                                        source["capture_id"], source["title"], source["url"], source["retrieved_at"],
+                                        source["manifest_hash"], source["content"]):
+                                    raise ValueError()
+                                normalized_url = public_url(url, allow_query=True, allow_http=True)
+                                if (contains_url_secret(url, secrets) or contains_url_secret(normalized_url, secrets)
+                                        or any(contains_source_secret(value, secrets) for value in (title, url, normalized_url, body))):
+                                    raise ValueError()
+                                source.update(body_verified=True,
+                                              stale=(now - datetime.fromisoformat(at)).total_seconds() > config["reuse_hours"] * 3600)
+                                check_time()
+                                verified[capture_id] = source
+                                return source
+                            except (OSError, ValueError, KeyError, TypeError, UnicodeError):
+                                result["skipped_count"] += 1
+                                if capture_id is not None:
+                                    verified[capture_id] = None
+                                return None
+
+                        def append(source, kind):
+                            if source and source["capture_id"] not in accepted and matches_filters(source):
+                                accepted.add(source["capture_id"])
+                                result["candidates"].append({**source, "match_kind": kind})
+
+                        if query and private.execute("SELECT 1 FROM sqlite_master WHERE name='context_queries'").fetchone():
+                            keys = [self._key(query, count) for count in (1, 2, 3)]
+                            rows = private.execute(
+                                "SELECT " + ",".join((bounded("query", 2048), bounded("at", 64),
+                                                      bounded("captures", CANDIDATE_MAP_BYTES))) +
+                                " FROM context_queries WHERE key IN (?,?,?) ORDER BY at DESC,key LIMIT 3", keys).fetchall()
+                            for recorded_query, at, raw in rows:
+                                check_time()
+                                try:
+                                    pins = json.loads(raw)
+                                    if (recorded_query != query or timestamp(at) != at or not isinstance(pins, list)
+                                            or not 1 <= len(pins) <= 3):
+                                        raise ValueError()
+                                    for pin in pins:
+                                        if (not isinstance(pin, dict) or set(pin) != {"capture_id", "content_hash", "manifest_hash"}
+                                                or not isinstance(pin["capture_id"], str) or not ID.fullmatch(pin["capture_id"])
+                                                or any(not isinstance(pin[name], str) or not HASH.fullmatch(pin[name])
+                                                       for name in ("content_hash", "manifest_hash"))):
+                                            raise ValueError()
+                                except (ValueError, KeyError, TypeError, RecursionError):
+                                    result["skipped_count"] += 1
+                                    continue
+                                for pin in pins:
+                                    source = verify(index.execute("SELECT " + projection +
+                                                                 " FROM captures c WHERE c.id=?", (pin["capture_id"],)).fetchone())
+                                    if source:
+                                        if any(source[name] != value for name, value in pin.items()) or source["retrieved_at"] != at:
+                                            result["skipped_count"] += 1
+                                        else:
+                                            append(source, "exact_query")
+                                    if len(result["candidates"]) == limit:
+                                        break
+                                if len(result["candidates"]) == limit:
+                                    break
+                        if len(result["candidates"]) < limit:
+                            parameters, clauses = [], []
+                            if domain:
+                                clauses.append("source_domain(" + bounded("c.url", 8192) + ")=?")
+                                parameters.append(domain)
+                            for operation, value in ((">=", retrieved_from), ("<=", retrieved_to)):
+                                if value is not None:
+                                    clauses.append("substr(c.at,1,10)" + operation + "?")
+                                    parameters.append(value)
+                            if query:
+                                clauses.insert(0, "captures_fts MATCH ?")
+                                expression = " AND ".join('"' + term + '"' for term in _candidate_keywords(query))
+                                parameters.insert(0, expression)
+                                selection = projection + "," + bounded("f.title", 800) + "," + bounded("f.content", SOURCE_BYTES)
+                                tables = "captures_fts f JOIN captures c ON c.id=f.id"
+                                order = "bm25(captures_fts),c.at DESC,c.id DESC"
+                            else:
+                                selection, tables, order = projection, "captures c", "c.at DESC,c.id DESC"
+                            sql = ("SELECT " + selection + " FROM " + tables +
+                                   (" WHERE " + " AND ".join(clauses) if clauses else "") +
+                                   " ORDER BY " + order + " LIMIT ?")
+                            cursor = index.execute(sql, [*parameters, CANDIDATE_SCAN_LIMIT + 1])
+                            for row in cursor:
+                                source = verify(row)
+                                if source and query and ((row[7], row[8]) != (source["title"], source["content"])
+                                        or not _candidate_literal_terms(query) <= _candidate_literal_terms(source["title"] + "\n" + source["content"])):
+                                    result["skipped_count"] += 1
+                                    continue
+                                append(source, "keyword" if query else "filtered")
+                                if len(result["candidates"]) == limit:
+                                    break
+                        check_time()
+            except (OSError, sqlite3.Error, ValueError, KeyError, TypeError, UnicodeError, RecursionError, WorkLimit):
+                result["state"] = "limited" if work_exceeded else "unavailable"
+                result["search_limited"] = work_exceeded
+                result["message"] = ("Saved evidence lookup reached its work limit. Results may be incomplete."
+                                     if work_exceeded else "Saved evidence is unavailable. Results may be incomplete.")
+            if result["skipped_count"] and "message" not in result:
+                result["message"] = "Some saved evidence could not be verified or returned. Results may be incomplete."
+            return result
 
     def capture(self, query, at, sources, max_results, secrets=()):
         secrets = tuple(secret for secret in secrets if secret)
