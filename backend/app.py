@@ -275,6 +275,21 @@ def context_store():
                 # starting or overwrite the private archive configuration.
                 current = ContextStore(DATABASE, archive_dir="")
                 current.path_error = "The source archive path is invalid. Check its startup setting and restart Maestro."
+            if current.archive is not None:
+                # Keep health bound to the selected target if a directory alias
+                # later changes without changing the startup environment.
+                archive_identity = "path:" + os.path.normcase(str(current.archive))
+            else:
+                archive_root = identity[1]
+                try:
+                    archive_identity = "none"
+                    if archive_root:
+                        archive_path = Path(archive_root).expanduser()
+                        archive_identity = ("path:" + os.path.normcase(str(archive_path.resolve()))
+                                            if archive_path.is_absolute() else "invalid:" + archive_root)
+                except (OSError, ValueError, RuntimeError):
+                    archive_identity = "invalid:" + archive_root
+            current.startup_archive_id = hashlib.sha256(archive_identity.encode()).hexdigest()
             app.state.context_store, app.state.context_store_identity = current, identity
         return current
 
@@ -337,18 +352,9 @@ async def invalid_entry(request: Request, error: RequestValidationError):
 
 @app.get("/health")
 def health():
-    archive_root = os.environ.get("MAESTRO_CONTEXT_ARCHIVE_DIR", "")
-    try:
-        archive_identity = "none"
-        if archive_root:
-            archive_path = Path(archive_root).expanduser()
-            archive_identity = ("path:" + os.path.normcase(str(archive_path.resolve()))
-                                if archive_path.is_absolute() else "invalid:" + archive_root)
-    except (OSError, ValueError, RuntimeError):
-        archive_identity = "invalid:" + archive_root
     return {"application": "maestro", "mode": "local", "launch_id": os.environ.get("MAESTRO_LAUNCH_ID"),
             "workspace_id": hashlib.sha256(os.path.normcase(str(DATA_DIR)).encode()).hexdigest(),
-            "archive_id": hashlib.sha256(archive_identity.encode()).hexdigest()}
+            "archive_id": context_store().startup_archive_id}
 
 
 @app.middleware("http")

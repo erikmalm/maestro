@@ -249,6 +249,48 @@ test("archive failures recover on focus, while invalid startup paths prevent ena
   expect(requests.writes).toHaveLength(0);
 });
 
+test("source saving can be disabled after restart with a missing archive path", async ({
+  page,
+}) => {
+  let server: Archive = {
+    ...structuredClone(initial),
+    configured: false,
+    path: null,
+    path_error: null,
+    config: { ...originalConfig, enabled: true },
+  };
+  const requests = await archiveFixture(
+    page,
+    () => ({ body: server }),
+    async (body) => {
+      server = { ...server, config: { ...server.config!, ...body } };
+      return { body: server };
+    },
+  );
+  await page.getByRole("button", { name: "Settings", exact: true }).click();
+  const card = archiveCard(page);
+  const disable = card.getByRole("button", { name: "Disable source saving" });
+  await expect(disable).toBeEnabled();
+  await disable.click();
+  await expect(
+    card.getByText("Source saving disabled.", { exact: true }),
+  ).toBeVisible();
+  expect(requests.writes).toEqual([{ enabled: false }]);
+  expect(server.config).toEqual({ ...originalConfig, enabled: false });
+  await expect(
+    card.getByRole("button", { name: "Enable source saving" }),
+  ).toBeDisabled();
+
+  const readsBeforeRefresh = requests.reads;
+  await focusReturn(page);
+  await expect.poll(() => requests.reads).toBeGreaterThan(readsBeforeRefresh);
+  await expect(card.getByText("Disabled", { exact: true })).toBeVisible();
+  await expect(
+    card.getByRole("button", { name: "Enable source saving" }),
+  ).toBeDisabled();
+  expect(requests.writes).toEqual([{ enabled: false }]);
+});
+
 test("a late safe snapshot cannot restore controls after settings are withheld", async ({
   page,
 }) => {

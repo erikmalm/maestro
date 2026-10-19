@@ -19,6 +19,48 @@ class ArchiveHealthTests(unittest.TestCase):
             )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
+    def test_health_remains_bound_to_the_selected_archive_after_an_alias_is_retargeted(self):
+        self.check_health(r'''
+import hashlib, os, subprocess
+from pathlib import Path
+root = Path(os.environ['MAESTRO_DATA_DIR'])
+os.environ['MAESTRO_DATA_DIR'] = str(root / 'private')
+first, second, alias = (root / name for name in ('archive-first', 'archive-second', 'archive-alias'))
+first.mkdir()
+second.mkdir()
+def select(target):
+    if os.name == 'nt':
+        subprocess.run(['cmd', '/c', 'mklink', '/J', str(alias), str(target)],
+                       check=True, capture_output=True, text=True)
+    else:
+        alias.symlink_to(target, target_is_directory=True)
+def unlink():
+    alias.rmdir() if os.name == 'nt' else alias.unlink()
+select(first)
+os.environ['MAESTRO_CONTEXT_ARCHIVE_DIR'] = str(alias)
+from fastapi.testclient import TestClient
+from backend import app as backend
+try:
+    with TestClient(backend.app) as client:
+        selected = backend.context_store()
+        initial = client.get('/health').json()
+        assert selected.archive == first.resolve()
+        assert initial['archive_id'] == hashlib.sha256(('path:' + os.path.normcase(str(first))).encode()).hexdigest()
+        unlink()
+        select(second)
+        assert alias.resolve() == second
+        assert backend.context_store() is selected
+        assert client.get('/health').json() == initial
+        launcher_identity = hashlib.sha256(('path:' + os.path.normcase(str(alias.resolve()))).encode()).hexdigest()
+        assert launcher_identity != initial['archive_id']
+        client.get('/api/session')
+        assert client.get('/api/context').json()['path'] == str(first)
+    assert not list(first.iterdir())
+    assert not list(second.iterdir())
+finally:
+    unlink()
+''')
+
     def test_health_distinguishes_archive_changes_and_equivalent_paths_without_creating_them(self):
         self.check_health(r'''
 import json, os, re

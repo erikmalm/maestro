@@ -123,7 +123,7 @@ export default function ArchiveSettings({
               disabled={
                 saving ||
                 loading ||
-                !status.configured ||
+                (!status.configured && !config.enabled) ||
                 Boolean(status.path_error)
               }
               aria-disabled={refreshing || undefined}
