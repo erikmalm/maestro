@@ -54,6 +54,16 @@ class ContextCandidateTests(unittest.TestCase):
         with closing(sqlite3.connect(self.store.index)) as db, db:
             db.execute(statement, parameters)
 
+    def native_keyword_matches(self, sources, query):
+        # Compare with the deployed default unicode61 tokenizer, including its
+        # intentional remove_diacritics=1 differences for multi-accent letters.
+        with closing(sqlite3.connect(":memory:")) as db:
+            db.execute("CREATE VIRTUAL TABLE evidence USING fts5(id UNINDEXED,title,content)")
+            db.executemany("INSERT INTO evidence(id,title,content) VALUES(?,?,?)",
+                           [(source["capture_id"], source["title"], source["content"]) for source in sources])
+            expression = " AND ".join('"' + word.replace('"', '""') + '"' for word in query.split())
+            return {row[0] for row in db.execute("SELECT id FROM evidence WHERE evidence MATCH ?", (expression,))}
+
     def test_cold_disabled_and_unconfigured_lookup_creates_nothing(self):
         self.assertEqual(self.lookup(), {"state": "disabled", "candidates": [], "skipped_count": 0, "search_limited": False})
         self.assertEqual(ContextStore(self.database, "").lookup_candidates()["state"], "unconfigured")
@@ -107,6 +117,51 @@ class ContextCandidateTests(unittest.TestCase):
                 self.assertEqual([candidate["capture_id"] for candidate in result["candidates"]], [source["capture_id"]])
                 self.assertEqual(result["candidates"][0]["match_kind"], "keyword")
 
+    def test_vietnamese_nfc_nfd_title_and_content_follow_native_fts_diacritic_rules(self):
+        phrase = "h\u1ed9i ngh\u1ecb"
+        sources, decomposed = [], set()
+        for form in ("NFC", "NFD"):
+            text = unicodedata.normalize(form, phrase)
+            for field in ("title", "content"):
+                source = self.seed(query="unrelated recorded request", **{field: text})
+                sources.append(source)
+                if form == "NFD":
+                    decomposed.add(source["capture_id"])
+        before = self.snapshot()
+        for query in (phrase, unicodedata.normalize("NFD", phrase), "hoi nghi"):
+            with self.subTest(query=query):
+                expected = self.native_keyword_matches(sources, query)
+                if query != phrase:
+                    self.assertEqual(expected, decomposed)
+                result = self.lookup(query)
+                self.assertEqual({candidate["capture_id"] for candidate in result["candidates"]}, expected)
+                self.assertTrue(all(candidate["match_kind"] == "keyword" for candidate in result["candidates"]))
+        self.assertEqual(self.snapshot(), before)
+
+    def test_noncomposing_combining_marks_follow_native_fts_token_boundaries(self):
+        sources = [self.seed(query="unrelated recorded request", content=text) for text in ("qx", "q\u0301x")]
+        before = self.snapshot()
+        for query in ("qx", "q\u0301x"):
+            with self.subTest(query=query):
+                expected = self.native_keyword_matches(sources, query)
+                self.assertEqual(expected, {source["capture_id"] for source in sources})
+                result = self.lookup(query)
+                self.assertEqual({candidate["capture_id"] for candidate in result["candidates"]}, expected)
+                self.assertTrue(all(candidate["match_kind"] == "keyword" for candidate in result["candidates"]))
+        self.assertEqual(self.snapshot(), before)
+
+    def test_keyword_limit_counts_native_token_instances_with_noncomposing_marks(self):
+        query = " ".join(["q\u0301x"] * 16)
+        self.assertEqual(validate_candidate_lookup(query)["query"], query)
+        source = self.seed(query="unrelated recorded request", content="qx")
+        before = self.snapshot()
+        result = self.lookup(query)
+        self.assertEqual([candidate["capture_id"] for candidate in result["candidates"]], [source["capture_id"]])
+        self.assertEqual(result["candidates"][0]["match_kind"], "keyword")
+        with self.assertRaises(ValueError):
+            self.lookup(" ".join(["q\u0301x"] * 17))
+        self.assertEqual(self.snapshot(), before)
+
     def test_stale_versions_remain_candidates_with_original_dates_and_pins(self):
         old = self.seed(query="historic request", content="Historical figure 17 EUR.",
                         url="https://docs.example.org/reports/repeated", at=(self.now - timedelta(days=4)).isoformat())
@@ -149,6 +204,19 @@ class ContextCandidateTests(unittest.TestCase):
         self.assertEqual(result["candidates"], [])
         self.assertEqual(result["skipped_count"], 1)
         self.assertIn("incomplete", result["message"])
+
+    def test_unicode_stale_postings_cannot_gain_matches_from_python_casefolding(self):
+        source = self.seed(query="unrelated request", content="STRASSE")
+        query = "Stra\u00dfe"
+        self.assertEqual(self.native_keyword_matches([source], query), set())
+        self.edit_index("UPDATE captures_fts SET content=? WHERE id=?", (query, source["capture_id"]))
+        self.edit_index("UPDATE captures_fts_content SET c2=? WHERE c0=?", (source["content"], source["capture_id"]))
+        before = self.snapshot()
+        result = self.lookup(query)
+        self.assertEqual(result["candidates"], [])
+        self.assertEqual(result["skipped_count"], 1)
+        self.assertIn("incomplete", result["message"])
+        self.assertEqual(self.snapshot(), before)
 
     def test_index_metadata_and_content_must_equal_verified_evidence(self):
         source = self.seed()
@@ -244,18 +312,21 @@ class ContextCandidateTests(unittest.TestCase):
         connect, statements = sqlite3.connect, []
 
         def readonly(database, **kwargs):
-            self.assertTrue(database.endswith("?mode=ro"))
-            self.assertTrue(kwargs["uri"])
+            if database != ":memory:":
+                self.assertTrue(database.endswith("?mode=ro"))
+                self.assertTrue(kwargs["uri"])
             db = connect(database, **kwargs)
-            db.set_trace_callback(statements.append)
+            db.set_trace_callback(lambda statement: statements.append((database, statement)))
             return db
 
         with patch("backend.context_store.sqlite3.connect", side_effect=readonly):
             result = self.lookup("public evidence")
         self.assertEqual(result["state"], "ready")
         self.assertTrue(statements)
+        self.assertTrue(any(database == ":memory:" for database, _ in statements))
         self.assertTrue(all(statement.lstrip().upper().startswith(("SELECT ", "-- "))
-                            or statement == "PRAGMA 'main'.data_version" for statement in statements), statements)
+                            or statement == "PRAGMA 'main'.data_version"
+                            for database, statement in statements if database != ":memory:"), statements)
         self.assertEqual(self.snapshot(), before)
 
     def test_scan_limit_retains_partial_results_and_bounds_body_reads(self):
@@ -302,6 +373,39 @@ class ContextCandidateTests(unittest.TestCase):
         self.assertTrue(result["search_limited"])
         self.assertEqual(len(result["candidates"]), 1)
 
+    def test_memory_tokenizer_uses_the_same_deadline_before_any_body_read(self):
+        self.seed(query="unrelated recorded request")
+        before = self.snapshot()
+        connect, clock, expired = sqlite3.connect, [0.0], [False]
+
+        class DeadlineConnection(sqlite3.Connection):
+            budgeted = False
+
+            def set_progress_handler(connection, callback, interval):
+                connection.budgeted = callback is not None
+                return super().set_progress_handler(callback, interval)
+
+            def execute(connection, statement, *args, **kwargs):
+                result = super().execute(statement, *args, **kwargs)
+                if connection.memory and connection.budgeted and statement.lstrip().upper().startswith("INSERT "):
+                    expired[0], clock[0] = True, 3.0
+                return result
+
+        def tracked(database, **kwargs):
+            connection = connect(database, factory=DeadlineConnection, **kwargs)
+            connection.memory = database == ":memory:"
+            return connection
+
+        with (patch("backend.context_store.sqlite3.connect", side_effect=tracked),
+              patch("backend.context_store.time.monotonic", side_effect=lambda: clock[0]),
+              patch.object(self.store, "_manifest", side_effect=AssertionError("Body read after tokenization deadline"))):
+            result = self.lookup("public evidence")
+        self.assertTrue(expired[0])
+        self.assertEqual(result["state"], "limited")
+        self.assertTrue(result["search_limited"])
+        self.assertEqual(result["candidates"], [])
+        self.assertEqual(self.snapshot(), before)
+
     def test_sql_work_limit_is_reported_without_repair_or_exhaustive_miss(self):
         self.seed()
         # A large disposable FTS posting list forces SQLite's progress handler,
@@ -317,7 +421,7 @@ class ContextCandidateTests(unittest.TestCase):
         self.assertEqual(len(result["candidates"]), 1)  # Exact evidence survives later SQL interruption.
         self.assertEqual(self.snapshot(), before)
 
-    def test_sql_allowance_is_shared_between_private_mapping_and_fts_connections(self):
+    def test_sql_allowance_is_shared_between_private_mapping_fts_and_memory_connections(self):
         source = self.seed()
         # Both connections do real work individually below the eventual cap.
         # A larger private schema makes exact-map discovery consume VM steps;
@@ -352,7 +456,8 @@ class ContextCandidateTests(unittest.TestCase):
 
         with patch("backend.context_store.sqlite3.connect", side_effect=tracked):
             self.assertEqual(self.lookup("public evidence")["state"], "ready")
-            self.assertEqual(len(counts), 2)
+            self.assertEqual(len([database for database in counts if database != ":memory:"]), 2)
+            self.assertIn(":memory:", counts)
             self.assertTrue(all(count > 0 for count in counts.values()))
             allowance = max(counts.values()) + 1
             counts.clear()

@@ -1,5 +1,5 @@
 """Opt-in public excerpt capture and pinned readback; private indexing stays local."""
-from contextlib import closing, contextmanager
+from contextlib import closing, contextmanager, nullcontext
 from datetime import date, datetime, timezone
 from functools import wraps
 import base64
@@ -12,7 +12,6 @@ import shutil
 import sqlite3
 import threading
 import time
-import unicodedata
 import uuid
 from urllib.parse import urlsplit
 
@@ -33,15 +32,33 @@ CANDIDATE_SQL_STEPS = 10000000
 CANDIDATE_MAP_BYTES = 4096
 
 
-def _candidate_keywords(query):
-    return re.findall(r"[^\W_]+", unicodedata.normalize("NFC", query), re.UNICODE)
+@contextmanager
+def _candidate_tokenizer(progress=None):
+    # Use the existing index's default unicode61 tokenizer, including its legacy
+    # diacritic rules. Python normalization/casefolding changes those semantics.
+    # Only this disposable in-memory database is writable during lookup.
+    with closing(sqlite3.connect(":memory:")) as db:
+        if progress is not None:
+            db.set_progress_handler(progress, 1000)
+        db.execute("CREATE VIRTUAL TABLE candidate_text USING fts5(value)")
+        db.execute("CREATE VIRTUAL TABLE candidate_terms USING fts5vocab(candidate_text, instance)")
 
+        def replace(value):
+            db.execute("DELETE FROM candidate_text")
+            db.execute("INSERT INTO candidate_text(rowid,value) VALUES(1,?)", (value,))
 
-def _candidate_literal_terms(value):
-    # Match case/diacritic-insensitive words independently of disposable FTS
-    # postings. Never let a stale posting supply a word absent from the source.
-    return {"".join(character for character in unicodedata.normalize("NFD", word.casefold())
-                    if unicodedata.category(character) != "Mn") for word in _candidate_keywords(value)}
+        def keywords(query):
+            replace(query)
+            # Count instances, including repeated words, and stop at the first
+            # term beyond the public 16-keyword allowance.
+            return [row[0] for row in db.execute("SELECT term FROM candidate_terms ORDER BY offset LIMIT 17")]
+
+        def matches(value, expression):
+            replace(value)
+            return db.execute("SELECT 1 FROM candidate_text WHERE candidate_text MATCH ?",
+                              (expression,)).fetchone() is not None
+
+        yield keywords, matches
 
 
 def validate_candidate_lookup(query="", *, limit=10, domain=None, retrieved_from=None, retrieved_to=None):
@@ -49,9 +66,10 @@ def validate_candidate_lookup(query="", *, limit=10, domain=None, retrieved_from
     if not isinstance(query, str) or len(query) > 512:
         raise ValueError("Use a query of at most 512 characters.")
     query = " ".join(query.split())
-    terms = _candidate_keywords(query)
-    if query and not 1 <= len(terms) <= 16:
-        raise ValueError("Use one to sixteen literal keywords for saved evidence.")
+    if query:
+        with _candidate_tokenizer() as (keywords, _):
+            if not 1 <= len(keywords(query)) <= 16:
+                raise ValueError("Use one to sixteen literal keywords for saved evidence.")
     if type(limit) is not int or not 1 <= limit <= 20:
         raise ValueError("Choose one to twenty saved evidence candidates.")
     if domain is not None:
@@ -456,7 +474,10 @@ class ContextStore:
                         return {**result, "state": "disabled"}
                     if not self.archive.is_dir() or not self.index.is_file():
                         raise ValueError()
-                    with reader(self.index) as index:
+                    tokenizer = _candidate_tokenizer(bounded_query) if query else nullcontext((None, None))
+                    with reader(self.index) as index, tokenizer as (keywords, matches):
+                        expression = (" AND ".join('"' + term.replace('"', '""') + '"' for term in keywords(query))
+                                      if query else None)
                         index.create_function("source_domain", 1, source_domain)
                         fields = (("id", 32), ("manifest", 100), ("title", 800), ("url", 8192),
                                   ("at", 64), ("manifest_hash", 64), ("content", SOURCE_BYTES))
@@ -554,7 +575,6 @@ class ContextStore:
                                     parameters.append(value)
                             if query:
                                 clauses.insert(0, "captures_fts MATCH ?")
-                                expression = " AND ".join('"' + term + '"' for term in _candidate_keywords(query))
                                 parameters.insert(0, expression)
                                 selection = projection + "," + bounded("f.title", 800) + "," + bounded("f.content", SOURCE_BYTES)
                                 tables = "captures_fts f JOIN captures c ON c.id=f.id"
@@ -568,9 +588,10 @@ class ContextStore:
                             for row in cursor:
                                 source = verify(row)
                                 if source and query and ((row[7], row[8]) != (source["title"], source["content"])
-                                        or not _candidate_literal_terms(query) <= _candidate_literal_terms(source["title"] + "\n" + source["content"])):
+                                        or not matches(source["title"] + "\n" + source["content"], expression)):
                                     result["skipped_count"] += 1
                                     continue
+                                check_time()
                                 append(source, "keyword" if query else "filtered")
                                 if len(result["candidates"]) == limit:
                                     break
