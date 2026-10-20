@@ -447,13 +447,19 @@ def source_secrets(*, bounded=True):
             if db.execute("SELECT 1 FROM sqlite_master WHERE name='provider_state'").fetchone():
                 record_guard = (f"typeof(value)='text' AND length(CAST(value AS BLOB))<={SOURCE_CREDENTIAL_STATE_BYTES}"
                                 if bounded else "typeof(value)='text'")
+                # SQLite selects the first duplicate JSON key, whereas the
+                # provider's Python reader selects the last. Reject ambiguous
+                # credential scopes without traversing unrelated ledger items.
+                scope_guard = ("(SELECT COUNT(*) FROM json_each(provider_state.value) WHERE key='config')<=1 "
+                               "AND NOT EXISTS (SELECT 1 FROM json_each(provider_state.value,'$.config') "
+                               "WHERE key IN ('protocol','base_url') GROUP BY key HAVING COUNT(*)>1)")
                 row = db.execute(f"SELECT CASE WHEN {record_guard} THEN substr(json_extract(value,'$.config.protocol'),1,33) END, "
                                  f"CASE WHEN {record_guard} THEN substr(json_extract(value,'$.config.base_url'),1,2049) END, "
-                                 f"{record_guard} "
+                                 f"{record_guard}, CASE WHEN {record_guard} THEN ({scope_guard}) ELSE 0 END "
                                  "FROM provider_state WHERE id=1").fetchone()
                 if row:
-                    protocol, base_url, within_bound = row
-                    if (not within_bound
+                    protocol, base_url, within_bound, unambiguous = row
+                    if (not within_bound or not unambiguous
                             or (protocol is not None and (not isinstance(protocol, str) or len(protocol) > 32))
                             or (base_url is not None and (not isinstance(base_url, str) or len(base_url) > 2048))):
                         raise ValueError("The provider credential scope is unavailable.")

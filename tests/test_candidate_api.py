@@ -1,5 +1,6 @@
 """Local candidate API uses real disposable evidence without acquisition or writes."""
 from contextlib import closing
+import json
 from pathlib import Path
 import sqlite3
 import tempfile
@@ -297,6 +298,51 @@ class CandidateApiTests(unittest.TestCase):
         self.assertEqual(response.json()["state"], "unavailable")
         self.assertEqual(response.json()["candidates"], [])
         self.assertEqual(self.snapshot(), before)
+
+    def test_duplicate_credential_scope_keys_are_unavailable_without_writes(self):
+        self.enable()
+        endpoints = ("https://first.example.org/v1", "https://last.example.org/v1")
+        keys = ("firstproviderscopekey", "lastproviderscopekey")
+        for key in keys:
+            self.capture(content="Evidence about aurora and " + key)
+        self.keys.update(zip(endpoints, keys))
+        with backend.provider().transaction() as state:
+            state["config"].update(protocol="responses", base_url=endpoints[1])
+        self.assertEqual(backend.safe_private_content("Ordinary private content."), "Ordinary private content.")
+        with closing(sqlite3.connect(backend.DATABASE)) as db:
+            original = db.execute("SELECT value FROM provider_state WHERE id=1").fetchone()[0]
+        local = json.dumps({"protocol": "ollama", "base_url": "http://127.0.0.1:11434"})
+        remote = json.dumps({"protocol": "responses", "base_url": endpoints[1]})
+        cases = (
+            ("root config", '{"config":' + local + ',"config":' + remote + '}', endpoints[1], keys[1]),
+            ("protocol", '{"config":{"protocol":"ollama","protocol":"responses","base_url":'
+             + json.dumps(endpoints[1]) + '}}', endpoints[1], keys[1]),
+            ("base URL", '{"config":{"protocol":"responses","base_url":'
+             + json.dumps(endpoints[0]) + ',"base_url":' + json.dumps(endpoints[1]) + '}}', endpoints[1], keys[1]),
+            ("reversed base URL", '{"config":{"protocol":"responses","base_url":'
+             + json.dumps(endpoints[1]) + ',"base_url":' + json.dumps(endpoints[0]) + '}}', endpoints[0], keys[0]),
+        )
+        try:
+            for name, raw, active_endpoint, active_key in cases:
+                with self.subTest(name=name):
+                    with closing(sqlite3.connect(backend.DATABASE)) as db, db:
+                        db.execute("UPDATE provider_state SET value=? WHERE id=1", (raw,))
+                    # The existing provider uses Python's last-key-wins parser.
+                    config = backend.provider().read_state()["config"]
+                    self.assertEqual((config["protocol"], config["base_url"]), ("responses", active_endpoint))
+                    before = self.snapshot()
+                    response = self.search(query="aurora")
+                    self.assertEqual(response.status_code, 200, response.text)
+                    self.assertEqual(response.json()["state"], "unavailable")
+                    self.assertEqual(response.json()["candidates"], [])
+                    for key in keys:
+                        self.assertNotIn(key, response.text)
+                    with self.assertRaises(ValueError):
+                        backend.safe_private_content(active_key)
+                    self.assertEqual(self.snapshot(), before)
+        finally:
+            with closing(sqlite3.connect(backend.DATABASE)) as db, db:
+                db.execute("UPDATE provider_state SET value=? WHERE id=1", (original,))
 
 
 if __name__ == "__main__":
