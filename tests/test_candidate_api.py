@@ -344,6 +344,87 @@ class CandidateApiTests(unittest.TestCase):
             with closing(sqlite3.connect(backend.DATABASE)) as db, db:
                 db.execute("UPDATE provider_state SET value=? WHERE id=1", (original,))
 
+    def test_embedded_nul_credential_scopes_are_unavailable_without_writes(self):
+        self.enable()
+        active_key = "nulscopeproviderkey"
+        self.capture(content="Evidence about aurora and " + active_key)
+        endpoint = "https://provider.example.org/v1"
+        with backend.provider().transaction() as state:
+            state["config"].update(protocol="responses", base_url=endpoint)
+        with closing(sqlite3.connect(backend.DATABASE)) as db:
+            original = db.execute("SELECT value FROM provider_state WHERE id=1").fetchone()[0]
+        values = (
+            ("protocol", "protocol", "ollama\x00remote"),
+            ("base URL", "base_url", endpoint + "\x00suffix"),
+            ("leading NUL", "base_url", "\x00" + endpoint),
+            ("trailing NUL", "base_url", endpoint + "\x00"),
+            ("hidden oversized suffix", "base_url", endpoint + "\x00" + "x" * 2048),
+        )
+        cases = [(name, {"config": {"protocol": "responses", "base_url": endpoint, field: value}}, field, value)
+                 for name, field, value in values]
+        cases.extend((
+            ("root key prefix", {"config\x00shadow": {"protocol": "ollama", "base_url": "https://first.example.org/v1"},
+                                 "config": {"protocol": "responses", "base_url": endpoint}}, "protocol", "responses"),
+            ("protocol key prefix", {"config": {"protocol\x00shadow": "ollama", "protocol": "responses",
+                                               "base_url": endpoint}}, "protocol", "responses"),
+            ("protocol key default", {"config": {"protocol\x00shadow": "ollama", "base_url": endpoint}},
+             "protocol", "responses"),
+            ("base URL key prefix", {"config": {"protocol": "responses", "base_url\x00shadow": "https://first.example.org/v1",
+                                               "base_url": endpoint}}, "base_url", endpoint),
+        ))
+        try:
+            for name, document, field, value in cases:
+                with self.subTest(name=name):
+                    raw = json.dumps(document)
+                    with closing(sqlite3.connect(backend.DATABASE)) as db, db:
+                        db.execute("UPDATE provider_state SET value=? WHERE id=1", (raw,))
+                    loaded = backend.provider().read_state()["config"]
+                    self.assertEqual(loaded[field], value)
+                    self.assertEqual(loaded["base_url"], document["config"]["base_url"])
+                    self.keys.clear()
+                    self.keys[loaded["base_url"]] = active_key
+                    self.assertEqual(backend.credentials.read(loaded["base_url"])[0], active_key)
+                    before = self.snapshot()
+                    response = self.search(query="aurora")
+                    self.assertEqual(response.status_code, 200, response.text)
+                    self.assertEqual(response.json()["state"], "unavailable")
+                    self.assertEqual(response.json()["candidates"], [])
+                    self.assertNotIn(active_key, response.text)
+                    with self.assertRaises(ValueError):
+                        backend.safe_private_content(active_key)
+                    self.assertEqual(self.snapshot(), before)
+        finally:
+            with closing(sqlite3.connect(backend.DATABASE)) as db, db:
+                db.execute("UPDATE provider_state SET value=? WHERE id=1", (original,))
+            self.keys.clear()
+
+    def test_non_string_credential_scopes_fail_before_credential_reads_without_writes(self):
+        self.enable()
+        config = {"protocol": "responses", "base_url": "https://provider.example.org/v1"}
+        with backend.provider().transaction() as state:
+            state["config"].update(config)
+        with closing(sqlite3.connect(backend.DATABASE)) as db:
+            original = db.execute("SELECT value FROM provider_state WHERE id=1").fetchone()[0]
+        try:
+            for field in ("protocol", "base_url"):
+                for value in (None, True, 7, ["ollama"], {"value": "ollama"}):
+                    with self.subTest(field=field, value=value):
+                        with closing(sqlite3.connect(backend.DATABASE)) as db, db:
+                            raw = json.dumps({"config": {**config, field: value}})
+                            db.execute("UPDATE provider_state SET value=? WHERE id=1", (raw,))
+                        before = self.snapshot()
+                        with patch.object(backend.credentials, "read", side_effect=AssertionError("Ambiguous scope read")):
+                            response = self.search(query="aurora")
+                            with self.assertRaises(ValueError):
+                                backend.safe_private_content("Ordinary private content.")
+                        self.assertEqual(response.status_code, 200, response.text)
+                        self.assertEqual(response.json()["state"], "unavailable")
+                        self.assertEqual(response.json()["candidates"], [])
+                        self.assertEqual(self.snapshot(), before)
+        finally:
+            with closing(sqlite3.connect(backend.DATABASE)) as db, db:
+                db.execute("UPDATE provider_state SET value=? WHERE id=1", (original,))
+
 
 if __name__ == "__main__":
     unittest.main()

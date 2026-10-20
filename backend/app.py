@@ -447,12 +447,20 @@ def source_secrets(*, bounded=True):
             if db.execute("SELECT 1 FROM sqlite_master WHERE name='provider_state'").fetchone():
                 record_guard = (f"typeof(value)='text' AND length(CAST(value AS BLOB))<={SOURCE_CREDENTIAL_STATE_BYTES}"
                                 if bounded else "typeof(value)='text'")
-                # SQLite selects the first duplicate JSON key, whereas the
-                # provider's Python reader selects the last. Reject ambiguous
-                # credential scopes without traversing unrelated ledger items.
+                # SQLite uses first-key/prefix matching and truncates text at
+                # NULs, unlike the provider's Python reader. Validate complete
+                # scope fields/keys before using their bounded projections.
                 scope_guard = ("(SELECT COUNT(*) FROM json_each(provider_state.value) WHERE key='config')<=1 "
+                               "AND NOT EXISTS (SELECT 1 FROM json_each(provider_state.value) "
+                               "WHERE instr(CAST(key AS BLOB),x'00')>0) "
                                "AND NOT EXISTS (SELECT 1 FROM json_each(provider_state.value,'$.config') "
-                               "WHERE key IN ('protocol','base_url') GROUP BY key HAVING COUNT(*)>1)")
+                               "WHERE instr(CAST(key AS BLOB),x'00')>0) "
+                               "AND NOT EXISTS (SELECT 1 FROM json_each(provider_state.value,'$.config') "
+                               "WHERE key IN ('protocol','base_url') GROUP BY key HAVING COUNT(*)>1) "
+                               "AND (json_type(value,'$.config.protocol') IS NULL OR json_type(value,'$.config.protocol')='text') "
+                               "AND (json_type(value,'$.config.base_url') IS NULL OR json_type(value,'$.config.base_url')='text') "
+                               "AND coalesce(instr(CAST(json_extract(value,'$.config.protocol') AS BLOB),x'00'),0)=0 "
+                               "AND coalesce(instr(CAST(json_extract(value,'$.config.base_url') AS BLOB),x'00'),0)=0")
                 row = db.execute(f"SELECT CASE WHEN {record_guard} THEN substr(json_extract(value,'$.config.protocol'),1,33) END, "
                                  f"CASE WHEN {record_guard} THEN substr(json_extract(value,'$.config.base_url'),1,2049) END, "
                                  f"{record_guard}, CASE WHEN {record_guard} THEN ({scope_guard}) ELSE 0 END "
