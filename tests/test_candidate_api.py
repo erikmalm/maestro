@@ -1,0 +1,430 @@
+"""Local candidate API uses real disposable evidence without acquisition or writes."""
+from contextlib import closing
+import json
+from pathlib import Path
+import sqlite3
+import tempfile
+import unittest
+from unittest.mock import patch
+
+import httpx
+from fastapi.testclient import TestClient
+
+from backend import app as backend
+from backend.web_search import ENDPOINT
+
+
+class CandidateApiTests(unittest.TestCase):
+    def setUp(self):
+        self.root = Path(self.enterContext(tempfile.TemporaryDirectory(prefix="maestro-candidate-api-"))).resolve()
+        self.private, self.archive = self.root / "private", self.root / "public"
+        self.private.mkdir()
+        self.enterContext(patch.object(backend, "DATABASE", self.private / "workspace.sqlite3"))
+        self.enterContext(patch.dict("os.environ", {"MAESTRO_CONTEXT_ARCHIVE_DIR": str(self.archive)}))
+        self.keys = {}
+        self.enterContext(patch.object(backend.credentials, "read", side_effect=lambda endpoint:
+                                      (self.keys.get(endpoint), "synthetic" if endpoint in self.keys else "missing")))
+        for transport in (httpx.HTTPTransport, httpx.AsyncHTTPTransport):
+            self.enterContext(patch.object(transport, "handle_request" if transport is httpx.HTTPTransport
+                                          else "handle_async_request", side_effect=AssertionError("External network")))
+        self.enterContext(patch.object(backend.WebSearch, "search", side_effect=AssertionError("Hosted acquisition")))
+        self.enterContext(patch.object(backend.Provider, "generate", side_effect=AssertionError("Model inference")))
+        self.enterContext(patch.object(backend.Provider, "generate_context", side_effect=AssertionError("Model stage")))
+        self.client = self.enterContext(TestClient(backend.app))
+        self.headers = {"X-Maestro-CSRF": self.client.get("/api/session").json()["csrf"]}
+        self.number = 0
+
+    def enable(self):
+        config = self.client.get("/api/context").json()["config"]
+        response = self.client.put("/api/context", json={**config, "enabled": True}, headers=self.headers)
+        self.assertEqual(response.status_code, 200, response.text)
+
+    def capture(self, query="Synthetic saved report", *, content="Evidence about aurora.",
+                title="Synthetic report", url=None, at="2026-10-16T12:00:00+00:00"):
+        self.number += 1
+        source = {"title": title, "url": url or f"https://reports.example.org/report/{self.number}",
+                  "content": content}
+        saved = backend.context_store().capture(query, at, [source], 1)["sources"][0]
+        self.assertEqual(saved["archive_status"], "saved", saved)
+        return saved
+
+    def search(self, **fields):
+        return self.client.post("/api/context/search", json=fields, headers=self.headers)
+
+    def snapshot(self):
+        return {str(path.relative_to(self.root)): path.read_bytes() for path in self.root.rglob("*")
+                if path.is_file() and path.name != "runtime.lock"}
+
+    def test_exact_keyword_and_filtered_candidates_preserve_full_text_pins_and_dates_without_writes(self):
+        self.enable()
+        original = self.capture(content="Aurora report. " + "Historical details. " * 90 + " Exact final value 77.")
+        other = self.capture("Another report", content="Evidence about coastal weather.",
+                             url="https://weather.example.org/report", at="2026-10-17T12:00:00+00:00")
+        before = self.snapshot()
+        exact = self.search(query="  Synthetic   saved report  ")
+        keyword = self.search(query="aurora")
+        filtered = self.search(domain="REPORTS.EXAMPLE.ORG", retrieved_from="2026-10-16", retrieved_to="2026-10-16")
+        for response, kind in ((exact, "exact_query"), (keyword, "keyword"), (filtered, "filtered")):
+            self.assertEqual(response.status_code, 200, response.text)
+            self.assertEqual(response.headers["cache-control"], "no-store")
+            result = response.json()
+            self.assertEqual(result["state"], "ready", result)
+            self.assertFalse(result["search_limited"])
+            self.assertEqual(len(result["candidates"]), 1, result)
+            candidate = result["candidates"][0]
+            for field, value in original.items():
+                self.assertEqual(candidate[field], value, field)
+            self.assertEqual(candidate["match_kind"], kind)
+            self.assertTrue(candidate["body_verified"])
+            self.assertIsInstance(candidate["stale"], bool)
+            self.assertNotIn(other["capture_id"], response.text)
+        self.assertEqual(self.snapshot(), before)
+
+    def test_empty_query_is_local_bounded_filtering_and_stale_is_not_a_new_retrieval(self):
+        self.enable()
+        source = self.capture(at="2020-01-02T12:00:00+00:00")
+        before = self.snapshot()
+        response = self.search()
+        self.assertEqual(response.status_code, 200, response.text)
+        candidate = response.json()["candidates"][0]
+        self.assertTrue(candidate["stale"])
+        self.assertEqual(candidate["retrieved_at"], source["retrieved_at"])
+        self.assertEqual(candidate["match_kind"], "filtered")
+        self.assertEqual(self.snapshot(), before)
+
+    def test_lookup_requires_session_csrf_and_local_origin(self):
+        anonymous = TestClient(backend.app)
+        self.addCleanup(anonymous.close)
+        self.assertEqual(anonymous.post("/api/context/search", json={}).status_code, 401)
+        self.assertEqual(self.client.post("/api/context/search", json={}).status_code, 403)
+        self.assertEqual(self.client.post("/api/context/search", json={}, headers={
+            **self.headers, "Origin": "https://unrelated.example"}).status_code, 403)
+
+    def test_invalid_fields_return_generic_422_without_echoing_inputs_or_mutating_storage(self):
+        self.enable()
+        before = self.snapshot()
+        cases = [{"query": None}, {"query": 17}, {"query": "sensitive-query-" * 50},
+                 {"limit": 0}, {"limit": 21}, {"limit": True}, {"limit": "2"},
+                 {"domain": "https://sensitive.example/path"}, {"domain": "127.0.0.1"},
+                 {"domain": "localhost"}, {"retrieved_from": "2026-02-30"},
+                 {"retrieved_from": "2026-10-18", "retrieved_to": "2026-10-17"},
+                 {"retrieved_to": "private-date"}, {"context_mode": "refresh"}, {"fresh": True}]
+        for fields in cases:
+            with self.subTest(fields=fields):
+                response = self.search(**fields)
+                self.assertEqual(response.status_code, 422, response.text)
+                self.assertEqual(set(response.json()), {"detail"})
+                for value in ("sensitive", "private-date", "refresh"):
+                    self.assertNotIn(value, response.text)
+        self.assertEqual(self.snapshot(), before)
+
+    def test_disabled_missing_index_and_missing_archive_are_explicit_without_initialization(self):
+        before = self.snapshot()
+        self.assertEqual(self.search(query="aurora").json()["state"], "disabled")
+        self.assertEqual(self.snapshot(), before)
+        self.assertFalse(self.archive.exists())
+        self.enable()
+        store = backend.context_store()
+        store.index.unlink()
+        before = self.snapshot()
+        response = self.search(query="aurora")
+        self.assertEqual(response.json()["state"], "unavailable", response.text)
+        self.assertEqual(response.json()["candidates"], [])
+        self.assertEqual(self.snapshot(), before)
+        self.assertFalse(store.index.exists())
+        self.archive.rename(self.root / "offline-public")
+        before = self.snapshot()
+        response = self.search(query="aurora")
+        self.assertEqual(response.json()["state"], "unavailable", response.text)
+        self.assertEqual(self.snapshot(), before)
+        self.assertFalse(self.archive.exists())
+
+    def test_current_provider_and_search_keys_withhold_encoded_candidates_and_unsafe_queries(self):
+        self.enable()
+        clean = self.capture(content="Evidence about aurora, safe original content.")
+        provider_url = "https://provider.example.org/v1"
+        with backend.provider().transaction() as state:
+            state["config"].update(base_url=provider_url, protocol="responses", model="synthetic")
+        keys = {provider_url: "providersecretq7", ENDPOINT: "searchsecretp8"}
+        for key in keys.values():
+            for encoding in (lambda value: value, lambda value: "".join(f"%{ord(char):02X}" for char in value),
+                             lambda value: "".join(f"&#{ord(char)};" for char in value)):
+                self.capture(content="Evidence about aurora. " + "Historical details. " * 80 + encoding(key))
+        self.keys.update(keys)
+        before = self.snapshot()
+        response = self.search(query="aurora", limit=20)
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual([row["capture_id"] for row in response.json()["candidates"]], [clean["capture_id"]])
+        self.assertGreaterEqual(response.json()["skipped_count"], 6)
+        for key in keys.values():
+            for query in (key, "".join(f"%{ord(char):02X}" for char in key),
+                          "".join(f"&#{ord(char)};" for char in key)):
+                rejected = self.search(query=query)
+                self.assertEqual(rejected.status_code, 422, rejected.text)
+                self.assertNotIn(key, rejected.text)
+        self.assertEqual(self.snapshot(), before)
+
+    def test_key_rotation_after_lookup_is_screened_without_redaction_or_changes_to_pins(self):
+        self.enable()
+        key = "latersearchsecretp8"
+        original = self.capture(content="Evidence about aurora and " + key)
+        store = backend.context_store()
+        lookup = store.lookup_candidates
+
+        def rotate(*args, **kwargs):
+            result = lookup(*args, **kwargs)
+            self.keys[ENDPOINT] = key
+            return result
+
+        before = self.snapshot()
+        with patch.object(store, "lookup_candidates", side_effect=rotate):
+            response = self.search(query="aurora")
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()["candidates"], [])
+        self.assertEqual(response.json()["state"], "limited")
+        self.assertTrue(response.json()["search_limited"])
+        self.assertNotIn(key, response.text)
+        self.keys.clear()
+        restored = self.search(query="aurora").json()["candidates"][0]
+        for field, value in original.items():
+            self.assertEqual(restored[field], value)
+        self.assertEqual(self.snapshot(), before)
+
+    def test_key_rotation_during_later_source_screening_rechecks_the_whole_response(self):
+        self.enable()
+        key = "latebatchcredential"
+        first = self.capture(content="Evidence about aurora and " + key, at="2026-10-17T12:00:00+00:00")
+        second = self.capture("Another saved report", content="Evidence about aurora and safe dates.")
+        screen = backend.safe_archived_source
+
+        def rotate_after_second(source, **kwargs):
+            checked = screen(source, **kwargs)
+            if source["capture_id"] == second["capture_id"] and ENDPOINT not in self.keys:
+                self.keys[ENDPOINT] = key
+            return checked
+
+        before = self.snapshot()
+        with patch.object(backend, "safe_archived_source", side_effect=rotate_after_second):
+            response = self.search(query="aurora")
+        self.assertEqual(response.status_code, 200, response.text)
+        result = response.json()
+        self.assertEqual([row["capture_id"] for row in result["candidates"]], [second["capture_id"]])
+        self.assertNotIn(first["capture_id"], response.text)
+        self.assertNotIn(key, response.text)
+        self.assertEqual(result["state"], "limited")
+        self.assertTrue(result["search_limited"])
+        self.assertEqual(self.snapshot(), before)
+
+    def test_permission_changes_during_lookup_cannot_return_a_previously_allowed_packet(self):
+        self.enable()
+        self.capture()
+        store = backend.context_store()
+        lookup, original = store.lookup_candidates, store.status()["config"]
+        for update, expected in (({"enabled": False}, "disabled"),
+                                 ({"capture_policy": "approved_sources", "public_sources": ["https://other.example.org/"]},
+                                  "unavailable")):
+            with self.subTest(update=update):
+                store.configure(original)
+                after_change = []
+
+                def revoke(*args, **kwargs):
+                    result = lookup(*args, **kwargs)
+                    store.configure({**original, **update})
+                    after_change.append(self.snapshot())
+                    return result
+
+                with patch.object(store, "lookup_candidates", side_effect=revoke):
+                    response = self.search(query="aurora")
+                self.assertEqual(response.status_code, 200, response.text)
+                self.assertEqual(response.json()["state"], expected)
+                self.assertEqual(response.json()["candidates"], [])
+                self.assertEqual(self.snapshot(), after_change[0])
+
+    def test_revoked_source_scope_and_withheld_configuration_cannot_return_candidates(self):
+        self.enable()
+        source = self.capture()
+        config = backend.context_store().status()["config"]
+        revoked = {**config, "capture_policy": "approved_sources", "public_sources": ["https://other.example.org/"]}
+        self.client.put("/api/context", json=revoked, headers=self.headers)
+        before = self.snapshot()
+        response = self.search(query="aurora")
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()["candidates"], [])
+        self.assertNotIn(source["capture_id"], response.text)
+        self.assertEqual(self.snapshot(), before)
+        key = "laterscopecredential"
+        permitted = {**config, "public_sources": ["https://scopes.example.org/" + key + "/"]}
+        self.client.put("/api/context", json=permitted, headers=self.headers)
+        self.keys[ENDPOINT] = key
+        before = self.snapshot()
+        self.assertEqual(self.search(query="aurora").json()["state"], "unavailable")
+        self.assertEqual(self.snapshot(), before)
+
+    def test_cold_unconfigured_or_invalid_paths_do_not_create_private_storage(self):
+        for archive_root, state in (("", "unconfigured"), (str(self.root / "unused-archive"), "disabled"),
+                                    ("relative/private-selector", "unavailable")):
+            with self.subTest(archive_root=archive_root), patch.object(backend, "DATABASE", self.root / "cold-private" / "workspace.sqlite3"), \
+                    patch.dict("os.environ", {"MAESTRO_CONTEXT_ARCHIVE_DIR": archive_root}):
+                before = self.snapshot()
+                response = self.search(query="aurora")
+                self.assertEqual(response.status_code, 200, response.text)
+                self.assertEqual(response.json()["state"], state, response.text)
+                self.assertEqual(self.snapshot(), before)
+                self.assertFalse(backend.DATABASE.exists())
+        self.assertFalse((self.root / "unused-archive").exists())
+
+    def test_oversized_provider_state_is_unavailable_without_writes(self):
+        self.enable()
+        self.capture()
+        with backend.provider().transaction() as state:
+            state["ledger"] = [{"synthetic": "large accounting record" * 10}]
+        before = self.snapshot()
+        with patch.object(backend, "SOURCE_CREDENTIAL_STATE_BYTES", 64):
+            response = self.search(query="aurora")
+            self.assertEqual(backend.safe_private_content("Unrelated existing private content."),
+                             "Unrelated existing private content.")
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()["state"], "unavailable")
+        self.assertEqual(response.json()["candidates"], [])
+        self.assertEqual(self.snapshot(), before)
+
+    def test_deeply_nested_private_state_is_unavailable_without_writes(self):
+        self.enable()
+        with closing(sqlite3.connect(backend.DATABASE)) as db, db:
+            db.execute("UPDATE context_state SET value=? WHERE id=1", ("[" * 1500 + "0" + "]" * 1500,))
+        before = self.snapshot()
+        response = self.search(query="aurora")
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()["state"], "unavailable")
+        self.assertEqual(response.json()["candidates"], [])
+        self.assertEqual(self.snapshot(), before)
+
+    def test_duplicate_credential_scope_keys_are_unavailable_without_writes(self):
+        self.enable()
+        endpoints = ("https://first.example.org/v1", "https://last.example.org/v1")
+        keys = ("firstproviderscopekey", "lastproviderscopekey")
+        for key in keys:
+            self.capture(content="Evidence about aurora and " + key)
+        self.keys.update(zip(endpoints, keys))
+        with backend.provider().transaction() as state:
+            state["config"].update(protocol="responses", base_url=endpoints[1])
+        self.assertEqual(backend.safe_private_content("Ordinary private content."), "Ordinary private content.")
+        with closing(sqlite3.connect(backend.DATABASE)) as db:
+            original = db.execute("SELECT value FROM provider_state WHERE id=1").fetchone()[0]
+        local = json.dumps({"protocol": "ollama", "base_url": "http://127.0.0.1:11434"})
+        remote = json.dumps({"protocol": "responses", "base_url": endpoints[1]})
+        cases = (
+            ("root config", '{"config":' + local + ',"config":' + remote + '}', endpoints[1], keys[1]),
+            ("protocol", '{"config":{"protocol":"ollama","protocol":"responses","base_url":'
+             + json.dumps(endpoints[1]) + '}}', endpoints[1], keys[1]),
+            ("base URL", '{"config":{"protocol":"responses","base_url":'
+             + json.dumps(endpoints[0]) + ',"base_url":' + json.dumps(endpoints[1]) + '}}', endpoints[1], keys[1]),
+            ("reversed base URL", '{"config":{"protocol":"responses","base_url":'
+             + json.dumps(endpoints[1]) + ',"base_url":' + json.dumps(endpoints[0]) + '}}', endpoints[0], keys[0]),
+        )
+        try:
+            for name, raw, active_endpoint, active_key in cases:
+                with self.subTest(name=name):
+                    with closing(sqlite3.connect(backend.DATABASE)) as db, db:
+                        db.execute("UPDATE provider_state SET value=? WHERE id=1", (raw,))
+                    # The existing provider uses Python's last-key-wins parser.
+                    config = backend.provider().read_state()["config"]
+                    self.assertEqual((config["protocol"], config["base_url"]), ("responses", active_endpoint))
+                    before = self.snapshot()
+                    response = self.search(query="aurora")
+                    self.assertEqual(response.status_code, 200, response.text)
+                    self.assertEqual(response.json()["state"], "unavailable")
+                    self.assertEqual(response.json()["candidates"], [])
+                    for key in keys:
+                        self.assertNotIn(key, response.text)
+                    with self.assertRaises(ValueError):
+                        backend.safe_private_content(active_key)
+                    self.assertEqual(self.snapshot(), before)
+        finally:
+            with closing(sqlite3.connect(backend.DATABASE)) as db, db:
+                db.execute("UPDATE provider_state SET value=? WHERE id=1", (original,))
+
+    def test_embedded_nul_credential_scopes_are_unavailable_without_writes(self):
+        self.enable()
+        active_key = "nulscopeproviderkey"
+        self.capture(content="Evidence about aurora and " + active_key)
+        endpoint = "https://provider.example.org/v1"
+        with backend.provider().transaction() as state:
+            state["config"].update(protocol="responses", base_url=endpoint)
+        with closing(sqlite3.connect(backend.DATABASE)) as db:
+            original = db.execute("SELECT value FROM provider_state WHERE id=1").fetchone()[0]
+        values = (
+            ("protocol", "protocol", "ollama\x00remote"),
+            ("base URL", "base_url", endpoint + "\x00suffix"),
+            ("leading NUL", "base_url", "\x00" + endpoint),
+            ("trailing NUL", "base_url", endpoint + "\x00"),
+            ("hidden oversized suffix", "base_url", endpoint + "\x00" + "x" * 2048),
+        )
+        cases = [(name, {"config": {"protocol": "responses", "base_url": endpoint, field: value}}, field, value)
+                 for name, field, value in values]
+        cases.extend((
+            ("root key prefix", {"config\x00shadow": {"protocol": "ollama", "base_url": "https://first.example.org/v1"},
+                                 "config": {"protocol": "responses", "base_url": endpoint}}, "protocol", "responses"),
+            ("protocol key prefix", {"config": {"protocol\x00shadow": "ollama", "protocol": "responses",
+                                               "base_url": endpoint}}, "protocol", "responses"),
+            ("protocol key default", {"config": {"protocol\x00shadow": "ollama", "base_url": endpoint}},
+             "protocol", "responses"),
+            ("base URL key prefix", {"config": {"protocol": "responses", "base_url\x00shadow": "https://first.example.org/v1",
+                                               "base_url": endpoint}}, "base_url", endpoint),
+        ))
+        try:
+            for name, document, field, value in cases:
+                with self.subTest(name=name):
+                    raw = json.dumps(document)
+                    with closing(sqlite3.connect(backend.DATABASE)) as db, db:
+                        db.execute("UPDATE provider_state SET value=? WHERE id=1", (raw,))
+                    loaded = backend.provider().read_state()["config"]
+                    self.assertEqual(loaded[field], value)
+                    self.assertEqual(loaded["base_url"], document["config"]["base_url"])
+                    self.keys.clear()
+                    self.keys[loaded["base_url"]] = active_key
+                    self.assertEqual(backend.credentials.read(loaded["base_url"])[0], active_key)
+                    before = self.snapshot()
+                    response = self.search(query="aurora")
+                    self.assertEqual(response.status_code, 200, response.text)
+                    self.assertEqual(response.json()["state"], "unavailable")
+                    self.assertEqual(response.json()["candidates"], [])
+                    self.assertNotIn(active_key, response.text)
+                    with self.assertRaises(ValueError):
+                        backend.safe_private_content(active_key)
+                    self.assertEqual(self.snapshot(), before)
+        finally:
+            with closing(sqlite3.connect(backend.DATABASE)) as db, db:
+                db.execute("UPDATE provider_state SET value=? WHERE id=1", (original,))
+            self.keys.clear()
+
+    def test_non_string_credential_scopes_fail_before_credential_reads_without_writes(self):
+        self.enable()
+        config = {"protocol": "responses", "base_url": "https://provider.example.org/v1"}
+        with backend.provider().transaction() as state:
+            state["config"].update(config)
+        with closing(sqlite3.connect(backend.DATABASE)) as db:
+            original = db.execute("SELECT value FROM provider_state WHERE id=1").fetchone()[0]
+        try:
+            for field in ("protocol", "base_url"):
+                for value in (None, True, 7, ["ollama"], {"value": "ollama"}):
+                    with self.subTest(field=field, value=value):
+                        with closing(sqlite3.connect(backend.DATABASE)) as db, db:
+                            raw = json.dumps({"config": {**config, field: value}})
+                            db.execute("UPDATE provider_state SET value=? WHERE id=1", (raw,))
+                        before = self.snapshot()
+                        with patch.object(backend.credentials, "read", side_effect=AssertionError("Ambiguous scope read")):
+                            response = self.search(query="aurora")
+                            with self.assertRaises(ValueError):
+                                backend.safe_private_content("Ordinary private content.")
+                        self.assertEqual(response.status_code, 200, response.text)
+                        self.assertEqual(response.json()["state"], "unavailable")
+                        self.assertEqual(response.json()["candidates"], [])
+                        self.assertEqual(self.snapshot(), before)
+        finally:
+            with closing(sqlite3.connect(backend.DATABASE)) as db, db:
+                db.execute("UPDATE provider_state SET value=? WHERE id=1", (original,))
+
+
+if __name__ == "__main__":
+    unittest.main()
