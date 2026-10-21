@@ -746,11 +746,18 @@ def research_budget(state):
                              "remaining": max(0, daily_limit - search["searches_today"])}}
 
 
+def safe_research_run(run, *, secrets):
+    # JSON escapes quotes/backslashes, so also screen the original user fields
+    # that the browser reconstructs from the response.
+    safe_private_content(run["request"], run["query"], json.dumps(run, ensure_ascii=False), secrets=secrets)
+    return run
+
+
 def research_view(run):
     """Export private records with current credential and exact-source fences."""
     try:
         operation_secrets = source_secrets()
-        safe_private_content(json.dumps(run, ensure_ascii=False), secrets=operation_secrets)
+        safe_research_run(run, secrets=operation_secrets)
         result, visible, response_secrets = run.get("result"), [], None
         # Never rewrite saved pins. Broken optional storage withholds references
         # while the safe private request and recorded activity remain readable.
@@ -791,8 +798,7 @@ def research_view(run):
         if result:
             run = {**run, "result": {**result, "candidates": visible,
                    "references_unavailable": len(result["candidates"]) - len(visible)}}
-        safe_private_content(json.dumps(run, ensure_ascii=False), secrets=response_secrets)
-        return run
+        return safe_research_run(run, secrets=response_secrets)
     except (OSError, sqlite3.Error, ValueError, KeyError, TypeError, UnicodeError, RuntimeError):
         raise HTTPException(404, "That research run is unavailable.") from None
 
@@ -864,8 +870,7 @@ def list_research_runs(limit: int = Query(default=20, ge=1, le=50)):
         screened = []
         for run in visible:
             try:
-                safe_private_content(json.dumps(run, ensure_ascii=False), secrets=response_secrets)
-                screened.append(run)
+                screened.append(safe_research_run(run, secrets=response_secrets))
             except ValueError:
                 skipped += 1
         return {"runs": screened, "skipped_count": skipped}

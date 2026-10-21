@@ -557,3 +557,40 @@ test("recorded activity polls while visible and refreshes after returning", asyn
   ).toBeVisible();
   expect(state.posts).toHaveLength(0);
 });
+
+test("a response slower than the polling interval completes before a queued refresh starts", async ({
+  page,
+}) => {
+  const state = await fixture(page, [recorded(firstId, "running")]);
+  const reads: {
+    gate: ReturnType<typeof deferred>;
+    snapshot: ResearchRun | undefined;
+  }[] = [];
+  state.detail = async (route, run) => {
+    const read = { gate: deferred(), snapshot: structuredClone(run) };
+    reads.push(read);
+    await read.gate.promise;
+    return route.fulfill({ json: read.snapshot });
+  };
+  try {
+    await open(page, "?research_run=" + firstId);
+    await expect.poll(() => reads.length).toBe(1);
+    state.runs = [
+      {
+        ...recorded(firstId, "interrupted"),
+        updated_at: "2026-10-21T12:01:00Z",
+      },
+    ];
+    await page.clock.runFor(5100);
+    await focus(page);
+    expect(reads).toHaveLength(1);
+    reads[0].gate.release();
+    await expect(selected(page).getByRole("status")).toHaveText("Running");
+    await expect.poll(() => reads.length).toBe(2);
+    reads[1].gate.release();
+    await expect(selected(page).getByRole("status")).toHaveText("Interrupted");
+    expect(state.posts).toHaveLength(0);
+  } finally {
+    for (const read of reads) read.gate.release();
+  }
+});

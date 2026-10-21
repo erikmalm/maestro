@@ -15,6 +15,9 @@ from backend import app as backend
 from backend.web_search import ENDPOINT
 
 
+ESCAPED_CREDENTIALS = ('synthetic"researchcredential', "synthetic\\researchcredential")
+
+
 class ResearchApiTests(unittest.TestCase):
     def setUp(self):
         self.root = Path(self.enterContext(tempfile.TemporaryDirectory(prefix="maestro-research-api-"))).resolve()
@@ -219,6 +222,73 @@ class ResearchApiTests(unittest.TestCase):
         self.assertIn(earlier["id"], ids)
         self.assertGreaterEqual(response.json()["skipped_count"], 1)
         self.assertNotIn(key, response.text)
+
+    def test_json_escaped_credentials_hide_raw_request_and_query_in_detail_and_lists(self):
+        for field in ("request", "query"):
+            for key in ESCAPED_CREDENTIALS:
+                with self.subTest(field=field, key=key):
+                    self.keys.clear()
+                    response = self.submit(**{field: "Synthetic aurora " + key})
+                    self.assertEqual(response.status_code, 202, response.text)
+                    run_id = response.json()["run"]["id"]
+                    self.keys[ENDPOINT] = key
+                    detail = self.client.get("/api/research/runs/" + run_id)
+                    listed = self.client.get("/api/research/runs")
+                    with self.subTest(surface="detail"):
+                        self.assertEqual(detail.status_code, 404)
+                        self.assertEqual(detail.json(), {"detail": "That research run is unavailable."})
+                    with self.subTest(surface="list"):
+                        self.assertEqual(listed.status_code, 200, listed.text)
+                        self.assertNotIn(run_id, [run["id"] for run in listed.json()["runs"]])
+                        self.assertGreaterEqual(listed.json()["skipped_count"], 1)
+
+    def test_json_escaped_credentials_rotated_at_the_final_detail_snapshot_withhold_raw_fields(self):
+        for field in ("request", "query"):
+            for key in ESCAPED_CREDENTIALS:
+                with self.subTest(field=field, key=key):
+                    self.keys.clear()
+                    response = self.submit(**{field: "Synthetic aurora " + key})
+                    self.assertEqual(response.status_code, 202, response.text)
+                    run_id = response.json()["run"]["id"]
+                    current_secrets = backend.source_secrets
+                    calls = []
+
+                    def rotate_at_final_snapshot(*args, **kwargs):
+                        calls.append(True)
+                        if len(calls) == 2:
+                            self.keys[ENDPOINT] = key
+                        return current_secrets(*args, **kwargs)
+
+                    with patch.object(backend, "source_secrets", side_effect=rotate_at_final_snapshot):
+                        detail = self.client.get("/api/research/runs/" + run_id)
+                    self.assertEqual(len(calls), 2)
+                    self.assertEqual(detail.status_code, 404)
+                    self.assertEqual(detail.json(), {"detail": "That research run is unavailable."})
+
+    def test_json_escaped_keys_rotated_during_a_later_list_entry_recheck_raw_request_and_query(self):
+        for field in ("request", "query"):
+            for key in ESCAPED_CREDENTIALS:
+                with self.subTest(field=field, key=key):
+                    self.keys.clear()
+                    earlier = self.submit().json()["run"]
+                    response = self.submit(**{field: "Synthetic aurora " + key})
+                    self.assertEqual(response.status_code, 202, response.text)
+                    sensitive = response.json()["run"]
+                    view = backend.research_view
+
+                    def rotate_after_later_entry(run):
+                        visible = view(run)
+                        if run["id"] == earlier["id"]:
+                            self.keys[ENDPOINT] = key
+                        return visible
+
+                    with patch.object(backend, "research_view", side_effect=rotate_after_later_entry):
+                        listed = self.client.get("/api/research/runs")
+                    self.assertEqual(listed.status_code, 200, listed.text)
+                    ids = [run["id"] for run in listed.json()["runs"]]
+                    self.assertNotIn(sensitive["id"], ids)
+                    self.assertIn(earlier["id"], ids)
+                    self.assertGreaterEqual(listed.json()["skipped_count"], 1)
 
     def test_current_source_credentials_and_revocation_withhold_pins_without_rewriting_history(self):
         key = "laterresearchsourcecredential"

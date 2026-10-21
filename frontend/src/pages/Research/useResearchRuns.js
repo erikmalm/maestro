@@ -40,12 +40,14 @@ export default function useResearchRuns(chatId) {
   const writing = useRef(false);
   const revision = useRef(0);
   const reader = useRef(null);
+  const refreshQueued = useRef(false);
   const removed = useRef(new Set());
 
   function fence() {
     revision.current += 1;
     reader.current?.abort();
     reader.current = null;
+    refreshQueued.current = false;
   }
   function remember(run) {
     setRuns((previous) =>
@@ -80,6 +82,11 @@ export default function useResearchRuns(chatId) {
       writing.current
     )
       return;
+    if (reader.current) {
+      // Slow reads must finish; ordinary polling/focus cannot restart them.
+      refreshQueued.current = true;
+      return;
+    }
     fence();
     const current = revision.current;
     const id = selection.current;
@@ -137,6 +144,10 @@ export default function useResearchRuns(chatId) {
       }
     }
     setReadError(errors.join(" "));
+    if (refreshQueued.current) {
+      refreshQueued.current = false;
+      void refresh();
+    }
   }
 
   useEffect(() => {
