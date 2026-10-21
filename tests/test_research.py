@@ -297,6 +297,64 @@ class ResearchTests(unittest.TestCase):
             with self.subTest(limit=limit), self.assertRaises(ValueError):
                 self.store.list(limit)
 
+    def delete_snapshot_target(self, run, chat_delete):
+        writer = ResearchStore(self.database, timezone.utc)
+        if not chat_delete:
+            writer.delete(run["id"])
+            return
+        with closing(sqlite3.connect(self.database)) as db, db:
+            db.execute("BEGIN IMMEDIATE")
+            writer.delete_chat(run["chat_id"], db)
+            db.execute("UPDATE workspace SET value=? WHERE id=1", (json.dumps({"chats": []}),))
+
+    def test_list_keeps_one_snapshot_when_a_selected_run_or_its_chat_is_deleted(self):
+        for chat_delete in (False, True):
+            with self.subTest(chat_delete=chat_delete):
+                self.workspace([{"id": "chat", "messages": []}])
+                run, _ = self.create(chat_id="chat", permissions={**self.permissions, "chat_id": "chat"})
+                with closing(sqlite3.connect(self.database)) as db:
+                    self.assertEqual(db.execute("PRAGMA journal_mode=WAL").fetchone()[0], "wal")
+                read_row = self.store._row
+                deleted = []
+
+                def delete_after_id_selection(db, *args, **kwargs):
+                    # WAL permits this separate writer to commit while the
+                    # reader still owns the snapshot that selected the ID.
+                    self.delete_snapshot_target(run, chat_delete)
+                    deleted.append(run["id"])
+                    return read_row(db, *args, **kwargs)
+
+                with patch.object(self.store, "_row", side_effect=delete_after_id_selection):
+                    listed = self.store.list()
+                self.assertEqual(deleted, [run["id"]])
+                self.assertEqual(listed, [{key: value for key, value in run.items() if key != "events"}])
+                self.assertEqual(self.store.list(), [])
+                with self.assertRaises(KeyError):
+                    self.store.get(run["id"])
+
+    def test_get_keeps_events_with_the_record_when_a_run_or_its_chat_is_deleted(self):
+        for chat_delete in (False, True):
+            with self.subTest(chat_delete=chat_delete):
+                self.workspace([{"id": "chat", "messages": []}])
+                run, _ = self.create(chat_id="chat", permissions={**self.permissions, "chat_id": "chat"})
+                with closing(sqlite3.connect(self.database)) as db:
+                    self.assertEqual(db.execute("PRAGMA journal_mode=WAL").fetchone()[0], "wal")
+                public = self.store._public
+                deleted = []
+
+                def delete_before_event_read(db, row, **kwargs):
+                    self.delete_snapshot_target(run, chat_delete)
+                    deleted.append(run["id"])
+                    return public(db, row, **kwargs)
+
+                with patch.object(self.store, "_public", side_effect=delete_before_event_read):
+                    fetched = self.store.get(run["id"])
+                self.assertEqual(deleted, [run["id"]])
+                self.assertEqual(fetched, run)
+                self.assertEqual(self.store.list(), [])
+                with self.assertRaises(KeyError):
+                    self.store.get(run["id"])
+
     def test_bounded_request_permissions_budget_and_result_shapes_reject_excess_data(self):
         for changes in ({"submission_id": "arbitrary"}, {"request": "x" * (MAX_REQUEST + 1)}, {"query": "x" * 513},
                         {"permissions": {**self.permissions, "memory_recall": True}},

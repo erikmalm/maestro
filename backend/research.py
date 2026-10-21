@@ -287,6 +287,8 @@ class ResearchStore:
         if not self.database.is_file():
             raise KeyError("Research run not found.")
         with closing(sqlite3.connect(self.database.as_uri() + "?mode=ro", uri=True)) as db:
+            # Keep the record and its activity on the same read-only snapshot.
+            db.execute("BEGIN")
             if not self._has_table(db, "research_runs"):
                 raise KeyError("Research run not found.")
             return self._public(db, self._row(db, run_id))
@@ -297,6 +299,8 @@ class ResearchStore:
         if not self.database.is_file():
             return []
         with closing(sqlite3.connect(self.database.as_uri() + "?mode=ro", uri=True)) as db:
+            # Deletion may commit between the ID query and individual records.
+            db.execute("BEGIN")
             if not self._has_table(db, "research_runs"):
                 return []
             ids = db.execute("SELECT id FROM research_runs INDEXED BY research_recent WHERE state!='deleted' "

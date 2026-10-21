@@ -131,6 +131,59 @@ class ResearchApiTests(unittest.TestCase):
             deferred.assert_not_called()
         self.assertEqual(self.client.get("/api/research/runs").json()["runs"], [])
 
+    def test_credentials_in_submission_or_origin_chat_ids_are_rejected_before_persistence(self):
+        chat_id = self.chat()
+        for field, key in (("submission_id", "0123456789abcdef" * 2), ("chat_id", chat_id)):
+            with self.subTest(field=field):
+                self.keys.clear()
+                self.keys[ENDPOINT] = key
+                before = backend.DATABASE.read_bytes()
+                with patch.object(backend, "execute_research_run") as deferred:
+                    response = self.submit(**{field: key})
+                self.assertEqual(response.status_code, 422, response.text)
+                self.assertNotIn(key, response.text)
+                deferred.assert_not_called()
+                with closing(sqlite3.connect(backend.DATABASE)) as db:
+                    self.assertEqual(db.execute("SELECT COUNT(*) FROM research_runs").fetchone()[0], 0)
+                    self.assertEqual(db.execute("SELECT COUNT(*) FROM research_events").fetchone()[0], 0)
+                self.assertEqual(backend.DATABASE.read_bytes(), before)
+
+    def test_credential_rotation_inside_admission_rolls_back_new_run_and_events(self):
+        chat_id = self.chat()
+        escaped_chat_id = 'synthetic"origin\\chat'
+        with backend.workspace_transaction() as state:
+            backend.selected_chat(state, chat_id)["id"] = escaped_chat_id
+        create = backend.ResearchStore.create
+        key = "syntheticadmissionrotationcredential"
+        cases = (
+            ("request", key, "Synthetic aurora " + key),
+            ("query", key, "Synthetic aurora " + key),
+            ("submission_id", "fedcba9876543210" * 2, "fedcba9876543210" * 2),
+            ("chat_id", escaped_chat_id, escaped_chat_id),
+        )
+        for field, key, value in cases:
+            with self.subTest(field=field):
+                self.keys.clear()
+                before = backend.DATABASE.read_bytes()
+
+                def rotate_after_insert(store, *args, **kwargs):
+                    admitted = create(store, *args, **kwargs)
+                    self.keys[ENDPOINT] = key
+                    return admitted
+
+                with (patch.object(backend.ResearchStore, "create", new=rotate_after_insert),
+                      patch.object(backend, "execute_research_run") as deferred):
+                    response = self.submit(**{field: value})
+                self.assertEqual(response.status_code, 422, response.text)
+                self.assertNotIn(key, response.text)
+                deferred.assert_not_called()
+                with closing(sqlite3.connect(backend.DATABASE)) as db:
+                    self.assertEqual(db.execute("SELECT COUNT(*) FROM research_runs").fetchone()[0], 0)
+                    self.assertEqual(db.execute("SELECT COUNT(*) FROM research_events").fetchone()[0], 0)
+                self.assertEqual(backend.DATABASE.read_bytes(), before)
+                if field != "chat_id":
+                    self.assertNotIn(key.encode(), backend.DATABASE.read_bytes())
+
     def test_real_lookup_records_only_pins_and_actual_events_without_inference_or_archive_writes(self):
         source = self.capture()
         before = self.source_snapshot()

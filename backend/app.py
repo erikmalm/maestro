@@ -749,7 +749,8 @@ def research_budget(state):
 def safe_research_run(run, *, secrets):
     # JSON escapes quotes/backslashes, so also screen the original user fields
     # that the browser reconstructs from the response.
-    safe_private_content(run["request"], run["query"], json.dumps(run, ensure_ascii=False), secrets=secrets)
+    safe_private_content(run["request"], run["query"], run["submission_id"], run["chat_id"] or "",
+                         json.dumps(run, ensure_ascii=False), secrets=secrets)
     return run
 
 
@@ -832,22 +833,30 @@ def execute_research_run(run_id):
 
 @app.post("/api/research/runs", status_code=202)
 def create_research_run(entry: ResearchInput, background_tasks: BackgroundTasks):
+    invalid = "Check the research request and remove credentials before saving."
     try:
-        safe_private_content(entry.request, entry.query, secrets=source_secrets())
-    except (OSError, sqlite3.Error, ValueError, TypeError, UnicodeError):
-        raise HTTPException(422, "Check the research request and remove credentials before saving.") from None
+        operation_secrets = source_secrets()
+        safe_private_content(entry.request, entry.query, entry.submission_id, entry.chat_id or "",
+                             secrets=operation_secrets)
+    except (OSError, sqlite3.Error, ValueError, TypeError, UnicodeError, RuntimeError):
+        raise HTTPException(422, invalid) from None
     with conflict_errors(), workspace_transaction(with_db=True) as (state, db):
         permissions = research_permissions(state, entry.chat_id)
         run, created = research_store().create(entry.submission_id, entry.request, entry.query, entry.chat_id,
                                                permissions, research_budget(state), db)
-    try:
-        visible = research_view(run)
-    except HTTPException:
-        if created:
-            research_store().cancel(run["id"])
-        raise
+        try:
+            safe_research_run(run, secrets=(*operation_secrets, *source_secrets()))
+        except (OSError, sqlite3.Error, ValueError, KeyError, TypeError, UnicodeError, RuntimeError):
+            # Rejection rolls back admission, including the duplicate guard and
+            # submitted event. No archive locks are taken inside this transaction.
+            raise HTTPException(422, invalid) from None
     if created:
+        # A fresh queued run has no receipt; its complete response was screened
+        # before commit. Existing submissions still revalidate their saved pins.
+        visible = run
         background_tasks.add_task(execute_research_run, run["id"])
+    else:
+        visible = research_view(run)
     return {"run": visible, "created": created}
 
 
