@@ -24,7 +24,7 @@ test("empty workspace, manual tasks and budgets persist without model calls", as
     page
       .getByRole("navigation", { name: "Main navigation" })
       .getByRole("button"),
-  ).toHaveCount(5);
+  ).toHaveCount(6);
   const initial = await (await page.request.get("/api/workspace")).json();
   expect(initial.tasks).toEqual([]);
   expect(initial.messages).toEqual([]);

@@ -471,6 +471,46 @@ class ReflectionTests(unittest.TestCase):
             self.assertEqual(calls, ["finished"])
         asyncio.run(check())
 
+    def test_optional_maintenance_runs_before_disabled_reflection_without_dispatch(self):
+        self.workspace["work_config"]["enabled"] = False
+        self.save()
+        calls = []
+        prepare = self.store.prepare
+
+        def prepare_after_maintenance():
+            calls.append("prepare")
+            return prepare()
+
+        worker = ReflectionWorker(self.store, self.provider, lambda text: text,
+                                  maintenance=lambda: calls.append("maintenance"))
+        with patch.object(self.store, "prepare", side_effect=prepare_after_maintenance):
+            worker.step()
+        self.assertEqual(calls, ["maintenance", "prepare"])
+        self.assertEqual(self.calls, [])
+
+    def test_controller_retries_transient_maintenance_failure_on_its_next_tick(self):
+        self.workspace["work_config"]["enabled"] = False
+        self.save()
+
+        async def check():
+            stop, attempts = asyncio.Event(), []
+            loop = asyncio.get_running_loop()
+
+            def maintenance():
+                attempts.append("maintenance")
+                if len(attempts) == 1:
+                    raise sqlite3.OperationalError("Synthetic temporary maintenance failure.")
+                loop.call_soon_threadsafe(stop.set)
+
+            worker = ReflectionWorker(self.store, self.provider, lambda text: text, maintenance=maintenance)
+            with patch.object(self.store, "prepare", wraps=self.store.prepare) as prepare:
+                await worker.run(stop)
+            self.assertEqual(attempts, ["maintenance", "maintenance"])
+            prepare.assert_called_once()
+            self.assertEqual(self.calls, [])
+
+        asyncio.run(check())
+
     def test_controller_recovers_after_a_transient_step_failure(self):
         async def check():
             stop = asyncio.Event()

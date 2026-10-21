@@ -16,7 +16,7 @@ import time
 import uuid
 from zoneinfo import ZoneInfo
 
-from fastapi import FastAPI, HTTPException, Query, Request, Response
+from fastapi import BackgroundTasks, FastAPI, HTTPException, Query, Request, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -32,6 +32,7 @@ from backend.storage import workspace_owner
 from backend.memory import MAX_CONTENT, MemoryStore
 from backend.work_config import WorkConfig, config_value
 from backend.reflection import ReflectionStore, ReflectionWorker
+from backend.research import ResearchStore
 from backend.tasks import TaskInput, TaskUpdate, create_task as task_record, dismiss_task, present_task, prune_ai_tasks
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -268,6 +269,13 @@ class ContextCandidateSearch(StrictModel):
     retrieved_to: str | None = Field(default=None, pattern=r"^[0-9]{4}-[0-9]{2}-[0-9]{2}$", strict=True)
 
 
+class ResearchInput(StrictModel):
+    submission_id: str = Field(pattern=r"^[a-f0-9]{32}$", strict=True)
+    request: str = Field(min_length=1, max_length=32000, strict=True)
+    query: str = Field(default="", max_length=512, strict=True)
+    chat_id: str | None = Field(default=None, min_length=1, max_length=100, strict=True)
+
+
 _context_lock = threading.RLock()
 _archive_config_lock = threading.RLock()
 
@@ -308,6 +316,10 @@ def provider():
     return Provider(DATABASE, TIMEZONE)
 
 
+def research_store():
+    return ResearchStore(DATABASE, TIMEZONE)
+
+
 @contextmanager
 def conflict_errors():
     try:
@@ -334,12 +346,15 @@ async def lifespan(application):
                     store.record_error()
             provider().recover()
             WebSearch(DATABASE, TIMEZONE).recover()
+            research_store().initialize()
+            research_store().recover()
             MemoryStore(DATABASE, TIMEZONE).initialize()
             reflection = ReflectionStore(DATABASE, TIMEZONE)
             reflection.initialize()
             reflection.recover()
             stop = asyncio.Event()
-            worker = asyncio.create_task(ReflectionWorker(reflection, provider(), safe_private_content).run(stop))
+            worker = asyncio.create_task(ReflectionWorker(
+                reflection, provider(), safe_private_content, maintenance=research_store().expire).run(stop))
             try:
                 yield
             finally:
@@ -431,6 +446,7 @@ def delete_chat(chat_id: str):
         state["chats"] = [chat for chat in state["chats"] if chat["id"] != chat_id]
         MemoryStore(DATABASE, TIMEZONE).delete_chat(chat_id, db=db)
         ReflectionStore(DATABASE, TIMEZONE).delete_chat(chat_id, db)
+        research_store().delete_chat(chat_id, db)
         prune_ai_tasks(state, db)
     return snapshot(state)
 
@@ -707,6 +723,210 @@ def search_context_candidates(entry: ContextCandidateSearch):
                 return {**result, "candidates": visible}
     except (OSError, sqlite3.Error, ValueError, KeyError, TypeError, UnicodeError, RuntimeError):
         return unavailable
+
+
+def research_permissions(state, chat_id):
+    chat = selected_chat(state, chat_id) if chat_id is not None else None
+    return {"source_mode": "saved_only", "hosted_allowed": False, "memory_recall": False,
+            "memory_derived": bool(chat and any(message.get("memory_ids") for message in chat["messages"])),
+            "chat_id": chat_id}
+
+
+def research_budget(state):
+    # Parent allowances are server owned. This preview spends only local elapsed
+    # time; #37 must reserve cumulative model usage before enabling model stages.
+    limits = state["limits"]
+    total = {"model_calls": 4, "tokens": limits["max_tokens"], "seconds": 120,
+             "estimated_model_usd": limits["run_usd"], "hosted_searches": 0}
+    search = WebSearch(DATABASE, TIMEZONE).summary()
+    daily_limit = min(20, search["config"]["daily_limit"])
+    # Measure elapsed seconds on the timeline, including local clock changes.
+    deadline = datetime.fromtimestamp(datetime.now(TIMEZONE).timestamp() + total["seconds"], TIMEZONE).isoformat()
+    return {"total": total, "consumed": dict.fromkeys(total, 0), "reserved": dict.fromkeys(total, 0),
+            "remaining": total.copy(), "deadline": deadline,
+            "parent_limits": limits.copy(),
+            "daily_search": {"limit": daily_limit, "used": search["searches_today"],
+                             "remaining": max(0, daily_limit - search["searches_today"])}}
+
+
+def research_lookup_summary(state):
+    outcome = {
+        "ready": "Saved-evidence lookup finished.",
+        "limited": "Saved-evidence lookup was incomplete.",
+        "disabled": "No saved evidence was inspected because source saving is disabled.",
+        "unconfigured": "No saved evidence was inspected because no source archive is configured.",
+        "unavailable": "Saved evidence could not be inspected reliably.",
+    }[state]
+    return outcome + " No reviewed answer was produced."
+
+
+def safe_research_run(run, *, secrets):
+    # JSON escapes quotes/backslashes, so also screen the original user fields
+    # that the browser reconstructs from the response.
+    safe_private_content(run["request"], run["query"], run["submission_id"], run["chat_id"] or "",
+                         json.dumps(run, ensure_ascii=False), secrets=secrets)
+    return run
+
+
+def research_view(run):
+    """Export private records with current credential and exact-source fences."""
+    try:
+        operation_secrets = source_secrets()
+        safe_research_run(run, secrets=operation_secrets)
+        result, visible, response_secrets = run.get("result"), [], None
+        # Never rewrite saved pins. Broken optional storage withholds references
+        # while the safe private request and recorded activity remain readable.
+        if result and result["candidates"]:
+            try:
+                with _archive_config_lock:
+                    store = context_store()
+                    with store._write_lock:
+                        selected_config = store._candidate_config()
+                        status = safe_archive_status({"config": selected_config, "path_error": store.path_error},
+                                                     secrets=operation_secrets)
+                        sources = []
+                        for reference in result["candidates"]:
+                            try:
+                                if status["path_error"] or status["config"] is None:
+                                    raise KeyError("unavailable")
+                                source = store.get_capture(reference["capture_id"], reference["content_hash"], reference["manifest_hash"])
+                                safe_archived_source(source, secrets=operation_secrets)
+                                sources.append((reference, source))
+                            except (KeyError, OSError, sqlite3.Error, ValueError, TypeError, UnicodeError):
+                                pass
+                        response_secrets = (*operation_secrets, *source_secrets())
+                        final_config = store._candidate_config()
+                        final_status = safe_archive_status({"config": final_config, "path_error": store.path_error},
+                                                           secrets=response_secrets)
+                        if (final_config == selected_config and not final_status["path_error"]
+                                and final_status["config"] is not None):
+                            for reference, source in sources:
+                                try:
+                                    safe_archived_source(source, secrets=response_secrets)
+                                    visible.append(reference)
+                                except ValueError:
+                                    pass
+            except (KeyError, OSError, sqlite3.Error, ValueError, TypeError, UnicodeError, RuntimeError):
+                visible = []
+        if response_secrets is None:
+            response_secrets = (*operation_secrets, *source_secrets())
+        if result:
+            run = {**run, "result": {**result, "candidates": visible,
+                   "summary": research_lookup_summary(result["lookup_state"]),
+                   "references_unavailable": len(result["candidates"]) - len(visible)}}
+        return safe_research_run(run, secrets=response_secrets)
+    except (OSError, sqlite3.Error, ValueError, KeyError, TypeError, UnicodeError, RuntimeError):
+        raise HTTPException(404, "That research run is unavailable.") from None
+
+
+def execute_research_run(run_id):
+    """One in-process local lookup; recovery never resubmits this callback."""
+    store = research_store()
+    claimed = store.claim(run_id)
+    if claimed is None:
+        return
+    run, token = claimed
+    try:
+        safe_private_content(run["request"], run["query"], secrets=source_secrets())
+        packet = search_context_candidates(ContextCandidateSearch(query=run["query"], limit=20))
+        references = [{key: candidate[key] for key in
+                       ("capture_id", "content_hash", "manifest_hash", "retrieved_at", "stale")}
+                      for candidate in packet["candidates"]]
+        safe_private_content(run["request"], run["query"], json.dumps(references), secrets=source_secrets())
+        permissions = research_permissions(read_workspace(), run["chat_id"])
+        permissions["memory_derived"] |= run["permissions"]["memory_derived"]
+        store.finish(run_id, token, {
+            "lookup_state": packet["state"], "search_limited": packet["search_limited"],
+            "skipped_count": packet["skipped_count"], "candidates": references,
+            "summary": research_lookup_summary(packet["state"]),
+        }, permissions=permissions)
+    except Exception:
+        # Store only controlled outcomes, never provider prose, source text or
+        # exception details. The claim token fences cancellation/deletion.
+        store.fail(run_id, token, "lookup_failed")
+
+
+@app.post("/api/research/runs", status_code=202)
+def create_research_run(entry: ResearchInput, background_tasks: BackgroundTasks):
+    invalid = "Check the research request and remove credentials before saving."
+    try:
+        operation_secrets = source_secrets()
+        safe_private_content(entry.request, entry.query, entry.submission_id, entry.chat_id or "",
+                             secrets=operation_secrets)
+    except (OSError, sqlite3.Error, ValueError, TypeError, UnicodeError, RuntimeError):
+        raise HTTPException(422, invalid) from None
+    with conflict_errors(), workspace_transaction(with_db=True) as (state, db):
+        permissions = research_permissions(state, entry.chat_id)
+        run, created = research_store().create(entry.submission_id, entry.request, entry.query, entry.chat_id,
+                                               permissions, research_budget(state), db)
+        try:
+            safe_research_run(run, secrets=(*operation_secrets, *source_secrets()))
+        except (OSError, sqlite3.Error, ValueError, KeyError, TypeError, UnicodeError, RuntimeError):
+            # Rejection rolls back admission, including the duplicate guard and
+            # submitted event. No archive locks are taken inside this transaction.
+            raise HTTPException(422, invalid) from None
+    if created:
+        # A fresh queued run has no receipt; its complete response was screened
+        # before commit. Existing submissions still revalidate their saved pins.
+        visible = run
+        background_tasks.add_task(execute_research_run, run["id"])
+    else:
+        visible = research_view(run)
+    return {"run": visible, "created": created}
+
+
+@app.get("/api/research/runs")
+def list_research_runs(limit: int = Query(default=20, ge=1, le=50)):
+    visible, skipped = [], 0
+    try:
+        operation_secrets = source_secrets()
+    except (OSError, sqlite3.Error, ValueError, TypeError, UnicodeError, RuntimeError):
+        raise HTTPException(503, "Research records are temporarily unavailable.") from None
+    for run in research_store().list(limit):
+        try:
+            # Lists carry request/status/allowance metadata. Only the selected
+            # detail read exports a revalidated saved-version receipt.
+            visible.append(research_view({**run, "result": None}))
+        except HTTPException:
+            skipped += 1
+    try:
+        response_secrets = (*operation_secrets, *source_secrets())
+        screened = []
+        for run in visible:
+            try:
+                screened.append(safe_research_run(run, secrets=response_secrets))
+            except ValueError:
+                skipped += 1
+        return {"runs": screened, "skipped_count": skipped}
+    except (OSError, sqlite3.Error, ValueError, TypeError, UnicodeError, RuntimeError):
+        raise HTTPException(503, "Research records are temporarily unavailable.") from None
+
+
+@app.get("/api/research/runs/{run_id}")
+def get_research_run(run_id: str):
+    try:
+        return research_view(research_store().get(run_id))
+    except (KeyError, ValueError, TypeError, OSError, sqlite3.Error, UnicodeError):
+        raise HTTPException(404, "That research run is unavailable.") from None
+
+
+@app.post("/api/research/runs/{run_id}/cancel")
+def cancel_research_run(run_id: str):
+    try:
+        store = research_store()
+        store.cancel(run_id)
+        return research_view(store.get(run_id))
+    except (KeyError, ValueError, TypeError, OSError, sqlite3.Error, UnicodeError):
+        raise HTTPException(404, "That research run is unavailable.") from None
+
+
+@app.delete("/api/research/runs/{run_id}")
+def delete_research_run(run_id: str):
+    try:
+        research_store().delete(run_id)
+        return {"deleted": True}
+    except (KeyError, ValueError, TypeError, OSError, sqlite3.Error, UnicodeError):
+        raise HTTPException(404, "That research run is unavailable.") from None
 
 
 @app.get("/api/context/sources")

@@ -6,6 +6,7 @@ import MemorySetup from "./MemorySetup";
 import WorkSetup from "./WorkSetup";
 import ReflectionJournal from "./ReflectionJournal";
 import Evidence from "./pages/Evidence";
+import Research, { researchPageRequested } from "./pages/Research";
 import ArchiveSettings from "./pages/ArchiveSettings";
 import useArchiveSettings from "./pages/ArchiveSettings/useArchiveSettings";
 import {
@@ -22,6 +23,7 @@ import {
   Pencil,
   Plus,
   Settings2,
+  Search,
   ShieldCheck,
   SlidersHorizontal,
   Trash2,
@@ -40,7 +42,8 @@ import type {
 import ProviderSetup from "./ProviderSetup";
 import OllamaSearchSetup from "./OllamaSearchSetup";
 
-type Page = "workspace" | "tasks" | "memory" | "evidence" | "settings";
+type Page =
+  "workspace" | "tasks" | "memory" | "evidence" | "research" | "settings";
 type Panel = "task" | "usage" | "rename-chat" | "delete-chat" | null;
 const money = (value: number) =>
   `$${value.toFixed(value > 0 && value < 0.01 ? 4 : 2)}`;
@@ -51,6 +54,7 @@ const navigation = [
   { id: "tasks", name: "Tasks", icon: CheckSquare },
   { id: "memory", name: "Memory", icon: Network },
   { id: "evidence", name: "Evidence", icon: Database },
+  { id: "research", name: "Research", icon: Search },
   { id: "settings", name: "Settings", icon: Settings2 },
 ] as const;
 
@@ -391,7 +395,9 @@ function TaskRow({
 
 export default function App() {
   const [workspace, setWorkspace] = useState<Workspace | null>(null);
-  const [page, setPage] = useState<Page>("workspace");
+  const [page, setPage] = useState<Page>(() =>
+    researchPageRequested() ? "research" : "workspace",
+  );
   const archive = useArchiveSettings(
     page === "settings" || page === "evidence",
     page === "settings",
@@ -626,6 +632,11 @@ export default function App() {
   }
   function navigate(next: Page) {
     if (next !== "workspace") setReplyId("");
+    if (next !== "research") {
+      const url = new URL(window.location.href);
+      url.searchParams.delete("research_run");
+      window.history.replaceState(null, "", url);
+    }
     setPage(next);
     setMobileNav(false);
   }
@@ -1197,6 +1208,7 @@ export default function App() {
             onOpenSettings={() => navigate("settings")}
           />
         )}
+        {page === "research" && <Research chatId={workspace.active_chat_id} />}
         {reflectionVisible && (
           <main className="page-content" hidden={page !== "settings"}>
             <div className="page-heading">

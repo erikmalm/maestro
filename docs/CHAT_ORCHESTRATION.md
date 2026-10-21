@@ -1,6 +1,6 @@
 # Chat assessment and delegation
 
-Design agreed 2026-10-16; main checkpoint updated 2026-10-17. Local coordinator-model selection, one hosted-search continuation and the separate read-only Evidence browser are implemented. Requirements assessment, evidence coverage review, final answer vetting, durable research progress and specialist execution below remain proposed.
+Design agreed 2026-10-16; checkpoint updated 2026-10-21. Local coordinator-model selection, one hosted-search continuation, the read-only Evidence browser and local candidates (#22) are merged. This #23 branch adds an explicit durable local research preview with actual lookup activity; model stages, requirements assessment, evidence coverage review, final answer vetting and specialist execution below remain proposed. See the [implemented run contract](ARCHITECTURE.md#durable-research-preview-23).
 
 Each user message should first reach a coordinator that assesses the request and chooses how to handle it. The coordinator can answer directly, ask a necessary clarification, follow the research workflow, or assign a bounded task to an available specialist. The user sees useful progress as work happens and receives one coherent answer in the original conversation. The [target research workflow](ARCHITECTURE.md#target-research-workflow) is the architectural overview; this document describes its place in chat routing and the existing specialist design.
 
@@ -8,7 +8,7 @@ The first implementation should use local Ollama, one specialist at most when de
 
 ## Current behavior
 
-Implementation baseline: main `555591e` includes archive configuration/ownership (#17), source inventory/pinned-read APIs (#41) and automatic Evidence updates (#42). Fresh main checks pass 417 backend tests and 83 browser tests, including 12 Evidence cases. These source reads do not implement question-specific retrieval or research review.
+Implementation baseline: main `72a061b` includes the archive/Evidence foundation, PR #44's setup/status/restart slice and PR #45/#22's local candidates. That baseline passed 477 backend tests; the unchanged frontend passed 89 browser tests and its build. This branch's opt-in Research preview persists original requests, captured privacy/allowances, actual local lookup events and partial receipts. These reads do not establish evidence acceptance or a reviewed answer.
 
 The chat UI submits `role: chat` to `POST /api/chat`, which waits for `Provider.chat` to finish. Local **Chat routing** chooses the normal chat model or configured installed orchestrator model, with chat-model fallback for a blank orchestrator choice. An explicit per-message model overrides that route. Existing configurations default to `direct`; `orchestrator` applies to local Ollama only. The reply and ledger record the actual selected model.
 

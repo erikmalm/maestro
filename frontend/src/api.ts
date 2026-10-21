@@ -456,3 +456,89 @@ export const rejectMemoryCandidate = (id: string) =>
     `/reflection/candidates/${encodeURIComponent(id)}`,
     "DELETE",
   );
+
+export type ResearchAllowance = {
+  model_calls: number;
+  tokens: number;
+  seconds: number;
+  estimated_model_usd: number;
+  hosted_searches: number;
+};
+export type ResearchRun = {
+  id: string;
+  submission_id: string;
+  request: string;
+  query: string;
+  chat_id: string | null;
+  state:
+    "queued" | "running" | "partial" | "cancelled" | "interrupted" | "failed";
+  created_at: string;
+  updated_at: string;
+  permissions: {
+    source_mode: "saved_only";
+    hosted_allowed: boolean;
+    memory_recall: boolean;
+    memory_derived: boolean;
+    chat_id: string | null;
+  };
+  budget: {
+    total: ResearchAllowance;
+    consumed: ResearchAllowance;
+    reserved: ResearchAllowance;
+    remaining: ResearchAllowance;
+    deadline: string | null;
+    daily_search: { used?: number; remaining?: number; limit?: number } | null;
+    parent_limits?: Record<string, number>;
+  };
+  result: null | {
+    lookup_state: string;
+    search_limited: boolean;
+    skipped_count: number;
+    references_unavailable?: number;
+    candidates: {
+      capture_id: string;
+      content_hash: string;
+      manifest_hash: string;
+      retrieved_at: string;
+      stale: boolean;
+    }[];
+    summary: string;
+  };
+  events?: { sequence: number; at: string; kind: string; summary: string }[];
+};
+export const createResearchRun = (body: {
+  submission_id: string;
+  request: string;
+  query: string;
+  chat_id: string | null;
+}) =>
+  request<{ run: ResearchRun; created: boolean }>(
+    "/research/runs",
+    "POST",
+    body,
+  );
+export const loadResearchRuns = (signal?: AbortSignal) =>
+  request<{ runs: ResearchRun[]; skipped_count: number }>(
+    "/research/runs?limit=20",
+    "GET",
+    undefined,
+    signal,
+  );
+export const loadResearchRun = (id: string, signal?: AbortSignal) =>
+  request<ResearchRun>(
+    `/research/runs/${encodeURIComponent(id)}`,
+    "GET",
+    undefined,
+    signal,
+  );
+export const cancelResearchRun = (id: string) =>
+  request<ResearchRun>(
+    `/research/runs/${encodeURIComponent(id)}/cancel`,
+    "POST",
+    {},
+  );
+export const deleteResearchRun = (id: string) =>
+  request<{ deleted: boolean }>(
+    `/research/runs/${encodeURIComponent(id)}`,
+    "DELETE",
+  );
