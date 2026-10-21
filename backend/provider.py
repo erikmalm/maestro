@@ -426,6 +426,9 @@ class Provider:
                 raise ProviderFailure("Background reflection exceeded its deadline before inference.", False)
         # Reserve before dispatch under the same SQLite lock used for tasks and limits.
         with self.transaction(with_db=True) as (state, db):
+            from backend.research import ResearchStore
+            if ResearchStore.owns_foreground(db):
+                raise ValueError("A research run is active. Wait for it to finish or cancel it before generating a reply.")
             connection_config = title_for["connection_config"] if title else state["config"].copy()
             config = title_for["config"] if title else connection_config.copy()
             local = config["protocol"] == "ollama"
