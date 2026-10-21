@@ -734,7 +734,7 @@ def research_permissions(state, chat_id):
 
 def research_budget(state):
     # Parent allowances are server owned. This preview spends only local elapsed
-    # time; #37 must reserve cumulative model usage before enabling model stages.
+    # time; production model stages must use the owned research-stage adapter.
     limits = state["limits"]
     total = {"model_calls": 4, "tokens": limits["max_tokens"], "seconds": 120,
              "estimated_model_usd": limits["run_usd"], "hosted_searches": 0}
