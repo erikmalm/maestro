@@ -991,13 +991,17 @@ class ReflectionStore:
 
 
 class ReflectionWorker:
-    def __init__(self, store, provider, validator):
+    def __init__(self, store, provider, validator, *, maintenance=None):
         self.store, self.provider, self.validator = store, provider, validator
+        self.maintenance = maintenance
         self.pending_failure = None
 
     def step(self):
         job = None
         try:
+            # Deadline maintenance also runs while optional reflection is off.
+            if self.maintenance is not None:
+                self.maintenance()
             if self.pending_failure is not None:
                 self.store.finish_failure(*self.pending_failure)
                 self.pending_failure = None

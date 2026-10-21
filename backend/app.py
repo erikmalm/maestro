@@ -2,7 +2,7 @@
 
 from contextlib import closing, contextmanager, asynccontextmanager, ExitStack
 import asyncio
-from datetime import datetime, timedelta
+from datetime import datetime
 import hashlib
 import hmac
 import json
@@ -353,7 +353,8 @@ async def lifespan(application):
             reflection.initialize()
             reflection.recover()
             stop = asyncio.Event()
-            worker = asyncio.create_task(ReflectionWorker(reflection, provider(), safe_private_content).run(stop))
+            worker = asyncio.create_task(ReflectionWorker(
+                reflection, provider(), safe_private_content, maintenance=research_store().expire).run(stop))
             try:
                 yield
             finally:
@@ -739,11 +740,24 @@ def research_budget(state):
              "estimated_model_usd": limits["run_usd"], "hosted_searches": 0}
     search = WebSearch(DATABASE, TIMEZONE).summary()
     daily_limit = min(20, search["config"]["daily_limit"])
+    # Measure elapsed seconds on the timeline, including local clock changes.
+    deadline = datetime.fromtimestamp(datetime.now(TIMEZONE).timestamp() + total["seconds"], TIMEZONE).isoformat()
     return {"total": total, "consumed": dict.fromkeys(total, 0), "reserved": dict.fromkeys(total, 0),
-            "remaining": total.copy(), "deadline": (datetime.now(TIMEZONE) + timedelta(seconds=120)).isoformat(),
+            "remaining": total.copy(), "deadline": deadline,
             "parent_limits": limits.copy(),
             "daily_search": {"limit": daily_limit, "used": search["searches_today"],
                              "remaining": max(0, daily_limit - search["searches_today"])}}
+
+
+def research_lookup_summary(state):
+    outcome = {
+        "ready": "Saved-evidence lookup finished.",
+        "limited": "Saved-evidence lookup was incomplete.",
+        "disabled": "No saved evidence was inspected because source saving is disabled.",
+        "unconfigured": "No saved evidence was inspected because no source archive is configured.",
+        "unavailable": "Saved evidence could not be inspected reliably.",
+    }[state]
+    return outcome + " No reviewed answer was produced."
 
 
 def safe_research_run(run, *, secrets):
@@ -798,6 +812,7 @@ def research_view(run):
             response_secrets = (*operation_secrets, *source_secrets())
         if result:
             run = {**run, "result": {**result, "candidates": visible,
+                   "summary": research_lookup_summary(result["lookup_state"]),
                    "references_unavailable": len(result["candidates"]) - len(visible)}}
         return safe_research_run(run, secrets=response_secrets)
     except (OSError, sqlite3.Error, ValueError, KeyError, TypeError, UnicodeError, RuntimeError):
@@ -823,7 +838,7 @@ def execute_research_run(run_id):
         store.finish(run_id, token, {
             "lookup_state": packet["state"], "search_limited": packet["search_limited"],
             "skipped_count": packet["skipped_count"], "candidates": references,
-            "summary": "Saved-evidence inspection finished. No reviewed answer was produced.",
+            "summary": research_lookup_summary(packet["state"]),
         }, permissions=permissions)
     except Exception:
         # Store only controlled outcomes, never provider prose, source text or

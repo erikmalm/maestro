@@ -16,7 +16,7 @@ export const stateLabel = (state) =>
   })[state] || "Unknown";
 const lookupLabels = {
   ready: "Saved-evidence lookup completed.",
-  limited: "Lookup reached its work limit. Results may be incomplete.",
+  limited: "Saved-evidence lookup was incomplete.",
   disabled: "Source saving is disabled. Saved evidence was not inspected.",
   unconfigured: "No source archive is configured.",
   unavailable:
@@ -169,7 +169,7 @@ export default function RunDetails({ run, busy, onCancel, onDelete }) {
                     <dd>{date(candidate.retrieved_at)}</dd>
                   </div>
                   <div>
-                    <dt>Reuse-window flag</dt>
+                    <dt>Reuse-window flag at lookup</dt>
                     <dd>
                       {candidate.stale
                         ? "Outside reuse window"

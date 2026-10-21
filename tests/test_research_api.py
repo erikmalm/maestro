@@ -1,12 +1,15 @@
 """Opt-in research receipts use disposable evidence, without model or hosted calls."""
 from contextlib import closing
+from datetime import datetime
 import json
 from pathlib import Path
 import sqlite3
 import tempfile
+import time
 import unittest
 from unittest.mock import patch
 import uuid
+from zoneinfo import ZoneInfo
 
 import httpx
 from fastapi.testclient import TestClient
@@ -243,6 +246,40 @@ class ResearchApiTests(unittest.TestCase):
             self.assertAlmostEqual(run["budget"]["remaining"][name],
                                    amount - run["budget"]["consumed"][name] - run["budget"]["reserved"][name])
 
+    def test_deadline_is_elapsed_time_across_stockholm_clock_changes(self):
+        zone = ZoneInfo("Europe/Stockholm")
+        for start in (datetime(2026, 3, 29, 1, 59, 30, tzinfo=zone),
+                      datetime(2026, 10, 25, 2, 59, 30, tzinfo=zone)):
+            with self.subTest(start=start.isoformat()), patch.object(backend, "datetime", wraps=datetime) as clock:
+                clock.now.return_value = start
+                budget = backend.research_budget(backend.seed_workspace())
+            self.assertEqual(datetime.fromisoformat(budget["deadline"]).timestamp() - start.timestamp(),
+                             budget["total"]["seconds"])
+
+    def test_uninspected_outcomes_and_older_receipts_do_not_claim_inspection_finished(self):
+        disabled = self.submit().json()["run"]
+        self.capture()
+        with patch.dict("os.environ", {"MAESTRO_CONTEXT_ARCHIVE_DIR": ""}):
+            unconfigured = self.submit().json()["run"]
+        backend.context_store().index.unlink()
+        unavailable = self.submit().json()["run"]
+        for recorded, expected in ((disabled, "disabled"), (unconfigured, "unconfigured"),
+                                   (unavailable, "unavailable")):
+            with self.subTest(state=expected):
+                run_id = recorded["id"]
+                # Earlier preview versions persisted this misleading generic text.
+                with closing(sqlite3.connect(backend.DATABASE)) as db, db:
+                    payload = json.loads(db.execute("SELECT payload FROM research_runs WHERE id=?", (run_id,)).fetchone()[0])
+                    self.assertEqual(payload["result"]["lookup_state"], expected)
+                    payload["result"]["summary"] = "Saved-evidence inspection finished. No reviewed answer was produced."
+                    db.execute("UPDATE research_runs SET payload=? WHERE id=?", (json.dumps(payload), run_id))
+                before = backend.DATABASE.read_bytes()
+                visible = self.get(run_id)
+                self.assertNotIn("inspection finished", visible["result"]["summary"].lower())
+                self.assertIn("No reviewed answer", visible["result"]["summary"])
+                self.assertEqual(visible["result"]["candidates"], [])
+                self.assertEqual(backend.DATABASE.read_bytes(), before)
+
     def test_credential_rotation_hides_an_unsafe_request_on_detail_and_list_reads(self):
         key = "laterresearchrequestcredential"
         run = self.queued(request="Private synthetic request " + key)
@@ -447,6 +484,25 @@ class ResearchApiTests(unittest.TestCase):
         self.assertEqual(saved["state"], "interrupted")
         self.assertIsNone(saved["result"])
         self.assertNotIn("local_lookup_finished", [event["kind"] for event in saved["events"]])
+
+    def test_lifespan_expires_abandoned_work_with_reflection_disabled_and_no_redispatch(self):
+        run = self.queued()
+        expired_at = datetime.fromisoformat(run["budget"]["deadline"]).timestamp() + 1
+        with (patch.object(backend.ResearchStore, "clock", return_value=expired_at),
+              patch.object(backend, "execute_research_run") as dispatch):
+            until = time.monotonic() + 5
+            while time.monotonic() < until:
+                saved = self.get(run["id"])
+                if saved["state"] == "failed":
+                    break
+                time.sleep(0.05)
+            self.assertEqual(saved["state"], "failed")
+            self.assertEqual([event["kind"] for event in saved["events"]], ["submitted", "failed"])
+            self.assertIn("deadline", saved["events"][-1]["summary"])
+            self.assertIsNone(saved["result"])
+            self.assertEqual(saved["budget"]["consumed"]["model_calls"], 0)
+            dispatch.assert_not_called()
+        self.assertEqual(self.submit().status_code, 202)
 
     def test_active_research_excludes_the_existing_provider_generation_path(self):
         chat_id = self.chat()

@@ -465,6 +465,13 @@ test("unavailable and limited receipts stay partial, and refreshed permissions w
       { exact: true },
     ),
   ).toBeVisible();
+  await expect(
+    selected(page).getByText("Saved-evidence lookup was incomplete.", {
+      exact: true,
+    }),
+  ).toBeVisible();
+  // A limited result can reflect withheld evidence rather than a work cap.
+  await expect(selected(page)).not.toContainText(/work limit/i);
   state.runs = [
     {
       ...recorded(),
@@ -498,13 +505,34 @@ test("unavailable and limited receipts stay partial, and refreshed permissions w
   await expect(page.getByRole("alert")).toContainText(
     "This research run is unavailable.",
   );
-  state.runs = [recorded()];
+  const historical = recorded();
+  historical.created_at = "2020-01-01T12:00:00Z";
+  historical.updated_at = "2020-01-01T12:00:01Z";
+  historical.result!.candidates = [
+    { ...candidate, retrieved_at: "2020-01-01T11:00:00Z", stale: false },
+  ];
+  state.runs = [historical];
   await focus(page);
   await expect(
     selected(page).getByText("1 available saved-version references.", {
       exact: true,
     }),
   ).toBeVisible();
+  await selected(page)
+    .getByText("Saved version", { exact: false })
+    .filter({ has: page.locator("code") })
+    .first()
+    .click();
+  await expect(
+    selected(page).getByText("Within reuse window", { exact: true }),
+  ).toBeVisible();
+  // Reopening an old receipt must identify the stored flag's original scope.
+  await expect(
+    selected(page).getByText("Reuse-window flag at lookup", { exact: true }),
+  ).toBeVisible();
+  await expect(
+    selected(page).getByText("Reuse-window flag", { exact: true }),
+  ).toHaveCount(0);
 });
 
 test("recorded activity polls while visible and refreshes after returning", async ({

@@ -268,6 +268,89 @@ class ResearchTests(unittest.TestCase):
                 self.assertIsNone(failed["result"])
                 self.assertIn("deadline", failed["events"][-1]["summary"])
 
+    def test_deadline_maintenance_releases_queued_and_running_claims_without_losing_accounting_or_privacy(self):
+        for running in (False, True):
+            with self.subTest(running=running):
+                self.workspace([{"id": "chat", "messages": []}])
+                allowance = deepcopy(self.budget)
+                allowance["deadline"] = datetime.fromtimestamp(self.clock + 120, timezone.utc).isoformat()
+                allowance["reserved"].update(model_calls=1, tokens=500, estimated_model_usd=0.1)
+                run, _ = self.create(chat_id="chat", permissions={**self.permissions, "chat_id": "chat"}, budget=allowance)
+                token = self.store.claim(run["id"])[1] if running else None
+                before = self.snapshot()
+                self.assertEqual(self.store.expire(), 0)
+                self.assertEqual(self.snapshot(), before)
+                self.workspace([{"id": "chat", "messages": [{"memory_ids": ["private-memory"]}]}])
+                self.clock += 120
+                self.assertEqual(self.store.expire(), 1)
+                failed = self.store.get(run["id"])
+                self.assertEqual(failed["state"], "failed")
+                self.assertIsNone(failed["result"])
+                self.assertTrue(failed["permissions"]["memory_derived"])
+                self.assertEqual(failed["budget"]["reserved"], allowance["reserved"])
+                self.assertEqual(failed["budget"]["consumed"]["seconds"], 120)
+                self.assertEqual(failed["budget"]["remaining"]["seconds"], 0)
+                self.assertEqual(failed["budget"]["remaining"]["tokens"], 99500)
+                expected = ["submitted", *(["local_lookup_started"] if running else []), "failed"]
+                self.assertEqual([event["kind"] for event in failed["events"]], expected)
+                self.assertIn("deadline", failed["events"][-1]["summary"])
+                with closing(sqlite3.connect(self.database)) as db:
+                    self.assertFalse(ResearchStore.owns_foreground(db))
+                    self.assertIsNone(db.execute("SELECT claim_token FROM research_runs WHERE id=?", (run["id"],)).fetchone()[0])
+                self.assertIsNone(self.store.claim(run["id"]))
+                self.assertFalse(self.store.finish(run["id"], token, self.result))
+                self.assertFalse(self.store.fail(run["id"], token))
+                before = self.snapshot()
+                self.assertEqual(self.store.expire(), 0)
+                self.assertEqual(self.snapshot(), before)
+
+    def test_failed_claim_under_real_writer_contention_is_released_by_deadline_maintenance(self):
+        run, _ = self.create()
+        connect = sqlite3.connect
+
+        def no_wait(*arguments, **keywords):
+            return connect(*arguments, **{**keywords, "timeout": 0})
+
+        with closing(connect(self.database)) as blocker:
+            blocker.execute("BEGIN IMMEDIATE")
+            with patch("backend.research.sqlite3.connect", side_effect=no_wait), self.assertRaises(sqlite3.OperationalError):
+                self.store.claim(run["id"])
+            blocker.rollback()
+        self.assertEqual(self.store.get(run["id"])["state"], "queued")
+        with self.assertRaises(ValueError):
+            self.create()
+        self.clock += 120
+        self.assertEqual(self.store.expire(), 1)
+        self.assertEqual([event["kind"] for event in self.store.get(run["id"])["events"]], ["submitted", "failed"])
+        fresh = deepcopy(self.budget)
+        fresh["deadline"] = datetime.fromtimestamp(self.clock + 120, timezone.utc).isoformat()
+        self.assertTrue(self.create(budget=fresh)[1])
+
+    def test_deadline_maintenance_preserves_terminal_deletion_and_missing_chat_fences(self):
+        for action in ("cancel", "delete"):
+            with self.subTest(action=action):
+                allowance = deepcopy(self.budget)
+                allowance["deadline"] = datetime.fromtimestamp(self.clock + 1, timezone.utc).isoformat()
+                run, _ = self.create(budget=allowance)
+                getattr(self.store, action)(run["id"])
+                self.clock += 2
+                before = self.snapshot()
+                self.assertEqual(self.store.expire(), 0)
+                self.assertEqual(self.snapshot(), before)
+        self.workspace([{"id": "chat", "messages": []}])
+        allowance = deepcopy(self.budget)
+        allowance["deadline"] = datetime.fromtimestamp(self.clock + 1, timezone.utc).isoformat()
+        run, _ = self.create(chat_id="chat", permissions={**self.permissions, "chat_id": "chat"}, budget=allowance)
+        token = self.store.claim(run["id"])[1]
+        self.workspace([])
+        self.clock += 2
+        self.assertEqual(self.store.expire(), 1)
+        with self.assertRaises(KeyError):
+            self.store.get(run["id"])
+        self.assertFalse(self.store.finish(run["id"], token, self.result))
+        with self.assertRaisesRegex(ValueError, "deleted"):
+            self.create(run["submission_id"], chat_id="chat", permissions={**self.permissions, "chat_id": "chat"})
+
     def test_controlled_failure_has_only_a_fixed_summary_and_real_elapsed_usage(self):
         run, _ = self.create()
         _, token = self.store.claim(run["id"])

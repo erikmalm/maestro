@@ -427,6 +427,21 @@ class ResearchStore:
             return connection.execute("UPDATE research_runs SET state='deleted',chat_id=NULL,claim_token=NULL,payload='{}',"
                                       "updated_at=? WHERE chat_id=?", (self.stamp(), chat_id)).rowcount
 
+    def expire(self):
+        """Release overdue ownership without retrying any lookup or dispatch."""
+        with self._transaction() as db:
+            selected = db.execute("SELECT id FROM research_runs WHERE state IN ('queued','running') LIMIT 1").fetchone()
+            if selected is None:
+                return 0
+            run = self._public(db, self._row(db, selected[0]))
+            if self.clock() < _date(run["budget"]["deadline"]).timestamp():
+                return 0
+            if not self._chat_exists(db, run["chat_id"]):
+                self._purge(db, run["id"])
+            else:
+                self._terminal(db, run, "failed", "failed", FAILURES["deadline"])
+            return 1
+
     def recover(self):
         with self._transaction() as db:
             rows = db.execute("SELECT id FROM research_runs WHERE state IN ('queued','running')").fetchall()
