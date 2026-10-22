@@ -200,6 +200,25 @@ class ResearchRequirementsQualityTests(unittest.TestCase):
         with self.assertRaisesRegex(AssertionError, "expected decision"):
             check_assessment(unannotated, empty)
 
+    def test_clarification_rejects_unrelated_questions_but_permits_annotated_material_questions(self):
+        case = self.cases["ambiguous_security_and_currency"]
+        for question in ({"kind": "unit", "quote": "kr"},
+                         {"kind": "currency", "quote": "QZX"},
+                         {"kind": "scope", "quote": "stock price"}):
+            with self.subTest(unrelated_question=question):
+                changed = canonical({**case, "clarifications": [*case["clarifications"], question]})
+                with self.assertRaisesRegex(AssertionError, "unannotated clarification kind/target"):
+                    check_assessment(case, changed)
+        for case_id in ("ambiguous_abc_relative_period_and_currency", "unresolved_single_reporting_period"):
+            case = self.cases[case_id]
+            with self.subTest(optional_question=case_id):
+                questions = [*case["clarifications"], *case["optional_clarifications"]]
+                check_assessment(case, canonical({**case, "clarifications": questions}))
+                # Optional ambiguity cannot replace a required question.
+                changed = canonical({**case, "clarifications": case["optional_clarifications"]})
+                with self.assertRaisesRegex(AssertionError, "missing required material clarification"):
+                    check_assessment(case, changed)
+
 
 if __name__ == "__main__":
     unittest.main()

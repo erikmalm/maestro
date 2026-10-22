@@ -190,6 +190,12 @@
           "kind": "period",
           "quote": "FY2024/FY2025"
         }
+      ],
+      "optional_clarifications": [
+        {
+          "kind": "subject",
+          "quote": "Acme"
+        }
       ]
     },
     {
@@ -342,6 +348,12 @@
         {
           "kind": "currency",
           "quote": "kr"
+        }
+      ],
+      "optional_clarifications": [
+        {
+          "kind": "period",
+          "quote": "last quarter"
         }
       ]
     },

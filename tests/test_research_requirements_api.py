@@ -4,6 +4,7 @@ from copy import deepcopy
 from datetime import datetime
 import json
 import sqlite3
+from threading import Event, Thread
 import unittest
 from unittest.mock import patch
 import uuid
@@ -338,6 +339,70 @@ class ResearchRequirementsApiTests(unittest.TestCase):
         self.assertEqual(run["state"], "partial")
         self.assertEqual(self.chats()[0][2]["model"], orchestrator)
         self.assertEqual(backend.provider().read_state()["config"]["model"], self.model)
+        self.assert_released()
+
+    def test_model_selection_and_stage_settings_share_one_writer_transaction(self):
+        alternate = "synthetic-next-selected:latest"
+        with backend.provider().transaction() as state:
+            state["models"].append(alternate)
+        run = self.queued()
+        attempted, saved = Event(), Event()
+        errors, selections = [], []
+
+        def save_selection():
+            try:
+                try:
+                    # A writer available at selection time must commit its new
+                    # model before preparation can capture a settings snapshot.
+                    with closing(sqlite3.connect(backend.DATABASE, timeout=0)) as db, db:
+                        db.execute("BEGIN IMMEDIATE")
+                        state = json.loads(db.execute("SELECT value FROM provider_state WHERE id=1").fetchone()[0])
+                        state["config"]["model"] = alternate
+                        db.execute("UPDATE provider_state SET value=? WHERE id=1", (json.dumps(state),))
+                except sqlite3.OperationalError as error:
+                    if "locked" not in str(error).lower():
+                        raise
+                    # Atomic selection holds this writer out until its stage
+                    # is prepared. The subsequent setting change must fence it.
+                    attempted.set()
+                    with backend.provider().transaction() as state:
+                        state["config"]["model"] = alternate
+            except Exception as error:
+                errors.append(error)
+            finally:
+                attempted.set()
+                saved.set()
+
+        writer = Thread(target=save_selection)
+        select = backend.requirements_model
+        generate = backend.Provider.generate_research_stage
+
+        def select_during_save(*args, **kwargs):
+            model = select(*args, **kwargs)
+            selections.append(model)
+            writer.start()
+            self.assertTrue(attempted.wait(5), "The concurrent settings save did not attempt its write.")
+            return model
+
+        def generate_after_save(provider, *args, **kwargs):
+            self.assertTrue(saved.wait(5), "The concurrent settings save did not finish.")
+            return generate(provider, *args, **kwargs)
+
+        try:
+            with (patch.object(backend, "requirements_model", side_effect=select_during_save),
+                  patch.object(backend.Provider, "generate_research_stage", new=generate_after_save)):
+                self.fixture.execute(run["id"])
+        finally:
+            if writer.ident is not None:
+                writer.join(5)
+        self.assertFalse(writer.is_alive())
+        self.assertEqual(errors, [])
+        self.assertEqual(selections, [self.model])
+        self.assertEqual(backend.provider().read_state()["config"]["model"], alternate)
+        assessment = self.get(run["id"])
+        self.assertEqual(assessment["state"], "failed")
+        self.assertIsNone(assessment["assessment"])
+        self.assertEqual(self.requests, [])
         self.assert_released()
 
     def test_cancel_before_callback_prevents_model_dispatch(self):

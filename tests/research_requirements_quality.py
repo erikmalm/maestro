@@ -68,6 +68,8 @@ def check_assessment(case, assessment):
     phrases may sit inside larger original spans. Ready cases require exactly the
     annotated deliverables. Clarification may retain any subset, with unresolved
     references or null qualifiers, while still asking the required questions.
+    Other material questions need an explicit optional kind/target annotation;
+    arbitrary extra questions must not receive a semantic-quality pass.
     A case may explicitly permit clarification of one ambiguous subject instead
     of ready, without relaxing any restriction or allowing unrelated questions.
     """
@@ -154,8 +156,17 @@ def check_assessment(case, assessment):
             f"constraint kind/strength/quote/scope mismatch for {expected_constraints!r}; candidates={candidates}")
 
     questions = value["clarifications"]
-    candidates = [[index for index, actual in enumerate(questions)
-                   if actual["kind"] == expected["kind"] and _contains(actual["quote"], expected["quote"])]
+
+    def question_matches(actual, expected):
+        return actual["kind"] == expected["kind"] and _contains(actual["quote"], expected["quote"])
+
+    permitted_questions = [*case["clarifications"], *case.get("optional_clarifications", [])]
+    if subject_alternative:
+        permitted_questions.append({"kind": "subject", "quote": allowed_subject})
+    require(all(any(question_matches(actual, expected) for expected in permitted_questions)
+                for actual in questions),
+            f"unannotated clarification kind/target; permitted={permitted_questions!r}")
+    candidates = [[index for index, actual in enumerate(questions) if question_matches(actual, expected)]
                   for expected in case["clarifications"]]
     require(_assignment(candidates) is not None,
             f"missing required material clarification {case['clarifications']!r}; candidates={candidates}")

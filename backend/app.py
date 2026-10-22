@@ -833,9 +833,9 @@ def research_view(run):
         raise HTTPException(404, "That research run is unavailable.") from None
 
 
-def requirements_model():
+def requirements_model(state=None):
     """Use the selected local connection without testing or downloading models."""
-    state = provider().read_state()
+    state = provider().read_state() if state is None else state
     config = state["config"]
     model = config.get("orchestrator_model") or config.get("model")
     if config.get("protocol") != "ollama" or not model or model not in state.get("models", []):
@@ -850,9 +850,13 @@ def execute_requirements(run, token, store):
         operation_secrets = source_secrets()
         safe_stage_content([run["request"], json.dumps(run["request"])],
                            {"protocol": "ollama"}, secrets=operation_secrets)
-        stage = store.prepare_stage(run["id"], token, "requirements", model=requirements_model(),
-                                    schema=SCHEMA, assignment="Extract only the requested research requirements; do not answer them.",
-                                    permitted_actions=["emit_requirements", "report_gap"], seconds=90)
+        # Select the model under the same writer lock that captures its stage
+        # settings, so a concurrent Settings save cannot bind an old selection
+        # to the new connection configuration.
+        with provider().transaction(with_db=True) as (state, db):
+            stage = store.prepare_stage(run["id"], token, "requirements", model=requirements_model(state),
+                                        schema=SCHEMA, assignment="Extract only the requested research requirements; do not answer them.",
+                                        permitted_actions=["emit_requirements", "report_gap"], seconds=90, db=db)
         instructions = (INSTRUCTIONS + "\nServer request time: " + run["created_at"]
                         + ". Server timezone: " + TIMEZONE.key + ".")
         provider().generate_research_stage(stage, instructions, [{"role": "user", "content": MESSAGE}],
