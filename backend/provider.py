@@ -126,6 +126,16 @@ def research_deadline(packet):
     return time.monotonic() + max(0, datetime.fromisoformat(packet["deadline"]).timestamp() - time.time())
 
 
+def _research_json_object(pairs):
+    result = {}
+    for key, value in pairs:
+        # JSON has already decoded escapes in keys at every object depth.
+        if key in result:
+            raise ValueError("Research output contains duplicate JSON object keys.")
+        result[key] = value
+    return result
+
+
 def validate_url(url, http_hosts=("127.0.0.1", "localhost", "::1")):
     try:
         parts = urlsplit(url)
@@ -823,7 +833,7 @@ class Provider:
                     try:
                         if len(reply.encode("utf-8")) > 32768:
                             raise ValueError()
-                        research_output = json.loads(reply)
+                        research_output = json.loads(reply, object_pairs_hook=_research_json_object)
                         if not isinstance(research_output, dict):
                             raise ValueError()
                         screen_research_content(research_packet, context["instructions"], history, state,

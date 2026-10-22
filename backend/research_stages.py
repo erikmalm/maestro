@@ -2,8 +2,10 @@
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import hashlib
+import html
 import json
 import math
+from urllib.parse import unquote
 import uuid
 
 from backend import credentials
@@ -94,6 +96,26 @@ def _states(db):
     return records
 
 
+def _json_string_literals(value):
+    # Inspect adjacent quote spans, including shared closing/opening quotes.
+    # This covers embedded JSON despite prose quotes, retains duplicate keys
+    # and values, and scans each segment once rather than retrying long suffixes.
+    start = value.find('"')
+    while start >= 0:
+        end = start + 1
+        while end < len(value):
+            if value[end] == "\\":
+                end += 2
+            elif value[end] == '"':
+                break
+            else:
+                end += 1
+        if end >= len(value):
+            return
+        yield value[start:end + 1]
+        start = end
+
+
 def safe_stage_content(value, config, *, secrets=()):
     endpoints = (ENDPOINT,) if config.get("protocol") == "ollama" else (ENDPOINT, config.get("base_url", ""))
     known = list(secrets)
@@ -102,16 +124,51 @@ def safe_stage_content(value, config, *, secrets=()):
         if key:
             known.append(key)
     known = tuple(dict.fromkeys(known))
-    pending = [value]
+    if not known:
+        return known
+    # Shared across original containers and every decoded view. These allow
+    # normal maximum context packets while bounding nested/hostile encodings.
+    remaining_nodes, remaining_chars, remaining_literals = 65536, 4 * 1024 * 1024, 65536
+    pending, seen_strings, seen_containers = [(value, 0)], set(), set()
     while pending:
-        item = pending.pop()
-        if isinstance(item, str) and contains_source_secret(item, known):
-            raise ValueError("Remove credentials from research stage content.")
-        if isinstance(item, dict):
-            pending.extend(item.keys())
-            pending.extend(item.values())
-        elif isinstance(item, (tuple, list)):
-            pending.extend(item)
+        item, depth = pending.pop()
+        remaining_nodes -= 1
+        if remaining_nodes < 0 or depth > 32:
+            raise ValueError("Research content exceeds credential-screening bounds.")
+        if isinstance(item, str):
+            if item in seen_strings:
+                continue
+            seen_strings.add(item)
+            remaining_chars -= len(item)
+            if remaining_chars < 0:
+                raise ValueError("Research content exceeds credential-screening bounds.")
+            if contains_source_secret(item, known):
+                raise ValueError("Remove credentials from research stage content.")
+            decoded = html.unescape(unquote(item, errors="replace"))
+            if decoded != item:
+                pending.append((decoded, depth + 1))
+            for literal in _json_string_literals(item):
+                remaining_literals -= 1
+                remaining_chars -= len(literal)
+                if remaining_literals < 0 or remaining_chars < 0:
+                    raise ValueError("Research content exceeds credential-screening bounds.")
+                try:
+                    decoded = json.loads(literal)
+                except ValueError:
+                    continue  # Quoted prose/code need not itself be valid JSON.
+                if decoded != item and decoded not in seen_strings:
+                    pending.append((decoded, depth + 1))
+        elif isinstance(item, (dict, tuple, list)):
+            if id(item) in seen_containers:
+                continue
+            seen_containers.add(id(item))
+            width = len(item) * (2 if isinstance(item, dict) else 1)
+            if width + len(pending) > remaining_nodes:
+                raise ValueError("Research content exceeds credential-screening bounds.")
+            if isinstance(item, dict):
+                pending.extend((part, depth + 1) for pair in item.items() for part in pair)
+            else:
+                pending.extend((part, depth + 1) for part in item)
     return known
 
 
