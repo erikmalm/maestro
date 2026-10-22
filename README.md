@@ -139,4 +139,12 @@ npm run test:ui
 
 Browser tests exercise setup, separate chats, rename/delete, usage and automatic search with source persistence against synthetic API/Ollama/search services in a temporary workspace. Run the full UI suite: its scenarios share that workspace and build on earlier provider setup. Windows credential tests use a synthetic key and remove it afterward. Automated checks require no personal credentials or paid calls. Real local tool selection and final generation are verified with synthetic hosted search results; hosted authentication must be verified with the user's key through **Test search connection**. A real LLM check requires either a running local Ollama model or a configured provider key, model and prices.
 
+Requirements extraction also has a versioned [quality corpus](tests/fixtures/research_requirements_quality.json), with checks for multiple deliverables, qualifier binding, source/search wording, constraint strength/scope and clarification. Run it explicitly against an installed local model, using your numeric loopback Ollama URL:
+
+```powershell
+.\.venv\Scripts\python.exe scripts/check_research_requirements.py --model gpt-oss:20b --base-url http://127.0.0.1:11434 --report "$env:TEMP\maestro-requirements-quality.json"
+```
+
+This makes real local calls in a disposable workspace, with no existing workspace/credential reads, memory recall, evidence lookup or hosted search. It is excluded from normal unit tests. `--case` selects a single fixture; there are no automatic retries. An uncertain completion stops the run with exit code 2 and `recovery_required`; restart the original Ollama server before running further checks. A passing corpus establishes only those annotated cases for the selected model/configuration, not general semantic accuracy.
+
 The [architecture](docs/ARCHITECTURE.md) distinguishes the implemented runtime from planned task execution. Automated checks use synthetic providers; they do not establish remote model access or hosted search authentication.
