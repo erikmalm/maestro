@@ -17,6 +17,42 @@ from tests import test_research_stage_safety as fixtures
 
 
 class ResearchStageJsonScreenTests(unittest.TestCase):
+    @staticmethod
+    def escaped_body(key):
+        units = key.encode("utf-16-be")
+        return "".join("\\u" + units[index:index + 2].hex() for index in range(0, len(units), 2))
+
+    def test_malformed_quote_prefixes_cannot_hide_later_json_escape_runs(self):
+        prefixes = ('"\\x\\', '"\\q\\', '"\\U\\', '"\\u12\\', '"\\uZZZZ\\',
+                    '"\n\\', '"\r\\', '"\t\\', '"\x00\\', '"\x1f\\')
+        for key in ('syntheticMalformedCredential_47', 'synthetic"private\\credential47'):
+            literal = '"' + self.escaped_body(key) + '"'
+            for prefix in prefixes:
+                with self.subTest(key=key, prefix=repr(prefix)):
+                    with patch.object(credentials, "read", return_value=(None, "synthetic")):
+                        with self.assertRaises(ValueError):
+                            safe_stage_content(prefix + literal, {"protocol": "ollama"}, secrets=(key,))
+
+    def test_unquoted_json_escapes_and_surrogate_pairs_cannot_hide_credentials(self):
+        for key in ('syntheticUnquotedCredential47', 'synthetic"private\\credential47',
+                    'synthetic\U0001f600Credential47', r'synthetic\u0041Credential47'):
+            value = "Metadata key: " + self.escaped_body(key)
+            with self.subTest(key=key), patch.object(credentials, "read", return_value=(None, "synthetic")):
+                with self.assertRaises(ValueError):
+                    safe_stage_content(value, {"protocol": "ollama"}, secrets=(key,))
+
+    def test_each_codec_intermediate_view_is_checked_before_a_different_codec(self):
+        for key in ('synthetic&quot;Credential47', 'synthetic&#x41;Credential47',
+                    'synthetic%41Credential47', r'synthetic\u0041Credential47'):
+            views = (quote(key, safe=""), html.escape(key), self.escaped_body(key),
+                     quote(html.escape(key), safe=""), html.escape(quote(key, safe="")),
+                     quote(self.escaped_body(key), safe=""), self.escaped_body(quote(key, safe="")),
+                     html.escape(self.escaped_body(key)), self.escaped_body(html.escape(key)))
+            for value in views:
+                with self.subTest(key=key, value=value), patch.object(credentials, "read", return_value=(None, "synthetic")):
+                    with self.assertRaises(ValueError):
+                        safe_stage_content(value, {"protocol": "ollama"}, secrets=(key,))
+
     def test_nested_embedded_and_duplicate_json_views_cannot_hide_credentials(self):
         for key in ('synthetic"credential47', "synthetic\\credential47"):
             escaped = "".join("\\u%04x" % ord(character) for character in key)
@@ -52,6 +88,48 @@ class ResearchStageJsonScreenTests(unittest.TestCase):
             self.assertEqual(db.execute("SELECT COUNT(*) FROM research_stage_scope").fetchone()[0], 0)
         self.assertEqual(fixture.database.read_bytes(), before)
         self.assertEqual(fixture.requests, [])
+
+    def test_malformed_and_unquoted_escape_assignments_are_rejected_before_persistence(self):
+        key = 'synthetic"private\\credential47'
+        body = self.escaped_body(key)
+        for assignment in ('"\\x\\"' + body + '"', 'Metadata key: ' + body,
+                           quote(key, safe="")):
+            with self.subTest(assignment=assignment):
+                fixture = self.fixture()
+                fixture.keys[ENDPOINT] = key
+                run, claim = fixture.new_run()
+                before = fixture.database.read_bytes()
+                with self.assertRaises(ValueError):
+                    fixture.stage(run, claim, assignment=assignment)
+                with closing(sqlite3.connect(fixture.database)) as db:
+                    self.assertEqual(db.execute("SELECT COUNT(*) FROM research_stages").fetchone()[0], 0)
+                    self.assertEqual(db.execute("SELECT COUNT(*) FROM research_stage_scope").fetchone()[0], 0)
+                self.assertEqual(fixture.database.read_bytes(), before)
+                self.assertEqual(fixture.requests, [])
+
+    def test_malformed_and_unquoted_escape_model_outputs_are_withheld_after_actual_usage(self):
+        fixture = self.fixture()
+        key = 'synthetic"private\\credential47'
+        fixture.keys[ENDPOINT] = key
+        body = self.escaped_body(key)
+        for value in ('"\\x\\"' + body + '"', 'Metadata key: ' + body):
+            with self.subTest(value=value):
+                stage = fixture.stage()
+                fixture.response["message"]["content"] = json.dumps({"result": value})
+                try:
+                    with self.assertRaises(ValueError):
+                        fixture.generate(stage)
+                    with closing(sqlite3.connect(fixture.database)) as db:
+                        self.assertEqual(db.execute("SELECT state,output FROM research_stages WHERE id=?",
+                                                    (stage.stage_id,)).fetchone(), ("failed", None))
+                    entry = fixture.ledger()[-1]
+                    self.assertEqual((entry["status"], entry["input_tokens"], entry["output_tokens"]), ("settled", 41, 7))
+                    budget = fixture.store.get(stage.run_id)["budget"]
+                    self.assertEqual(budget["consumed"]["tokens"], 48)
+                    self.assertEqual(budget["consumed"]["model_calls"], 1)
+                finally:
+                    fixture.store.cancel(stage.run_id)
+
 
     def test_nested_json_output_is_withheld_without_losing_actual_usage(self):
         fixture = self.fixture()
@@ -90,7 +168,8 @@ class ResearchStageJsonScreenTests(unittest.TestCase):
         for _ in range(40):
             deep = [deep]
         values = (deep, ["ordinary"] * 65536,
-                  [str(index) + "x" * 65530 for index in range(65)], '"x"' * 40000)
+                  [str(index) + "x" * 65530 for index in range(65)],
+                  [str(index) + r"\nX" * 20000 for index in range(4)])
         with patch.object(credentials, "read", return_value=(None, "synthetic")):
             for value in values:
                 with self.subTest(shape=type(value).__name__):

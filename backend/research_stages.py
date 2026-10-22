@@ -5,6 +5,7 @@ import hashlib
 import html
 import json
 import math
+import re
 from urllib.parse import unquote
 import uuid
 
@@ -21,6 +22,7 @@ MAX_STAGES = 8
 FINISHING_TOKENS = 8192
 FINISHING_SECONDS = 5
 MAX_SPEC_BYTES = 32768
+_JSON_ESCAPE_RUN = re.compile(r'(?:\\(?:["\\/bfnrt]|u[0-9a-fA-F]{4}))+')
 
 
 @dataclass(frozen=True)
@@ -96,26 +98,6 @@ def _states(db):
     return records
 
 
-def _json_string_literals(value):
-    # Inspect adjacent quote spans, including shared closing/opening quotes.
-    # This covers embedded JSON despite prose quotes, retains duplicate keys
-    # and values, and scans each segment once rather than retrying long suffixes.
-    start = value.find('"')
-    while start >= 0:
-        end = start + 1
-        while end < len(value):
-            if value[end] == "\\":
-                end += 2
-            elif value[end] == '"':
-                break
-            else:
-                end += 1
-        if end >= len(value):
-            return
-        yield value[start:end + 1]
-        start = end
-
-
 def safe_stage_content(value, config, *, secrets=()):
     endpoints = (ENDPOINT,) if config.get("protocol") == "ollama" else (ENDPOINT, config.get("base_url", ""))
     known = list(secrets)
@@ -128,7 +110,7 @@ def safe_stage_content(value, config, *, secrets=()):
         return known
     # Shared across original containers and every decoded view. These allow
     # normal maximum context packets while bounding nested/hostile encodings.
-    remaining_nodes, remaining_chars, remaining_literals = 65536, 4 * 1024 * 1024, 65536
+    remaining_nodes, remaining_chars, remaining_json_runs = 65536, 4 * 1024 * 1024, 65536
     pending, seen_strings, seen_containers = [(value, 0)], set(), set()
     while pending:
         item, depth = pending.pop()
@@ -144,18 +126,26 @@ def safe_stage_content(value, config, *, secrets=()):
                 raise ValueError("Research content exceeds credential-screening bounds.")
             if contains_source_secret(item, known):
                 raise ValueError("Remove credentials from research stage content.")
-            decoded = html.unescape(unquote(item, errors="replace"))
-            if decoded != item:
-                pending.append((decoded, depth + 1))
-            for literal in _json_string_literals(item):
-                remaining_literals -= 1
-                remaining_chars -= len(literal)
-                if remaining_literals < 0 or remaining_chars < 0:
+            # Preserve every intermediate codec view: applying a second codec
+            # immediately could erase entity/escape text that belongs to a key.
+            for decoded in (unquote(item, errors="replace"), html.unescape(item)):
+                if decoded != item and decoded not in seen_strings:
+                    pending.append((decoded, depth + 1))
+            # Decode only nonoverlapping valid JSON escape runs from this
+            # original view. Quoting is unnecessary for substring screening;
+            # malformed prose cannot hide a later run. Contiguous UTF-16
+            # surrogate escapes stay together for json.loads to combine.
+            parts, end = [], 0
+            for match in _JSON_ESCAPE_RUN.finditer(item):
+                remaining_json_runs -= 1
+                remaining_chars -= match.end() - match.start()
+                if remaining_json_runs < 0 or remaining_chars < 0:
                     raise ValueError("Research content exceeds credential-screening bounds.")
-                try:
-                    decoded = json.loads(literal)
-                except ValueError:
-                    continue  # Quoted prose/code need not itself be valid JSON.
+                parts.extend((item[end:match.start()], json.loads('"' + match.group() + '"')))
+                end = match.end()
+            if parts:
+                parts.append(item[end:])
+                decoded = "".join(parts)
                 if decoded != item and decoded not in seen_strings:
                     pending.append((decoded, depth + 1))
         elif isinstance(item, (dict, tuple, list)):
