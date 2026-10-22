@@ -80,11 +80,15 @@ Merged [#22](https://github.com/erikmalm/maestro/issues/22) provides a local can
 
 ## Research preview
 
+Merged [PR #46](https://github.com/erikmalm/maestro/pull/46) delivered this #23 preview at `4350d3e`. Its tree passed 526 backend tests, 97 browser tests and the production build at `4ef4910`.
+
 Open **Research** and enter your request, with optional saved-evidence keywords, then choose **Inspect saved evidence**. This explicit preview records the original request, originating conversation restrictions, shared allowance and actual local lookup activity in the private workspace database. It makes no model calls or hosted searches. Its terminal result is **Partial — no reviewed answer**; requirements, evidence acceptance, writing and final review follow in #37/#24–#27.
 
 Reopening a selected run restores its recorded activity. Duplicate submissions reuse one run; interrupted runs are recorded after restart and never resume automatically. Cancel stops further commits; deleting a run or its originating chat removes its private request and receipt while retaining an opaque duplicate-submission guard. Saved-version references are checked against current permissions, credentials and exact hashes whenever displayed. The archive's saved source files are retained. See the [run contract](docs/ARCHITECTURE.md#durable-research-preview-23).
 
-Normal chat searches are not automatically saved or reused yet. An unused configured archive can correctly be empty; controlled acquisition/capture follows later. The first setup/status/restart slice of [#36](https://github.com/erikmalm/maestro/issues/36) merged in PR #44; content/capacity/accounting refinements remain open in #36/#20. Owned research runs and the reviewed saved-source pipeline follow local candidates without waiting for a searchable index or graph. This branch does not migrate personal storage or establish deployment. See the [delivery plan](DEVELOPMENT_PLAN.md#next-delivery-sequence) for the ordered work.
+The internal [#37](https://github.com/erikmalm/maestro/issues/37) adapter gives local model stages owned attempts and one cumulative allowance through the existing provider ledger. Synthetic requirements/writer/reviewer checks exercise that foundation. The Research screen still performs saved-evidence inspection; production requirements, evidence review, writing and final review arrive in #24–#27.
+
+Normal chat searches are not automatically saved or reused yet. An unused configured archive can correctly be empty; controlled acquisition/capture follows later. The first setup/status/restart slice of [#36](https://github.com/erikmalm/maestro/issues/36) merged in PR #44; content/capacity/accounting refinements remain open in #36/#20. These capabilities do not migrate personal storage or establish deployment. See the [delivery plan](DEVELOPMENT_PLAN.md#next-delivery-sequence) for the ordered work.
 
 ## Private memory
 

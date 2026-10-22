@@ -320,6 +320,11 @@ def research_store():
     return ResearchStore(DATABASE, TIMEZONE)
 
 
+def maintain_research_runs():
+    provider().reconcile_research()
+    research_store().expire()
+
+
 @contextmanager
 def conflict_errors():
     try:
@@ -354,7 +359,7 @@ async def lifespan(application):
             reflection.recover()
             stop = asyncio.Event()
             worker = asyncio.create_task(ReflectionWorker(
-                reflection, provider(), safe_private_content, maintenance=research_store().expire).run(stop))
+                reflection, provider(), safe_private_content, maintenance=maintain_research_runs).run(stop))
             try:
                 yield
             finally:
@@ -734,7 +739,7 @@ def research_permissions(state, chat_id):
 
 def research_budget(state):
     # Parent allowances are server owned. This preview spends only local elapsed
-    # time; #37 must reserve cumulative model usage before enabling model stages.
+    # time; production model stages must use the owned research-stage adapter.
     limits = state["limits"]
     total = {"model_calls": 4, "tokens": limits["max_tokens"], "seconds": 120,
              "estimated_model_usd": limits["run_usd"], "hosted_searches": 0}

@@ -1,4 +1,4 @@
-"""Durable ownership and receipts for an opt-in local evidence lookup, without inference or acquisition."""
+"""Durable research ownership, local lookup receipts and owned model-stage accounting."""
 from contextlib import closing, contextmanager
 from datetime import datetime, timezone as datetime_timezone
 import hashlib
@@ -17,7 +17,7 @@ MAX_REQUEST = 32000
 MAX_RUN_BYTES = 256 * 1024
 MAX_RESULT_BYTES = 32768
 MAX_PROVIDER_STATE_BYTES = 16 * 1024 ** 2
-MAX_EVENTS = 8
+MAX_EVENTS = 32
 ACTIVE = ("queued", "running")
 AMOUNTS = ("model_calls", "tokens", "seconds", "estimated_model_usd", "hosted_searches")
 EVENTS = {
@@ -28,6 +28,10 @@ EVENTS = {
     "cancelled": "Research preview cancelled. No further work will start.",
     "interrupted": "Research preview interrupted by restart. It will not resume automatically.",
     "failed": "Saved evidence lookup could not finish.",
+    "stage_reserved": "Local model-stage allowance reserved.",
+    "stage_finished": "Local model stage completed.",
+    "stage_failed": "Local model stage did not produce an accepted result.",
+    "stage_uncertain": "Local model completion is unknown; its allowance remains reserved.",
 }
 FAILURES = {
     "lookup_failed": EVENTS["failed"],
@@ -175,6 +179,8 @@ class ResearchStore:
         db.execute("CREATE TABLE IF NOT EXISTS research_events("
                    "run_id TEXT NOT NULL,sequence INTEGER NOT NULL,at TEXT NOT NULL,kind TEXT NOT NULL,summary TEXT NOT NULL,"
                    "PRIMARY KEY(run_id,sequence))")
+        from backend.research_stages import initialize
+        initialize(db)
 
     @contextmanager
     def _transaction(self, db=None):
@@ -331,17 +337,21 @@ class ResearchStore:
                    (state, run["updated_at"], token, _encoded(payload), run["id"]))
 
     def _terminal(self, db, run, state, kind, summary=None):
+        from backend.research_stages import release_finishing
+        release_finishing(self, db, run)
         run["permissions"]["memory_derived"] |= self._chat_memory(db, run["chat_id"])
         self._elapsed(run)
         self._save(db, run, state)
         self._event(db, run["id"], kind, summary)
 
     def _purge(self, db, run_id):
+        from backend.research_stages import purge
+        purge(db, run_id)
         db.execute("DELETE FROM research_events WHERE run_id=?", (run_id,))
         db.execute("UPDATE research_runs SET state='deleted',chat_id=NULL,claim_token=NULL,payload='{}',updated_at=? WHERE id=?",
                    (self.stamp(), run_id))
 
-    def claim(self, run_id):
+    def claim(self, run_id, *, lookup=True):
         _identifier(run_id)
         with self._transaction() as db:
             row = self._row(db, run_id)
@@ -357,7 +367,8 @@ class ResearchStore:
             token = uuid.uuid4().hex
             run["permissions"]["memory_derived"] |= self._chat_memory(db, run["chat_id"])
             self._save(db, run, "running", token=token)
-            self._event(db, run_id, "local_lookup_started")
+            if lookup:
+                self._event(db, run_id, "local_lookup_started")
             return self._public(db, self._row(db, run_id)), token
 
     def finish(self, run_id, token, result, *, permissions=None):
@@ -422,6 +433,9 @@ class ResearchStore:
 
     def delete_chat(self, chat_id, db):
         with self._transaction(db) as connection:
+            for (run_id,) in connection.execute("SELECT id FROM research_runs WHERE chat_id=?", (chat_id,)).fetchall():
+                from backend.research_stages import purge
+                purge(connection, run_id)
             connection.execute("DELETE FROM research_events WHERE run_id IN (SELECT id FROM research_runs WHERE chat_id=?)",
                                (chat_id,))
             return connection.execute("UPDATE research_runs SET state='deleted',chat_id=NULL,claim_token=NULL,payload='{}',"
@@ -441,6 +455,31 @@ class ResearchStore:
             else:
                 self._terminal(db, run, "failed", "failed", FAILURES["deadline"])
             return 1
+
+    def prepare_stage(self, run_id, claim_token, kind, *, model, schema, assignment, evidence=(),
+                      permitted_actions=(), seconds=5, db=None):
+        from backend.research_stages import prepare
+        return prepare(self, run_id, claim_token, kind, model=model, schema=schema, assignment=assignment,
+                       evidence=evidence, permitted_actions=permitted_actions, seconds=seconds, db=db)
+
+    def authorize_stage(self, stage, workspace, provider_state, db, *, reserved=False):
+        from backend.research_stages import authorize
+        return authorize(self, stage, workspace, provider_state, db, reserved=reserved)
+
+    def reserve_stage(self, stage, workspace, provider_state, request_id, input_bound, output_bound, db):
+        from backend.research_stages import reserve
+        return reserve(self, stage, workspace, provider_state, request_id, input_bound, output_bound, db)
+
+    def settle_stage(self, stage, request_id, *, db, input_tokens=0, output_tokens=0, outcome="completed",
+                     output=None, workspace=None, provider_state=None, dispatched=True):
+        from backend.research_stages import settle
+        return settle(self, stage, request_id, db=db, input_tokens=input_tokens, output_tokens=output_tokens,
+                      outcome=outcome, output=output, workspace=workspace, provider_state=provider_state,
+                      dispatched=dispatched)
+
+    def resolve_unknown(self, request_id, db):
+        from backend.research_stages import resolve_unknown
+        return resolve_unknown(self, request_id, db)
 
     def recover(self):
         with self._transaction() as db:
