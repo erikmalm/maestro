@@ -237,6 +237,43 @@ class ResearchRequirementsApiTests(unittest.TestCase):
                 self.assert_actual_usage(run)
                 self.assert_released()
 
+    def test_observed_search_constraint_paraphrase_is_withheld_but_exact_request_span_succeeds(self):
+        request = ("Research Novo Nordisk revenue in DKK for FY2025 using annual reports only; "
+                   "do not search.")
+        self.raw = {
+            "version": 1, "decision": "ready",
+            "subjects": [{"id": "s1", "kind": "company", "name": "Novo Nordisk", "identifiers": []}],
+            "items": [{"id": "i1", "subject_ids": ["s1"], "criterion": "revenue", "period": "FY2025",
+                       "unit": None, "currency": "DKK", "freshness": None}],
+            "constraints": [
+                {"kind": "source", "strength": "require", "item_ids": [], "criterion": "annual reports only"},
+                {"kind": "search", "strength": "forbid", "item_ids": [], "criterion": "no web search"},
+            ], "clarifications": [],
+        }
+        # This valid JSON differs only in a plausible paraphrase of the user's
+        # search restriction. It must not be repaired or accepted as provenance.
+        rejected = self.run_now(request=request)
+        self.assertEqual(rejected["state"], "failed")
+        self.assertIsNone(rejected["assessment"])
+        self.assertIsNone(rejected["result"])
+        self.assert_no_stage_output(rejected["id"])
+        self.assertNotIn("no web search", json.dumps(rejected))
+        self.assertEqual(len(self.chats()), 1)
+        self.assertEqual(rejected["events"][-1]["kind"], "failed")
+        self.assert_actual_usage(rejected)
+        self.assert_released()
+
+        self.raw["constraints"][1]["criterion"] = "do not search"
+        accepted = self.run_now(request=request)
+        self.assertNotEqual(accepted["id"], rejected["id"])
+        self.assertEqual(accepted["state"], "partial")
+        self.assertEqual(accepted["assessment"]["completion_criterion"], request)
+        self.assertEqual(accepted["assessment"]["constraints"], self.raw["constraints"])
+        self.assertIsNone(accepted["result"])
+        self.assertEqual(len(self.chats()), 2)
+        self.assert_actual_usage(accepted)
+        self.assert_released()
+
     def test_workflow_is_immutable_idempotent_and_old_clients_keep_lookup(self):
         payload = self.payload()
         with patch.object(backend, "execute_research_run") as deferred:
