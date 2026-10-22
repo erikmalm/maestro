@@ -76,6 +76,95 @@ function recorded(
     ],
   };
 }
+function assessed(decision: "ready" | "clarify" = "ready"): ResearchRun {
+  const run = recorded(
+    firstId,
+    decision === "clarify" ? "clarification" : "partial",
+  );
+  run.workflow = "requirements";
+  run.query = "";
+  run.result = null;
+  run.request =
+    "Compare Northstar Class A revenue in FY2025, in USD millions, using annual reports only; do not search the web.";
+  run.assessment = {
+    version: 1,
+    decision,
+    subjects: [
+      {
+        id: "northstar-a",
+        kind: "security",
+        name: "Northstar Class A",
+        identifiers: [
+          { kind: "ticker", text: "NSTA" },
+          { kind: "listing", text: "Example exchange" },
+        ],
+      },
+    ],
+    items: [
+      {
+        id: "revenue",
+        subject_ids: ["northstar-a"],
+        criterion: "Compare the requested revenue measure",
+        period: "FY2025",
+        unit: "millions",
+        currency: "USD",
+        freshness: "Annual report for FY2025",
+        mandatory: true,
+      },
+    ],
+    constraints: [
+      {
+        kind: "source",
+        strength: "require",
+        item_ids: ["revenue"],
+        criterion: "Annual reports only",
+      },
+      {
+        kind: "search",
+        strength: "forbid",
+        item_ids: [],
+        criterion: "Do not search the web",
+      },
+    ],
+    clarifications:
+      decision === "clarify"
+        ? [
+            {
+              kind: "period",
+              item_ids: ["revenue"],
+              quote: "FY2025",
+              question: "Which reporting period should be used?",
+            },
+          ]
+        : [],
+    completion_criterion: run.request,
+  };
+  run.budget.total = {
+    ...allowance,
+    model_calls: 4,
+    tokens: 100000,
+    seconds: 120,
+    estimated_model_usd: 1,
+  };
+  run.budget.consumed = { ...run.budget.consumed, model_calls: 1, tokens: 48 };
+  run.budget.remaining = {
+    ...run.budget.total,
+    model_calls: 3,
+    tokens: 99952,
+    seconds: 119,
+  };
+  run.budget.deadline = "2026-10-21T12:02:00Z";
+  run.events = [
+    run.events![0],
+    {
+      sequence: 2,
+      at: "2026-10-21T12:00:01Z",
+      kind: "requirements_finished",
+      summary: "Research requirements recorded.",
+    },
+  ];
+  return run;
+}
 function deferred() {
   let release!: () => void;
   const promise = new Promise<void>((resolve) => {
@@ -87,6 +176,7 @@ type Submission = {
   submission_id: string;
   request: string;
   query: string;
+  workflow: "requirements";
   chat_id: string | null;
 };
 type MockState = {
@@ -190,35 +280,30 @@ async function open(page: Page, suffix = "") {
 const focus = (page: Page) =>
   page.evaluate(() => window.dispatchEvent(new Event("focus")));
 
-test("Research records one opt-in preview with conversation scope and only actual activity", async ({
+test("Research records requested items and constraints through one explicit local assessment", async ({
   page,
 }) => {
   const state = await fixture(page);
   await open(page);
   await expect(
-    page.getByText(/makes no model calls or hosted searches/),
+    page.getByText(/Assessment uses one installed local model call/),
   ).toBeVisible();
   await page
     .getByRole("textbox", { name: "Research request", exact: true })
-    .fill("Inspect the saved Northstar report");
+    .fill(assessed().request);
   await page
-    .getByRole("textbox", {
-      name: "Saved-evidence keywords (optional)",
-      exact: true,
-    })
-    .fill("Northstar");
-  await page
-    .getByRole("button", { name: "Inspect saved evidence", exact: true })
+    .getByRole("button", { name: "Assess request", exact: true })
     .click();
   await expect(selected(page).getByRole("status")).toHaveText("Queued");
   expect(state.posts).toHaveLength(1);
   expect(state.posts[0]).toEqual({
     submission_id: expect.stringMatching(/^[a-f0-9]{32}$/),
-    request: "Inspect the saved Northstar report",
-    query: "Northstar",
+    request: assessed().request,
+    query: "",
+    workflow: "requirements",
     chat_id: chatId,
   });
-  const done = { ...recorded(), ...state.posts[0] };
+  const done = { ...assessed(), ...state.posts[0] };
   state.runs = [done];
   await page.clock.runFor(2600);
   await expect(selected(page).getByRole("status")).toHaveText(
@@ -229,22 +314,41 @@ test("Research records one opt-in preview with conversation scope and only actua
   });
   await expect(activity.getByRole("listitem")).toHaveCount(2);
   await expect(activity).not.toContainText("reviewed");
+  const requirements = selected(page).getByRole("region", {
+    name: "Requirements assessment",
+    exact: true,
+  });
+  const items = requirements.getByRole("region", {
+    name: "Requested items",
+    exact: true,
+  });
+  await expect(items.getByRole("listitem")).toHaveCount(1);
+  await expect(items).toContainText("Compare the requested revenue measure");
+  await expect(items).toContainText("Northstar Class A");
+  await expect(items).toContainText("FY2025");
+  await expect(items).toContainText("millions");
+  await expect(items).toContainText("USD");
+  await expect(requirements).toContainText("NSTA");
+  await expect(requirements).toContainText("Example exchange");
+  const constraints = requirements.getByRole("region", {
+    name: "Research constraints",
+  });
+  await expect(constraints).toContainText("Annual reports only");
+  await expect(constraints).toContainText("Requested items: 1");
+  await expect(constraints).toContainText("Do not search the web");
+  await expect(constraints).toContainText("Applies to the whole request");
+  await expect(requirements).toContainText(
+    "No reviewed answer has been produced",
+  );
   await expect(
-    selected(page).getByText("1 available saved-version references.", {
-      exact: true,
-    }),
-  ).toBeVisible();
-  await selected(page)
-    .getByText("Saved version", { exact: false })
-    .filter({ has: page.locator("code") })
-    .first()
-    .click();
+    selected(page).getByRole("region", { name: "Saved-version receipt" }),
+  ).toHaveCount(0);
   await expect(
-    selected(page).getByText(candidate.content_hash, { exact: true }),
-  ).toBeVisible();
+    selected(page).getByText("Saved-evidence keywords", { exact: true }),
+  ).toHaveCount(0);
   await expect(
-    selected(page).getByText("Outside reuse window", { exact: true }),
-  ).toBeVisible();
+    page.getByRole("textbox", { name: "Saved-evidence keywords (optional)" }),
+  ).toHaveCount(0);
   await expect(
     selected(page).getByRole("table", { name: "Recorded shared allowance" }),
   ).toBeVisible();
@@ -253,9 +357,107 @@ test("Research records one opt-in preview with conversation scope and only actua
   ).toHaveCount(2);
   expect(state.posts).toHaveLength(1);
   await page.screenshot({
-    path: test.info().outputPath("research-preview.png"),
+    path: test.info().outputPath("research-requirements.png"),
     fullPage: true,
   });
+});
+
+test("material ambiguity displays clarification and remains stopped after polling and reload", async ({
+  page,
+}) => {
+  const state = await fixture(page);
+  await open(page);
+  await page
+    .getByRole("textbox", { name: "Research request", exact: true })
+    .fill(assessed("clarify").request);
+  await page
+    .getByRole("button", { name: "Assess request", exact: true })
+    .click();
+  await expect(selected(page).getByRole("status")).toHaveText("Queued");
+  state.runs = [{ ...assessed("clarify"), ...state.posts[0] }];
+  await page.clock.runFor(2600);
+  await expect(selected(page).getByRole("status")).toHaveText(
+    "Clarification needed — no reviewed answer",
+  );
+  const clarification = selected(page).getByRole("region", {
+    name: "Clarification needed",
+    exact: true,
+  });
+  await expect(clarification).toContainText(
+    "Which reporting period should be used?",
+  );
+  await expect(clarification).toContainText("FY2025");
+  await expect(clarification).toContainText("Requested items: 1");
+  await expect(clarification).toContainText(
+    "This run will not continue automatically",
+  );
+  await expect(
+    selected(page).getByRole("button", { name: "Cancel run", exact: true }),
+  ).toHaveCount(0);
+  await page.clock.runFor(7500);
+  await page.reload();
+  await expect(selected(page).getByRole("status")).toHaveText(
+    "Clarification needed — no reviewed answer",
+  );
+  await expect(clarification).toContainText(
+    "Which reporting period should be used?",
+  );
+  expect(state.posts).toHaveLength(1);
+  const storage = await page.evaluate(() =>
+    JSON.stringify({ ...sessionStorage, ...localStorage }),
+  );
+  expect(storage).not.toContain(state.posts[0].request);
+  expect(storage).not.toContain("Which reporting period should be used?");
+});
+
+test("failed assessment and rejected submission keep the no-answer boundary", async ({
+  page,
+}) => {
+  const failed = { ...assessed(), state: "failed" as const, assessment: null };
+  const state = await fixture(page, [failed]);
+  await open(page, "?research_run=" + firstId);
+  await expect(selected(page).getByRole("status")).toHaveText("Failed");
+  await expect(
+    selected(page).getByRole("region", {
+      name: "Requirements assessment",
+      exact: true,
+    }),
+  ).toContainText(
+    "No validated assessment has been recorded. No answer was produced.",
+  );
+  await expect(
+    selected(page).getByRole("region", { name: "Saved-version receipt" }),
+  ).toHaveCount(0);
+  state.create = async (route) =>
+    route.fulfill({
+      status: 409,
+      json: {
+        detail:
+          "Choose an installed local model before assessing requirements.",
+      },
+    });
+  await page
+    .getByRole("textbox", { name: "Research request", exact: true })
+    .fill("Assess a new request");
+  await page
+    .getByRole("button", { name: "Assess request", exact: true })
+    .click();
+  await expect(page.getByRole("alert")).toContainText(
+    "Choose an installed local model before assessing requirements.",
+  );
+  await expect(
+    page.getByRole("button", { name: "Assess request", exact: true }),
+  ).toBeEnabled();
+  await expect(
+    page.getByRole("button", { name: "Retry same submission" }),
+  ).toHaveCount(0);
+  await page.clock.runFor(5100);
+  expect(state.posts).toHaveLength(1);
+  expect(
+    await page.evaluate(() =>
+      sessionStorage.getItem("maestro.research.pending"),
+    ),
+  ).toBeNull();
 });
 
 test("selected research run survives reload without resubmitting or browser-storing request text", async ({
@@ -313,7 +515,7 @@ test("an unknown POST response retries the same identity and a new submission ge
     .getByRole("textbox", { name: "Research request", exact: true })
     .fill(request);
   await page
-    .getByRole("button", { name: "Inspect saved evidence", exact: true })
+    .getByRole("button", { name: "Assess request", exact: true })
     .click();
   await expect(
     page.getByRole("button", { name: "Retry same submission" }),
@@ -338,7 +540,7 @@ test("an unknown POST response retries the same identity and a new submission ge
     .getByRole("textbox", { name: "Research request", exact: true })
     .fill("A new request");
   await page
-    .getByRole("button", { name: "Inspect saved evidence", exact: true })
+    .getByRole("button", { name: "Assess request", exact: true })
     .click();
   await expect.poll(() => state.posts.length).toBe(3);
   expect(state.posts[2].submission_id).not.toBe(state.posts[0].submission_id);
@@ -358,7 +560,7 @@ test("a lost response can be reconciled from its opaque submission identity afte
     .getByRole("textbox", { name: "Research request", exact: true })
     .fill("Reconcile this saved request");
   await page
-    .getByRole("button", { name: "Inspect saved evidence", exact: true })
+    .getByRole("button", { name: "Assess request", exact: true })
     .click();
   await expect(
     page.getByRole("button", { name: "Retry same submission" }),

@@ -464,14 +464,58 @@ export type ResearchAllowance = {
   estimated_model_usd: number;
   hosted_searches: number;
 };
+export type ResearchAssessment = {
+  version: 1;
+  decision: "ready" | "clarify";
+  subjects: {
+    id: string;
+    kind: "company" | "security" | "person" | "topic" | "other";
+    name: string;
+    identifiers: {
+      kind: "ticker" | "isin" | "listing" | "other";
+      text: string;
+    }[];
+  }[];
+  items: {
+    id: string;
+    subject_ids: string[];
+    criterion: string;
+    period: string | null;
+    unit: string | null;
+    currency: string | null;
+    freshness: string | null;
+    mandatory: true;
+  }[];
+  constraints: {
+    kind: "source" | "freshness" | "search" | "other";
+    strength: "require" | "prefer" | "forbid";
+    item_ids: string[];
+    criterion: string;
+  }[];
+  clarifications: {
+    kind: "subject" | "security" | "period" | "currency" | "unit" | "scope";
+    item_ids: string[];
+    quote: string;
+    question: string;
+  }[];
+  completion_criterion: string;
+};
 export type ResearchRun = {
   id: string;
   submission_id: string;
   request: string;
   query: string;
+  workflow?: "lookup" | "requirements";
+  assessment?: ResearchAssessment | null;
   chat_id: string | null;
   state:
-    "queued" | "running" | "partial" | "cancelled" | "interrupted" | "failed";
+    | "queued"
+    | "running"
+    | "partial"
+    | "clarification"
+    | "cancelled"
+    | "interrupted"
+    | "failed";
   created_at: string;
   updated_at: string;
   permissions: {
@@ -510,6 +554,7 @@ export const createResearchRun = (body: {
   submission_id: string;
   request: string;
   query: string;
+  workflow?: "lookup" | "requirements";
   chat_id: string | null;
 }) =>
   request<{ run: ResearchRun; created: boolean }>(

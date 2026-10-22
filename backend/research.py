@@ -19,6 +19,7 @@ MAX_RESULT_BYTES = 32768
 MAX_PROVIDER_STATE_BYTES = 16 * 1024 ** 2
 MAX_EVENTS = 32
 ACTIVE = ("queued", "running")
+WORKFLOWS = ("lookup", "requirements")
 AMOUNTS = ("model_calls", "tokens", "seconds", "estimated_model_usd", "hosted_searches")
 EVENTS = {
     "submitted": "Local research preview submitted.",
@@ -32,6 +33,9 @@ EVENTS = {
     "stage_finished": "Local model stage completed.",
     "stage_failed": "Local model stage did not produce an accepted result.",
     "stage_uncertain": "Local model completion is unknown; its allowance remains reserved.",
+    "requirements_started": "Assessing the research requirements with the local model.",
+    "requirements_recorded": "Requirements recorded. Evidence assessment, writing and final review have not run.",
+    "clarification_needed": "Clarification is needed before dependent research. No answer was produced.",
 }
 FAILURES = {
     "lookup_failed": EVENTS["failed"],
@@ -39,6 +43,7 @@ FAILURES = {
     "invalid_result": EVENTS["failed"],
     "deadline": "Research preview reached its deadline before completion.",
     "permissions_changed": "Research permissions changed before completion. No result was saved.",
+    "requirements_failed": "Requirements assessment did not produce an accepted result. No answer was produced.",
 }
 
 
@@ -215,6 +220,8 @@ class ResearchStore:
         data = json.loads(row[8])
         result = {"id": row[0], "submission_id": row[1], "chat_id": row[3], "state": row[4],
                   "created_at": row[5], "updated_at": row[6], **data}
+        result.setdefault("workflow", "lookup")
+        result.setdefault("assessment", None)
         if events:
             rows = db.execute("SELECT sequence,at,kind,summary FROM research_events WHERE run_id=? ORDER BY sequence LIMIT ?",
                               (row[0], MAX_EVENTS + 1)).fetchall()
@@ -260,13 +267,19 @@ class ResearchStore:
         except (ValueError, TypeError, RecursionError):
             raise ValueError("Provider usage is unavailable. Research cannot start.") from None
 
-    def create(self, submission_id, request, query, chat_id, permissions, budget, db=None):
+    def create(self, submission_id, request, query, chat_id, permissions, budget, db=None, *, workflow="lookup"):
         _identifier(submission_id)
         _text(request, MAX_REQUEST)
         _text(query, 512, empty=True)
         if chat_id is not None:
             _text(chat_id, 100)
-        fingerprint = hashlib.sha256(_encoded([request, query, chat_id]).encode("utf-8")).hexdigest()
+        if workflow not in WORKFLOWS or workflow == "requirements" and query:
+            raise ValueError("Use a supported research workflow without lookup keywords for requirements.")
+        identity = [request, query, chat_id]
+        # Keep old lookup retries stable; a different workflow cannot reuse one.
+        if workflow != "lookup":
+            identity.append(workflow)
+        fingerprint = hashlib.sha256(_encoded(identity).encode("utf-8")).hexdigest()
         with self._transaction(db) as connection:
             previous = self._row(connection, submission_id=submission_id)
             if previous is not None:
@@ -282,7 +295,8 @@ class ResearchStore:
             if self.owns_foreground(connection) or self._provider_busy(connection):
                 raise ValueError("Another request is active or its completion is unknown. Wait before starting research.")
             run_id, stamp = uuid.uuid4().hex, self.stamp()
-            payload = {"request": request, "query": query, "permissions": captured, "budget": allowance, "result": None}
+            payload = {"request": request, "query": query, "permissions": captured, "budget": allowance,
+                       "result": None, "workflow": workflow, "assessment": None}
             connection.execute("INSERT INTO research_runs VALUES(?,?,?,?,?,?,?,?,?)",
                                (run_id, submission_id, fingerprint, chat_id, "queued", stamp, stamp, None, _encoded(payload)))
             self._event(connection, run_id, "submitted")
@@ -333,6 +347,7 @@ class ResearchStore:
     def _save(self, db, run, state, *, token=None):
         run["state"], run["updated_at"] = state, self.stamp()
         payload = {name: run[name] for name in ("request", "query", "permissions", "budget", "result")}
+        payload.update(workflow=run.get("workflow", "lookup"), assessment=run.get("assessment"))
         db.execute("UPDATE research_runs SET state=?,updated_at=?,claim_token=?,payload=? WHERE id=?",
                    (state, run["updated_at"], token, _encoded(payload), run["id"]))
 
@@ -367,7 +382,9 @@ class ResearchStore:
             token = uuid.uuid4().hex
             run["permissions"]["memory_derived"] |= self._chat_memory(db, run["chat_id"])
             self._save(db, run, "running", token=token)
-            if lookup:
+            if run.get("workflow") == "requirements":
+                self._event(db, run_id, "requirements_started")
+            elif lookup:
                 self._event(db, run_id, "local_lookup_started")
             return self._public(db, self._row(db, run_id)), token
 
@@ -409,6 +426,45 @@ class ResearchStore:
                 self._purge(db, run_id)
                 return False
             self._terminal(db, run, "failed", "failed", FAILURES[reason])
+            return True
+
+    def finish_requirements(self, run_id, token, stage, *, secrets=()):
+        """Publish only this owner's validated, completed requirements stage."""
+        from backend.research_requirements import validate_assessment
+        from backend.research_stages import ResearchStage, _row, _states, _hash, safe_stage_content
+        _identifier(run_id)
+        if type(stage) is not ResearchStage:
+            raise ValueError("Use the owned requirements assessment.")
+        with self._transaction() as db:
+            row = self._row(db, run_id)
+            if row is None or row[4] != "running" or row[7] != token:
+                return False
+            run = self._public(db, row)
+            if not self._chat_exists(db, run["chat_id"]):
+                self._purge(db, run_id)
+                return False
+            if run.get("workflow") != "requirements" or stage.run_id != run_id or stage.claim_token != token:
+                raise ValueError("Use the owned requirements assessment.")
+            record = _row(db, stage)
+            if record[2] != "requirements" or record[3] != "completed" or record[10] is None:
+                raise ValueError("A completed requirements stage is required.")
+            spec = json.loads(record[5])
+            workspace, provider_state = _states(db)
+            if ((_hash(provider_state["config"]), _hash(workspace["limits"])) != (record[6], record[7])
+                    or spec["model"] not in provider_state.get("models", [])):
+                raise ValueError("Research model settings or parent limits changed.")
+            # The Provider already accepted the stage within its own deadline.
+            # Publishing its assessment must still fit the parent's deadline.
+            deadline = _date(run["budget"]["deadline"]).timestamp()
+            assessment = validate_assessment(json.loads(record[10]), run["request"])
+            run["assessment"] = assessment
+            run["permissions"]["memory_derived"] |= self._chat_memory(db, run["chat_id"])
+            safe_stage_content([run, _encoded(run)], provider_state["config"], secrets=secrets)
+            if self.clock() >= deadline:
+                raise ValueError("Research requirements reached their deadline.")
+            clarify = assessment["decision"] == "clarify"
+            self._terminal(db, run, "clarification" if clarify else "partial",
+                           "clarification_needed" if clarify else "requirements_recorded")
             return True
 
     def cancel(self, run_id):
