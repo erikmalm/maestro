@@ -173,13 +173,14 @@ def prepare(store, run_id, claim_token, kind, *, model, schema, assignment, evid
         spec = {"model": model, "schema": schema, "assignment": assignment, "evidence": references,
                 "permitted_actions": list(permitted_actions), "seconds": seconds,
                 "permissions": {**run["permissions"], "memory_derived": bool(run["permissions"]["memory_derived"] or store._chat_memory(connection, run["chat_id"]))}}
-        safe_stage_content({"objective": run["request"], **spec}, config)
+        encoded_spec = _encoded(spec, MAX_SPEC_BYTES)
+        safe_stage_content([{"objective": run["request"], **spec}, encoded_spec], config)
         connection.execute("INSERT OR IGNORE INTO research_stage_scope VALUES(?,?,?)",
                            (run_id, _hash(config), _hash(workspace["limits"])))
         stamp = store.stamp()
         connection.execute("INSERT INTO research_stages VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                            (identity.stage_id, run_id, identity.attempt_id, kind, "prepared", None,
-                            _encoded(spec, MAX_SPEC_BYTES), _hash(config), _hash(workspace["limits"]),
+                            encoded_spec, _hash(config), _hash(workspace["limits"]),
                             _encoded(_amounts()), _encoded(_amounts()), None, stamp, stamp))
         store._save(connection, run, "running", token=claim_token)
         return identity
@@ -278,23 +279,38 @@ def settle(store, stage, request_id, *, db, input_tokens, output_tokens, outcome
     reserved = json.loads(row[9])
     actual = _amounts(model_calls=int(dispatched), tokens=input_tokens + output_tokens)
     accepted = False
+    encoded_output = None
     if outcome == "completed" and workspace is not None and provider_state is not None:
         try:
-            authorize(store, stage, workspace, provider_state, db, reserved=True)
+            packet = authorize(store, stage, workspace, provider_state, db, reserved=True)
             if not isinstance(output, dict):
                 raise ValueError()
-            _encoded(output, MAX_SPEC_BYTES)
-            safe_stage_content(output, provider_state["config"])
+            encoded_output = _encoded(output, MAX_SPEC_BYTES)
+            safe_stage_content([output, encoded_output], provider_state["config"])
+            if store.clock() >= _date(packet["deadline"]).timestamp():
+                raise ValueError("Research stage reached its deadline before output acceptance.")
             accepted = True
         except (ValueError, KeyError, TypeError, RuntimeError):
             pass
     db.execute("UPDATE research_stages SET state=?,consumed=?,reserved=?,output=?,updated_at=? WHERE id=?",
                ("completed" if accepted else "failed", _encoded(actual), _encoded(_amounts()),
-                _encoded(output, MAX_SPEC_BYTES) if accepted else None, store.stamp(), stage.stage_id))
+                encoded_output if accepted else None, store.stamp(), stage.stage_id))
     runrow = store._row(db, stage.run_id)
     if runrow is not None and runrow[4] != "deleted":
         run = store._public(db, runrow)
         _change(run, reserved, -1)
+        if (outcome == "failed" and not dispatched and row[3] == "reserved"
+                and runrow[4] == "running" and runrow[7] == stage.claim_token
+                and json.loads(row[5]).get("finishing_slot") and store._chat_exists(db, run["chat_id"])
+                and store.clock() < _date(run["budget"]["deadline"]).timestamp()):
+            held = _held(db, stage.run_id) or {}
+            if row[2] not in held:
+                # A model check did not use this promised finishing call.
+                # Keep its full capacity protected from optional stages.
+                held[row[2]] = _amounts(model_calls=1, tokens=FINISHING_TOKENS, seconds=FINISHING_SECONDS)
+                _change(run, held[row[2]], 1)
+                db.execute("INSERT INTO research_finishing VALUES(?,?) ON CONFLICT(run_id) DO UPDATE SET held=excluded.held",
+                           (stage.run_id, _encoded(held)))
         for name in AMOUNTS:
             if name != "seconds":
                 run["budget"]["consumed"][name] += actual[name]

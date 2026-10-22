@@ -320,6 +320,11 @@ def research_store():
     return ResearchStore(DATABASE, TIMEZONE)
 
 
+def maintain_research_runs():
+    provider().reconcile_research()
+    research_store().expire()
+
+
 @contextmanager
 def conflict_errors():
     try:
@@ -354,7 +359,7 @@ async def lifespan(application):
             reflection.recover()
             stop = asyncio.Event()
             worker = asyncio.create_task(ReflectionWorker(
-                reflection, provider(), safe_private_content, maintenance=research_store().expire).run(stop))
+                reflection, provider(), safe_private_content, maintenance=maintain_research_runs).run(stop))
             try:
                 yield
             finally:

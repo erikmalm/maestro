@@ -1,12 +1,15 @@
 """One provider connection, real chat, and a private persistent usage ledger."""
 from contextlib import closing, contextmanager
 from datetime import datetime
+from dataclasses import dataclass
 import asyncio
 import json
 import math
 import os
+from pathlib import Path
 import re
 import sqlite3
+import threading
 import time
 import uuid
 from urllib.parse import unquote, urlsplit
@@ -47,6 +50,59 @@ class BackgroundUncertain(LocalUncertain):
 
 class ResearchUsageUncertain(LocalUncertain):
     """Research completion lacks usable actual usage; its allowance stays held."""
+
+
+@dataclass(frozen=True)
+class _ResearchAccounting:
+    stage: object
+    request_id: str
+    input_tokens: int
+    output_tokens: int
+    usage_known: bool
+    dispatched: bool
+    uncertain: bool
+    usage_unknown: bool
+
+
+_research_accounting = {}
+_research_accounting_lock = threading.RLock()
+
+
+def _accounting_database(database):
+    return os.path.normcase(str(Path(database).expanduser().resolve()))
+
+
+def _remember_research_accounting(database, pending):
+    key = (_accounting_database(database), pending.request_id)
+    with _research_accounting_lock:
+        previous = _research_accounting.get(key)
+        if previous is None or pending.usage_known or not previous.usage_known:
+            _research_accounting[key] = pending
+
+
+def _pending_research_accounting(database):
+    selected = _accounting_database(database)
+    with _research_accounting_lock:
+        return [(key, value) for key, value in _research_accounting.items() if key[0] == selected]
+
+
+def _settle_research_accounting(database, state, db, pending):
+    from backend.research import ResearchStore
+    entry = next(item for item in state["ledger"] if item["id"] == pending.request_id)
+    if entry["status"] != "reserved":
+        return
+    entry["model_calls"] = int(pending.dispatched)
+    if pending.usage_known:
+        entry.update(status="settled", cost=0, input_tokens=pending.input_tokens, output_tokens=pending.output_tokens)
+    elif pending.uncertain:
+        entry.update(cost=0, local_unknown=True, research_usage_unknown=pending.usage_unknown)
+    else:
+        entry.update(status="failed", cost=0)
+    ResearchStore(database).settle_stage(
+        pending.stage, pending.request_id, db=db, input_tokens=pending.input_tokens,
+        output_tokens=pending.output_tokens,
+        outcome="uncertain" if pending.uncertain and not pending.usage_known else "failed",
+        dispatched=pending.dispatched)
 
 
 def research_instructions(packet, instructions):
@@ -204,6 +260,20 @@ class Provider:
 
     def stamp(self):
         return datetime.now(self.timezone).isoformat()
+
+    def reconcile_research(self):
+        """Retry only returned requests' accounting; never resubmit inference."""
+        reconciled = 0
+        for key, pending in _pending_research_accounting(self.database):
+            with self.transaction(with_db=True) as (state, db):
+                _settle_research_accounting(self.database, state, db, pending)
+            # A failed commit keeps the numeric receipt available for a later
+            # controller tick. An older retry cannot remove a replacement.
+            with _research_accounting_lock:
+                if _research_accounting.get(key) is pending:
+                    del _research_accounting[key]
+            reconciled += 1
+        return reconciled
 
     @contextmanager
     def transaction(self, with_db=False):
@@ -371,6 +441,7 @@ class Provider:
         if not isinstance(expected_base_url, str) or not expected_base_url:
             raise ValueError("Enter the original Local Ollama server URL before confirming recovery.")
         expected_base_url = validate_ollama_url(expected_base_url)
+        self.reconcile_research()
         with self.transaction(with_db=True) as (state, db):
             entry = self.recovery_entry(state, db, entry_id, expected_base_url)
             if entry["status"] == "failed" and entry.get("local_recovered"):
@@ -483,6 +554,8 @@ class Provider:
         # Reserve before dispatch under the same SQLite lock used for tasks and limits.
         with self.transaction(with_db=True) as (state, db):
             from backend.research import ResearchStore
+            if _pending_research_accounting(self.database):
+                raise ValueError("Research accounting is pending. Wait for it to be reconciled before generating again.")
             if research is not None:
                 from backend.research_stages import safe_stage_content
                 # Retain operation keys only in Python memory, even if a key is
@@ -800,31 +873,31 @@ class Provider:
                     "cost": cost, "input_tokens": input_tokens, "output_tokens": output_tokens, "title_ready": title_ready,
                     "memory_ids": [item["id"] for item in memories], **({"work_config": work_config} if context else {})}
         except Exception as error:
-            with self.transaction(with_db=True) as (state, db):
-                entry = next(x for x in state["ledger"] if x["id"] == request_id)
-                if entry["status"] == "reserved":
-                    if research is not None:
-                        entry["model_calls"] = int(dispatched)
-                        uncertain = dispatched and not usage_known and (isinstance(error, LocalUncertain)
-                                    or not isinstance(error, ProviderFailure))
-                        outcome = "uncertain" if uncertain else "failed"
-                        if usage_known:
-                            entry.update(status="settled", cost=cost, input_tokens=input_tokens, output_tokens=output_tokens)
-                        elif uncertain:
-                            entry.update(cost=0, local_unknown=True,
-                                         research_usage_unknown=isinstance(error, ResearchUsageUncertain))
-                        else:
-                            entry.update(status="failed", cost=0)
-                        research_store.settle_stage(research, request_id, db=db,
-                                                    input_tokens=input_tokens if usage_known else 0,
-                                                    output_tokens=output_tokens if usage_known else 0,
-                                                    outcome=outcome, dispatched=dispatched)
-                    elif local and isinstance(error, LocalUncertain) and dispatched:
-                        entry.update(cost=0, **({"background_unknown": True} if job is not None else {"local_unknown": True}))
-                    elif local or (isinstance(error, ProviderFailure) and not error.may_be_billed):
-                        entry.update({"status": "failed", "cost": 0})
+            pending = None
+            if research is not None:
+                uncertain = dispatched and not usage_known and (isinstance(error, LocalUncertain)
+                            or not isinstance(error, ProviderFailure))
+                pending = _ResearchAccounting(research, request_id, input_tokens if usage_known else 0,
+                                              output_tokens if usage_known else 0, usage_known, dispatched,
+                                              uncertain, isinstance(error, ResearchUsageUncertain))
+            try:
+                with self.transaction(with_db=True) as (state, db):
+                    if pending is not None:
+                        _settle_research_accounting(self.database, state, db, pending)
                     else:
-                        entry["status"] = "uncertain"
+                        entry = next(x for x in state["ledger"] if x["id"] == request_id)
+                        if entry["status"] == "reserved":
+                            if local and isinstance(error, LocalUncertain) and dispatched:
+                                entry.update(cost=0, **({"background_unknown": True} if job is not None else {"local_unknown": True}))
+                            elif local or (isinstance(error, ProviderFailure) and not error.may_be_billed):
+                                entry.update({"status": "failed", "cost": 0})
+                            else:
+                                entry["status"] = "uncertain"
+            except Exception:
+                if pending is None:
+                    raise
+                _remember_research_accounting(self.database, pending)
+                raise ValueError("Research accounting is pending. Its allowance remains reserved until accounting can be reconciled.") from None
             if isinstance(error, ValueError):
                 raise
             raise ValueError("Provider returned an unusable response. Check usage before retrying.") from None

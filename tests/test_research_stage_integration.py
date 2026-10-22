@@ -101,6 +101,30 @@ class ResearchStageIntegrationTests(unittest.TestCase):
             self.generate(self.stage("writer"))
         network.assert_not_called()
 
+    def test_output_validation_crossing_deadline_cannot_save_a_late_result(self):
+        from backend import research_stages
+        self.enterContext(patch.object(ResearchStore, "clock", side_effect=lambda: self.now))
+        stage = self.stage()
+        original = research_stages.safe_stage_content
+
+        def slow_validation(value, *args, **kwargs):
+            result = original(value, *args, **kwargs)
+            if value == {"ok": True} or isinstance(value, list) and {"ok": True} in value:
+                self.now += 6  # The stage has five seconds, including validation.
+            return result
+
+        with (patch.object(research_stages, "safe_stage_content", side_effect=slow_validation),
+              patch("backend.provider.background_network", side_effect=self.response),
+              self.assertRaises(ValueError)):
+            self.generate(stage)
+        entry = self.provider.read_state()["ledger"][-1]
+        self.assertEqual(entry["status"], "settled")
+        self.assertEqual((entry["input_tokens"], entry["output_tokens"]), (37, 11))
+        with closing(sqlite3.connect(self.database)) as db:
+            recorded = db.execute("SELECT state,output FROM research_stages WHERE id=?", (stage.stage_id,)).fetchone()
+        self.assertEqual(recorded, ("failed", None))
+        self.assertEqual(self.store.get(stage.run_id)["budget"]["consumed"]["tokens"], 48)
+
     def test_confirmed_restart_cannot_refund_unknown_run_usage(self):
         stage = self.stage()
 
