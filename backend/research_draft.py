@@ -32,12 +32,13 @@ ROW_FIELDS = ("item_id", "coverage_state", "kind", "text", "subject_ids", "crite
 SUPPORT_FIELDS = ("passage_id", "quote", "source_id", "start", "end")
 QUALIFIERS = ("subject_ids", "criterion", "period", "unit", "currency", "freshness")
 _DECIMAL = re.compile(r"[+-]?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?\Z", re.ASCII)
+_SIGNS = "+-\u2212\u00b1\u2213"
 # Consume whole numeric runs before checking their context, including formats
 # we deliberately do not support. A suffix of a grouped/scientific number must
 # never become an apparently exact plain-decimal operand.
 _NUMBER_RUN = re.compile(
-    r"[+\-\u2212\ufe63\uff0b\uff0d]?(?:\d+(?:[.,'\u2019\u00a0\u202f\u066b\u066c /-]\d+)*|[.,]\d+)"
-    r"(?:[eE][+\-\u2212]?\d+)?")
+    r"(?:[+\-\u2212\u00b1\u2213]\s*)?(?:\d+(?:[.,'\u066b\u066c /-]\d+)*|[.,]\d+)"
+    r"(?:[eE][+\-\u2212\u00b1\u2213]?\d+)?")
 _GAPS = {
     "missing": "No supported fact was recorded for this requirement in the inspected evidence.",
     "stale": "Saved evidence needs checking before this requirement can be drafted as a supported fact.",
@@ -221,6 +222,36 @@ def _support(raw, accepted):
     return {**deepcopy(raw), "source_id": source_id, "start": start, "end": end}
 
 
+def _numeric_view(text):
+    """A rejection-only lexical view mapped back to original codepoints.
+
+    Compatibility digits/punctuation, spacing, signs and invisible formatting
+    must not split one unsupported number into apparently plain ASCII pieces.
+    A view match is accepted only if its complete original span equals the
+    model's unchanged ASCII literal; this never converts an evidence value.
+    """
+    characters, offsets = [], []
+    for offset, character in enumerate(text):
+        if unicodedata.category(character) == "Cf":
+            continue
+        for projected in unicodedata.normalize("NFKC", character):
+            category = unicodedata.category(projected)
+            name = unicodedata.name(projected, "")
+            if category == "Zs":
+                projected = " "
+            elif category == "Pd":
+                projected = "-"
+            elif projected not in "+-" and any(part in name for part in ("PLUS", "MINUS", "DASH")):
+                projected = "+" if "PLUS" in name and "MINUS" not in name else "-"
+            elif any(part in name for part in ("SLASH", "SOLIDUS", "DIVISION")):
+                projected = "/"
+            elif category in ("Pi", "Pf"):
+                projected = "'"
+            characters.append(projected)
+            offsets.append(offset)
+    return "".join(characters), offsets
+
+
 def _numeric_literal(value, support, passage):
     _text(value, MAX_NUMBER)
     if not _DECIMAL.fullmatch(value):
@@ -232,17 +263,42 @@ def _numeric_literal(value, support, passage):
     # Judge lexical boundaries in the complete packet passage, not a writer's
     # cropped quote. Neither a subquote nor an accepted-review crop can remove
     # an original minus, grouping separator, exponent, decimal or word prefix.
-    text = passage["text"]
+    text, offsets = _numeric_view(passage["text"])
     left = support["start"] - passage["start"]
     right = support["end"] - passage["start"]
     for match in _NUMBER_RUN.finditer(text):
+        start, end = offsets[match.start()], offsets[match.end() - 1] + 1
+        after = match.end()
+        while after < len(text) and text[after].isspace():
+            after += 1
+        # Parentheses can encode a negative monetary amount, including currency
+        # codes/symbols. Conservatively reject numeric inputs inside them, even
+        # when the parentheses might instead be benign explanatory prose.
+        depth = 0
+        for character in text[:match.start()]:
+            if character == "(":
+                depth += 1
+            elif character == ")":
+                depth = max(0, depth - 1)
+        accounting = depth > 0
+        trailing_sign = after < len(text) and text[after] in _SIGNS
+        # A dot or whitespace at an unknown packet edge may continue a decimal
+        # or grouped number. Require visible context beyond all such separators.
+        def connector(character):
+            return character.isspace() or character in _SIGNS + ".,'/\u066b\u066c"
+        boundary_left, boundary_right = match.start(), match.end()
+        while boundary_left > 0 and connector(text[boundary_left - 1]):
+            boundary_left -= 1
+        while boundary_right < len(text) and connector(text[boundary_right]):
+            boundary_right += 1
+        visible_boundaries = (boundary_left > 0 or passage["start"] == 0) and boundary_right < len(text)
         if (match.group() == value
-                and left <= match.start() < match.end() <= right
-                and (match.start() > 0 or passage["start"] == 0)
+                and passage["text"][start:end] == value
+                and left <= start < end <= right
                 and match.end() < len(text)
                 and (match.start() == 0 or not word(text[match.start() - 1])
-                     and text[match.start() - 1] not in "+-\u2212\ufe63\uff0b\uff0d")
-                and not word(text[match.end()])):
+                     and text[match.start() - 1] not in _SIGNS)
+                and not word(text[match.end()]) and not accounting and not trailing_sign and visible_boundaries):
             return Decimal(value)
     _invalid()
 

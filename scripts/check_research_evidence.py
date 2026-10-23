@@ -120,7 +120,9 @@ def check_run(case, run, captured, loader, *, workflow="evidence_review"):
     """Typed/pin checks plus narrow semantic expectations for this versioned corpus."""
     require(workflow in ("evidence_review", "research_draft") and run["workflow"] == workflow,
             "Unexpected research workflow")
-    require(run["state"] == ("draft" if workflow == "research_draft" and (run.get("draft") or {}).get("state") == "unreviewed"
+    if workflow == "research_draft":
+        require(type(run.get("draft")) is dict, "Missing or noncanonical draft")
+    require(run["state"] == ("draft" if workflow == "research_draft" and run["draft"].get("state") == "unreviewed"
                               else "partial"), "Expected a terminal partial review or unreviewed draft")
     try:
         assessment = validate_saved_assessment(run.get("assessment"), case["request"])
@@ -169,8 +171,6 @@ def check_run(case, run, captured, loader, *, workflow="evidence_review"):
                 "A supported fixture did not produce an unreviewed draft")
         calls += int(supported)
         drafted = {row["item_id"]: row for row in draft["items"]}
-        available_numbers = set(re.findall(r"[+-]?[0-9]+(?:\.[0-9]+)?", case["request"] + " " +
-                                          " ".join(passage["text"] for passage in review["passages"])))
         for expected, item in matched:
             row = drafted[item["id"]]
             require(row["coverage_state"] == reviewed[item["id"]]["state"], "Draft coverage changed")
@@ -183,7 +183,15 @@ def check_run(case, run, captured, loader, *, workflow="evidence_review"):
                 require(all(fragment.casefold() in visible.casefold() for fragment in fragments),
                         "Draft omitted an expected fixture value or qualifier")
             numbers = set(re.findall(r"[+-]?[0-9]+(?:\.[0-9]+)?", row["text"]))
-            allowed = available_numbers | ({row["calculation"]["result"]} if row["calculation"] else set())
+            # This is finite numeric provenance, not proof of prose truth.
+            # Other packet rows or unrelated request text cannot authorize a
+            # figure in this row. Canonical validation already pins citations
+            # and copies this requirement's qualifiers from its assessment.
+            provenance = " ".join([support["quote"] for support in row["supports"]] +
+                                  [row[field] for field in ("period", "unit", "currency", "freshness") if row[field]])
+            allowed = set(re.findall(r"[+-]?[0-9]+(?:\.[0-9]+)?", provenance))
+            if row["calculation"]:
+                allowed.add(row["calculation"]["result"])
             require(numbers <= allowed, "Draft introduced an unsupported numeric literal")
     require(consumed["model_calls"] == calls, "Unexpected local call count for the populated fixture")
     require(consumed["hosted_searches"] == 0, "Unexpected hosted usage")

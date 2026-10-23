@@ -125,7 +125,7 @@ class ResearchDraftApiTests(unittest.TestCase):
         self.assert_usage(run)
 
     def test_declared_calculation_derives_result_from_supplied_numeric_inputs(self):
-        quote = "Acme FY2025 revenue in USD was 10. Acme FY2025 costs in USD were 8."
+        quote = "Acme FY2025 revenue in USD was 10. Acme FY2025 costs in USD were 8. Amounts recorded."
         self.fixture.capture(quote)
         self.fixture.review_builder = lambda selected: {"version": 1, "items": [{
             "item_id": "i1", "state": "covered", "reason": fixtures.REASON,

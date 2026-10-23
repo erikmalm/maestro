@@ -35,7 +35,7 @@ EVENTS = {
     "stage_uncertain": "Local model completion is unknown; its allowance remains reserved.",
     "evidence_started": "Inspecting bounded saved-source candidates for the recorded requirements.",
     "evidence_recorded": "Saved evidence assessed. Writing and final review have not run.",
-    "writer_started": "Saved evidence assessed. Writing an unreviewed draft with the local model.",
+    "writer_started": "Saved evidence assessed. Preparing an unreviewed draft.",
     "draft_recorded": "Unreviewed draft recorded. Final answer review has not run.",
     "draft_unavailable": "No draft was written. Evidence decisions and gaps remain recorded.",
     "requirements_started": "Assessing the research requirements with the local model.",

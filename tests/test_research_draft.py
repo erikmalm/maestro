@@ -10,7 +10,7 @@ from backend.research_draft import (
     coverage_hash, gap_draft, has_support, response_schema, validate_response,
     validate_saved_draft, writer_input,
 )
-from backend.research_evidence import unavailable_review, validate_review
+from backend.research_evidence import unavailable_review, validate_review, validate_saved_review
 from backend.research_passages import evidence_packet_hash
 from backend.research_requirements import validate_assessment
 
@@ -76,7 +76,9 @@ class ResearchDraftTests(unittest.TestCase):
             validate_response(raw, self.assessment, self.review)
 
     def calculation(self, quote, first, second, *, operation="sum", precision=2):
-        assessment, review = scope(("covered",), quotes=["FY2025 USD " + quote])
+        # A visible word after final punctuation distinguishes it from a
+        # packet cropped in the middle of a decimal or grouped number.
+        assessment, review = scope(("covered",), quotes=["FY2025 USD " + quote + " End."])
         raw = response(review)
         raw["items"]["i0"].update(kind="calculation", calculation={
             "operation": operation, "operands": [{"value": first, "support_index": 0},
@@ -344,6 +346,46 @@ class ResearchDraftTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             validate_response(raw, assessment, cropped)
 
+    def test_unicode_numeric_formats_cannot_supply_ascii_fragments_or_normalized_values(self):
+        cases = (("1\u2009234", "234"), ("1\u2007234", "1"), ("1\u200a234", "234"),
+                 ("1\u1680234", "234"), ("1\uff0e234", "234"), ("1\u2024234", "234"),
+                 ("1e\u207a42", "42"), ("\u207b42", "42"), ("\u207a42", "42"),
+                 ("\u279642", "42"), ("\u279542", "42"), ("\u221242", "42"),
+                 ("1\u2011234", "234"), ("1\u2018234", "234"),
+                 ("42\u200b000", "42"), ("42\u200d000", "42"), ("\uff14\uff12", "42"),
+                 ("42\u20445", "42"), ("42\u22155", "42"))
+        for original, operand in cases:
+            with self.subTest(original=original):
+                assessment, review, raw = self.calculation("Amount " + original + " and 0.", operand, "0")
+                with self.assertRaises(ValueError):
+                    validate_response(raw, assessment, review)
+                if operand in review["items"][0]["supports"][0]["quote"]:
+                    raw["items"]["i0"]["supports"] = [
+                        {"passage_id": "p0", "quote": operand}, {"passage_id": "p0", "quote": "and 0."}]
+                    raw["items"]["i0"]["calculation"]["operands"][1]["support_index"] = 1
+                    with self.assertRaises(ValueError):
+                        validate_response(raw, assessment, review)
+
+    def test_unsupported_accounting_and_postfix_signs_cannot_become_positive_operands(self):
+        for amount in ("(42)", "( 42 )", "($42)", "(42\u20ac)", "(USD 42)", "(42 USD)",
+                       "42-", "42\u2212",
+                       "42\ufe63", "42\uff0d", "42\u2011", "42\u2796", "42 +", "42\u00b1", "- 42"):
+            with self.subTest(amount=amount):
+                assessment, review, raw = self.calculation("Amount " + amount + " and 0.", "42", "0")
+                with self.assertRaises(ValueError):
+                    validate_response(raw, assessment, review)
+
+    def test_rejection_view_preserves_valid_ascii_values_offsets_and_unicode_prose(self):
+        quote = "Quoted \u201c+10\u201d and \u201c-12\u201d. End."
+        assessment, review, raw = self.calculation(quote, "+10", "-12", precision=2)
+        saved = validate_response(raw, assessment, review)
+        calculation = saved["items"][0]["calculation"]
+        self.assertEqual(calculation["result"], "-2.00")
+        self.assertEqual(calculation["operands"], raw["items"]["i0"]["calculation"]["operands"])
+        self.assertEqual(saved["items"][0]["supports"][0]["quote"], review["items"][0]["supports"][0]["quote"])
+        self.assertEqual(saved["items"][0]["supports"][0]["start"], review["items"][0]["supports"][0]["start"])
+        self.assertEqual(validate_saved_draft(saved, assessment, review), saved)
+
     def test_numeric_runs_need_visible_packet_boundaries(self):
         assessment, review = scope(("covered",), quotes=["42 and 0. FY2025 USD."])
         passage = review["passages"][0]
@@ -355,9 +397,34 @@ class ResearchDraftTests(unittest.TestCase):
             "operands": [{"value": "42", "support_index": 0}, {"value": "0", "support_index": 0}]})
         with self.assertRaises(ValueError):
             validate_response(raw, assessment, review)
-        assessment, review, raw = self.calculation("42 and 0", "42", "0")
+        assessment, review = scope(("covered",), quotes=["FY2025 USD 42 and 0"])
+        raw = response(review)
+        raw["items"]["i0"].update(kind="calculation", calculation={"operation": "sum", "precision": 0,
+            "operands": [{"value": "42", "support_index": 0}, {"value": "0", "support_index": 0}]})
         with self.assertRaises(ValueError):
             validate_response(raw, assessment, review)
+        # The trailing dot might continue into .5 outside the selected packet.
+        for ending in ("42.", "42,", "42\uff0e", "42\u2024", "42 ", "42. ", "42\u2009"):
+            assessment, review = scope(("covered",), quotes=["FY2025 USD 0 and " + ending])
+            raw = response(review)
+            raw["items"]["i0"].update(kind="calculation", calculation={"operation": "sum", "precision": 0,
+                "operands": [{"value": "42", "support_index": 0}, {"value": "0", "support_index": 0}]})
+            with self.subTest(ending=ending), self.assertRaises(ValueError):
+                validate_response(raw, assessment, review)
+        for prefix in (" ", ". ", "\u2009"):
+            assessment, review = scope(("covered",), quotes=["42 and 0. FY2025 USD. End."])
+            passage = review["passages"][0]
+            passage["text"] = prefix + passage["text"][2:]
+            passage["start"] -= len(prefix) - 2
+            passage["passage_hash"] = hashlib.sha256(passage["text"].encode()).hexdigest()
+            review["sources"][0]["content_hash"] = hashlib.sha256(
+                ("x" * passage["start"] + passage["text"]).encode()).hexdigest()
+            self.assertEqual(validate_saved_review(review, assessment), review)
+            raw = response(review)
+            raw["items"]["i0"].update(kind="calculation", calculation={"operation": "sum", "precision": 0,
+                "operands": [{"value": "42", "support_index": 0}, {"value": "0", "support_index": 0}]})
+            with self.subTest(prefix=prefix), self.assertRaises(ValueError):
+                validate_response(raw, assessment, review)
 
     def test_calculation_shape_indices_counts_precision_and_zero_division_are_strict(self):
         assessment, review, raw = self.calculation("10 and 0.", "10", "0")
