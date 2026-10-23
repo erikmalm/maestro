@@ -111,9 +111,9 @@ def _shape(value, fields):
         _invalid()
 
 
-def _text(value, maximum, *, empty=False):
+def _text(value, maximum, *, empty=False, nul=False):
     if (not isinstance(value, str) or not empty and not value.strip()
-            or len(value) > maximum or "\x00" in value):
+            or len(value) > maximum or not nul and "\x00" in value):
         _invalid()
     try:
         value.encode("utf-8")
@@ -185,7 +185,7 @@ def _packet(value):
         captures.add(capture)
         for field in ("content_hash", "manifest_hash"):
             _matching(source[field], _HASH)
-        _text(source["title"], 200, empty=True)
+        _text(source["title"], 200, empty=True, nul=True)
         _text(source["url"], 2048)
         _timestamp(source["retrieved_at"])
         for field in ("published_at", "modified_at"):
@@ -209,7 +209,7 @@ def _packet(value):
         if (type(passage["start"]) is not int or type(passage["end"]) is not int
                 or not 0 <= passage["start"] < passage["end"] <= 1024 ** 3):
             _invalid()
-        _text(passage["text"], 4000)
+        _text(passage["text"], 4000, nul=True)
         if (len(passage["text"]) != passage["end"] - passage["start"]
                 or hashlib.sha256(passage["text"].encode("utf-8")).hexdigest() != passage["passage_hash"]):
             _invalid()

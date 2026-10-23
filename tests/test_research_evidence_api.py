@@ -143,6 +143,73 @@ class ResearchEvidenceApiTests(unittest.TestCase):
         with closing(sqlite3.connect(backend.DATABASE)) as db:
             self.assertEqual(db.execute("SELECT COUNT(*) FROM research_finishing WHERE run_id=?", (run["id"],)).fetchone()[0], 0)
 
+    def assert_nul_source_keeps_exact_provenance(self, *, title, content):
+        healthy = self.capture()
+        source = backend.context_store().capture("Synthetic Acme report", "2020-01-02T12:00:01+00:00", [{
+            "title": title, "url": "https://reports.example.org/acme/nul-source", "content": content,
+        }], 1)["sources"][0]
+        self.assertEqual(source["archive_status"], "saved")
+        snapshot = self.archive_fixture.source_snapshot()
+
+        def review(selected):
+            source_id = next(value["id"] for value in selected["packet"]["sources"]
+                             if value["capture_id"] == source["capture_id"])
+            passage = next(value for value in selected["packet"]["passages"]
+                           if value["source_id"] == source_id and HISTORICAL in value["text"])
+            support = {"passage_id": passage["id"], "quote": HISTORICAL, "temporal_scope": "historical",
+                       "period": "FY2025", "observation_date": None}
+            return {"version": 1, "items": [{"item_id": "i1", "state": "covered", "reason": REASON,
+                                               "supports": [support]}]}
+
+        self.review_builder = review
+        run = self.run_now()
+        self.assertEqual(run["state"], "partial")
+        evidence = run["evidence_review"]
+        self.assertEqual({value["capture_id"] for value in evidence["sources"]},
+                         {healthy["capture_id"], source["capture_id"]})
+        selected_source = next(value for value in evidence["sources"] if value["capture_id"] == source["capture_id"])
+        self.assertEqual(selected_source["title"], title)
+        self.assertEqual((selected_source["content_hash"], selected_source["manifest_hash"]),
+                         (source["content_hash"], source["manifest_hash"]))
+        passage = next(value for value in evidence["passages"] if value["source_id"] == selected_source["id"])
+        self.assertEqual(passage["text"], content)
+        item = evidence["items"][0]
+        self.assertEqual(item["state"], "covered")
+        support = item["supports"][0]
+        self.assertEqual((support["start"], support["end"]),
+                         (content.index(HISTORICAL), content.index(HISTORICAL) + len(HISTORICAL)))
+        self.assertEqual(content[support["start"]:support["end"]], support["quote"])
+        reopened = self.fixture.get(run["id"])
+        self.assertEqual(reopened["evidence_review"], evidence)
+        self.assertEqual(self.archive_fixture.source_snapshot(), snapshot)
+        self.assert_usage(run)
+
+    def test_embedded_nul_in_saved_body_keeps_exact_source_and_support_offsets(self):
+        self.assert_nul_source_keeps_exact_provenance(
+            title="Synthetic Acme report", content="Saved padding.\x00 " + HISTORICAL)
+
+    def test_embedded_nul_in_saved_title_keeps_exact_source_and_support_offsets(self):
+        self.assert_nul_source_keeps_exact_provenance(
+            title="Synthetic\x00 Acme report", content=HISTORICAL)
+
+    def test_embedded_nul_in_model_quote_or_reason_remains_rejected(self):
+        content = "Saved padding.\x00 " + HISTORICAL
+        self.capture(content)
+        for field in ("quote", "reason"):
+            with self.subTest(model_field=field):
+                def review(selected):
+                    support = self.support(selected, content if field == "quote" else HISTORICAL)
+                    return {"version": 1, "items": [{"item_id": "i1", "state": "covered",
+                        "reason": REASON + ("\x00" if field == "reason" else ""), "supports": [support]}]}
+
+                self.review_builder = review
+                run = self.run_now()
+                self.assertEqual(run["state"], "failed")
+                self.assertIsNotNone(run["assessment"])
+                self.assertIsNone(run["evidence_review"])
+                self.assert_no_review_output(run["id"])
+                self.assert_usage(run)
+
     def test_clarification_stops_before_lookup_or_second_model_call(self):
         self.raw = {"version": 1, "decision": "clarify", "subjects": [], "items": [], "constraints": [],
                     "clarifications": [{"kind": "security", "quote": "ABC", "item_ids": []}]}

@@ -982,7 +982,11 @@ def execute_evidence_review(run, token, store):
                 envelope = store.authorize_stage(stage, workspace, state, db)
                 size = len((research_instructions(envelope, INSTRUCTIONS) + json.dumps(history) + json.dumps(schema)).encode("utf-8")) + 3072
                 output = min(4096, state["config"]["max_output_tokens"])
-                fits = size + output <= min(workspace["limits"]["max_tokens"], state["config"]["ollama_context_tokens"])
+                # The authorized remainder already excludes prior consumption
+                # and protected writer/reviewer holds. Optional passages must
+                # fit that allowance before dispatch, not only total context.
+                fits = size + output <= min(workspace["limits"]["max_tokens"], state["config"]["ollama_context_tokens"],
+                                           envelope["allowance"]["remaining"]["tokens"])
             if fits:
                 break
         else:

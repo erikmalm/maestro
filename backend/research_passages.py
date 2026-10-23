@@ -1,8 +1,10 @@
 """Bounded, exact saved-text passages for local requirement evidence review."""
+from bisect import bisect_left
+from contextlib import closing
 from copy import deepcopy
 import hashlib
 import json
-import re
+import sqlite3
 
 from backend.context_policy import HASH, ID, SOURCE_BYTES, public_url, timestamp
 
@@ -15,7 +17,6 @@ MAX_CANDIDATES = 20
 SOURCE_FIELDS = ("capture_id", "content_hash", "manifest_hash", "title", "url", "retrieved_at",
                  "published_at", "modified_at", "stale", "completeness")
 LOOKUP_STATES = ("ready", "limited", "disabled", "unconfigured", "unavailable")
-_WORDS = re.compile(r"[^\W_]+(?:[-'][^\W_]+)*", re.UNICODE)
 _STOPWORDS = frozenset("a an and are as at be by compare for from give how in is it of on or research the to what which with".split())
 
 
@@ -102,7 +103,13 @@ def _content(value, source):
     return content
 
 
-def _terms(assessment):
+def _tokenize(db, value):
+    db.execute("DELETE FROM passage_text")
+    db.execute("INSERT INTO passage_text(rowid,value) VALUES(1,?)", (value,))
+    return tuple(row[0] for row in db.execute("SELECT term FROM passage_terms ORDER BY offset"))
+
+
+def _terms(assessment, tokenize):
     if type(assessment) is not dict:
         _invalid()
     terms = {}
@@ -111,13 +118,12 @@ def _terms(assessment):
         if value is None:
             return
         _text(value, 4000)
-        values = [match.group() for match in _WORDS.finditer(value)] if words else [value]
+        tokens = tokenize(value)
+        values = [(token,) for token in tokens] if words else [tokens]
         for term in values:
-            if words and (len(term) < 3 or term.casefold() in _STOPWORDS):
+            if not term or words and (len(term[0]) < 3 or term[0] in _STOPWORDS):
                 continue
-            key = term.casefold()
-            if key not in terms or terms[key][1] < weight:
-                terms[key] = (term, weight)
+            terms[term] = max(weight, terms.get(term, 0))
 
     subjects, items = assessment.get("subjects"), assessment.get("items")
     if type(subjects) is not list or len(subjects) > 8 or type(items) is not list or len(items) > 16:
@@ -140,9 +146,62 @@ def _terms(assessment):
         add(criterion, 1, words=True)
         for field in ("period", "unit", "currency", "freshness"):
             add(item.get(field), 3)
-    # All input is bounded canonical assessment data. Keep every literal term;
+    # All input is bounded canonical assessment data. Keep every native term;
     # dropping later items here could silently bias passage selection.
-    return [(re.compile(re.escape(term), re.IGNORECASE), weight) for term, weight in terms.values()]
+    return terms
+
+
+def _patterns(db, content, terms):
+    # The default FTS5 tokenizer is the archive's unicode61, including its
+    # legacy multi-accent rules. Never approximate it with Unicode casefolding.
+    # highlight drops embedded NULs; an equal-length separator view preserves
+    # native token boundaries and original codepoint positions on both sides.
+    view = content.replace("\x00", " ")
+    tokens = _tokenize(db, view)
+    positions = {}
+    for position, token in enumerate(tokens):
+        positions.setdefault(token, []).append(position)
+    # Only tokens present in this <= SOURCE_BYTES body enter the expression;
+    # the complete assessment is retained without the lookup's 17-token cap.
+    wanted = {token for term in terms for token in term} & positions.keys()
+    if not wanted:
+        return []
+    marker = "\x01maestro-passage"
+    while marker in view:
+        marker += "\x01"
+    opening, closing_marker = marker + "<", marker + ">"
+    expression = " OR ".join('"' + token.replace('"', '""') + '"' for token in sorted(wanted))
+    marked = db.execute("SELECT highlight(passage_text,0,?,?) FROM passage_text WHERE passage_text MATCH ?",
+                        (opening, closing_marker, expression)).fetchone()[0]
+    chunks = marked.split(opening)
+    restored, spans, offset = [chunks[0]], [], len(chunks[0])
+    for chunk in chunks[1:]:
+        token, separator, suffix = chunk.partition(closing_marker)
+        if not separator:
+            _invalid()
+        spans.append((offset, offset + len(token)))
+        restored.extend((token, suffix))
+        offset += len(token) + len(suffix)
+    matching_positions = [index for index, token in enumerate(tokens) if token in wanted]
+    if "".join(restored) != view or len(spans) != len(matching_positions):
+        _invalid()
+    token_spans = dict(zip(matching_positions, spans))
+    patterns = []
+    for term, weight in terms.items():
+        hits = [(token_spans[start][0], token_spans[start + len(term) - 1][1])
+                for start in positions.get(term[0], ()) if tokens[start:start + len(term)] == term]
+        if hits:
+            patterns.append((weight, hits))
+    return patterns
+
+
+def _hits(patterns, start, end):
+    hits = []
+    for weight, spans in patterns:
+        index = bisect_left(spans, (start,))
+        if index < len(spans) and spans[index][1] <= end:
+            hits.append((weight, spans[index]))
+    return hits
 
 
 def _windows(content, patterns):
@@ -154,13 +213,12 @@ def _windows(content, patterns):
     windows = []
     for start in sorted(starts):
         end = start + width
-        hits = [(weight, match) for pattern, weight in patterns
-                if (match := pattern.search(content, start, end)) is not None]
+        hits = _hits(patterns, start, end)
         if not hits:
             continue
-        _, focus = max(hits, key=lambda hit: (hit[0], -hit[1].start()))
+        _, focus = max(hits, key=lambda hit: (hit[0], -hit[1][0]))
         windows.append((sum(weight for weight, _ in hits), len(hits), start, end,
-                        (focus.start() + focus.end()) // 2, focus.end() - focus.start()))
+                        (focus[0] + focus[1]) // 2, focus[1] - focus[0]))
     ranked = sorted(windows, key=lambda item: (-item[0], -item[1], item[2]))
     distinct = []
     for window in ranked:
@@ -189,12 +247,11 @@ def _uncovered(content, start, end, passages, source_id, patterns):
         intervals = remaining
     choices = []
     for left, right in intervals:
-        hits = [(weight, match) for pattern, weight in patterns
-                if (match := pattern.search(content, left, right)) is not None]
+        hits = _hits(patterns, left, right)
         if hits:
-            _, focus = max(hits, key=lambda hit: (hit[0], -hit[1].start()))
+            _, focus = max(hits, key=lambda hit: (hit[0], -hit[1][0]))
             choices.append((-sum(weight for weight, _ in hits), -len(hits), left, right,
-                            (focus.start() + focus.end()) // 2, focus.end() - focus.start()))
+                            (focus[0] + focus[1]) // 2, focus[1] - focus[0]))
     return min(choices)[2:] if choices else None
 
 
@@ -220,23 +277,29 @@ def select_packet(candidates, assessment, lookup, *, max_passages=MAX_PASSAGES, 
     # Reserve the longer true flag and bounded omission counter during fitting.
     if packet_size({**packet, "selection": {"limited": True, "omitted_count": 999999}}) > max_bytes:
         _invalid()
-    patterns, records, windows = _terms(assessment), {}, []
-    for position, candidate in enumerate(candidates):
-        source = _source(candidate)
-        content = _content(candidate, source)
-        identity = source["capture_id"]
-        if identity in records:
-            if records[identity] != (source, content):
-                _invalid()
-            continue
-        records[identity] = (source, content)
-        for score, hits, start, end, anchor, minimum in _windows(content, patterns):
-            windows.append((-score, -hits, position, start, end, anchor, minimum, identity))
+    records, windows = {}, []
+    with closing(sqlite3.connect(":memory:")) as db:
+        db.execute("PRAGMA temp_store=MEMORY")
+        db.execute("CREATE VIRTUAL TABLE passage_text USING fts5(value)")
+        db.execute("CREATE VIRTUAL TABLE passage_terms USING fts5vocab(passage_text, instance)")
+        terms = _terms(assessment, lambda value: _tokenize(db, value))
+        for position, candidate in enumerate(candidates):
+            source = _source(candidate)
+            content = _content(candidate, source)
+            identity = source["capture_id"]
+            if identity in records:
+                if records[identity][:2] != (source, content):
+                    _invalid()
+                continue
+            patterns = _patterns(db, content, terms)
+            records[identity] = (source, content, patterns)
+            for score, hits, start, end, anchor, minimum in _windows(content, patterns):
+                windows.append((-score, -hits, position, start, end, anchor, minimum, identity))
     source_ids, shortened = {}, False
     for _, _, _, start, end, anchor, minimum, identity in sorted(windows):
         if len(packet["passages"]) >= max_passages:
             break
-        source, content = records[identity]
+        source, content, patterns = records[identity]
         source_id = source_ids.get(identity, "c" + str(len(source_ids) + 1))
         if identity not in source_ids and len(source_ids) == MAX_SOURCES:
             continue

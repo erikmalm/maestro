@@ -1,6 +1,9 @@
 """Pure saved-passage selection and exact revalidation; no archive or model calls."""
+from contextlib import closing
 from copy import deepcopy
 import hashlib
+import sqlite3
+import unicodedata
 import unittest
 
 from backend.research_passages import MAX_PACKET_BYTES, packet_size, select_packet, validate_packet
@@ -37,6 +40,90 @@ class ResearchPassageTests(unittest.TestCase):
             return source
 
         return load
+
+    def test_nfc_request_selects_nfd_saved_tail_without_changing_provenance(self):
+        requested = "\u00c5rsta \u00e5rsrapport"
+        saved = unicodedata.normalize("NFD", requested)
+        text = "unrelated context " * 200 + "\U0001f680 " + saved + "."
+        source = candidate(text)
+        required = {"subjects": [{"name": "\u00c5rsta", "identifiers": []}],
+                    "items": [{"criterion": "\u00e5rsrapport", "period": None, "unit": None,
+                               "currency": None, "freshness": None}]}
+        original = deepcopy((source, required))
+        packet = select_packet([source], required, LOOKUP, max_passages=1)
+        self.assertEqual(len(packet["passages"]), 1)
+        passage = packet["passages"][0]
+        self.assertIn(saved, passage["text"])
+        self.assertNotIn(requested, passage["text"])
+        self.assertGreater(passage["start"], 1200)
+        self.assertEqual(passage["text"], text[passage["start"]:passage["end"]])
+        self.assertEqual(passage["passage_hash"], hashlib.sha256(passage["text"].encode()).hexdigest())
+        self.assertEqual(packet["sources"][0]["content_hash"], source["content_hash"])
+        self.assertEqual(packet["sources"][0]["manifest_hash"], source["manifest_hash"])
+        self.assertEqual(validate_packet(packet, self.loader([source])), packet)
+        self.assertEqual((source, required), original)
+
+    def test_token_and_diacritic_nomination_matches_native_unicode61(self):
+        phrase = "h\u1ed9i ngh\u1ecb"
+        cases = (
+            ("ARSTA ARSRAPPORT", "\u00c5rsta \u00e5rsrapport"),
+            (unicodedata.normalize("NFD", "\u00c5rsta"), "\u00c5rsta"),
+            ("cafe", "CAF\u00c9"),
+            ("qx", "q\u0301x"),
+            ("hoi nghi", phrase),
+            ("hoi nghi", unicodedata.normalize("NFD", phrase)),
+            (unicodedata.normalize("NFD", phrase), phrase),
+            (phrase, phrase),
+            ("alpha beta", "ALPHA-beta"),
+            ("alpha", "alphabet"),
+            ("cafe", "CAF\u00c9TERIA"),
+            ("\u00df", "SS"),
+        )
+        with closing(sqlite3.connect(":memory:")) as db:
+            db.execute("CREATE VIRTUAL TABLE native_text USING fts5(value)")
+            for query, text in cases:
+                with self.subTest(query=query, text=text):
+                    db.execute("DELETE FROM native_text")
+                    db.execute("INSERT INTO native_text(value) VALUES(?)", (text,))
+                    expression = '"' + query.replace('"', '""') + '"'
+                    expected = db.execute("SELECT 1 FROM native_text WHERE native_text MATCH ?", (expression,)).fetchone() is not None
+                    required = {"subjects": [{"name": query, "identifiers": []}],
+                                "items": [{"criterion": "unmatchedcriterion", "period": None, "unit": None,
+                                           "currency": None, "freshness": None}]}
+                    source = candidate(text)
+                    packet = select_packet([source], required, LOOKUP)
+                    self.assertEqual(bool(packet["passages"]), expected)
+                    self.assertEqual(validate_packet(packet, self.loader([source])), packet)
+
+    def test_nul_separators_and_highlight_marker_text_preserve_original_spans(self):
+        saved = unicodedata.normalize("NFD", "\u00c5rsta \u00e5rsrapport")
+        text = "\x00\x01maestro-passage<\x01maestro-passage> \U0001f680 " + saved + "\x00 trailing text."
+        source = candidate(text)
+        required = {"subjects": [{"name": "\u00c5rsta \u00e5rsrapport", "identifiers": []}],
+                    "items": [{"criterion": "unmatchedcriterion", "period": None, "unit": None,
+                               "currency": None, "freshness": None}]}
+        packet = select_packet([source], required, LOOKUP)
+        self.assertEqual(packet["passages"][0]["text"], text)
+        self.assertEqual((packet["passages"][0]["start"], packet["passages"][0]["end"]), (0, len(text)))
+        self.assertEqual(validate_packet(packet, self.loader([source])), packet)
+        for separated in ("\u00c5rsta\x00\u00e5rsrapport", "\u00c5rsta \u00e5rsrapport\x00", "\x00\u00c5rsta \u00e5rsrapport"):
+            with self.subTest(text=separated):
+                current = candidate(separated)
+                selected = select_packet([current], required, LOOKUP)
+                self.assertEqual(selected["passages"][0]["text"], separated)
+                self.assertEqual(validate_packet(selected, self.loader([current])), selected)
+
+    def test_late_words_of_the_last_requirement_are_not_dropped_by_lookup_keyword_caps(self):
+        items = [{"criterion": f"absentmetric{number}", "period": None, "unit": None,
+                  "currency": None, "freshness": None} for number in range(16)]
+        items[-1]["criterion"] = " ".join(f"unusedword{number}" for number in range(24)) + " \u00e5rsrapport"
+        required = {"subjects": [{"name": "Unmatchedcompany", "identifiers": []}], "items": items}
+        saved = unicodedata.normalize("NFD", "\u00e5rsrapport")
+        source = candidate("unrelated context " * 200 + saved)
+        packet = select_packet([source], required, LOOKUP, max_passages=1)
+        self.assertEqual(len(packet["passages"]), 1)
+        self.assertIn(saved, packet["passages"][0]["text"])
+        self.assertEqual(validate_packet(packet, self.loader([source])), packet)
 
     def test_relevant_tail_after_first_1200_characters_is_selected_and_reopened(self):
         text = "unrelated context " * 390 + "\nAcme revenue FY2025 was USD 42 billion."
