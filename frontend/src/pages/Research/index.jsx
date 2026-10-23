@@ -1,4 +1,3 @@
-import { useState } from "react";
 import useResearchRuns from "./useResearchRuns";
 import RunDetails, { stateLabel } from "./RunDetails";
 import "./styles.css";
@@ -7,7 +6,6 @@ export { researchPageRequested } from "./useResearchRuns";
 
 export default function Research({ chatId }) {
   const data = useResearchRuns(chatId);
-  const [request, setRequest] = useState("");
   return (
     <main className="page-content research-page">
       <div className="page-heading">
@@ -27,8 +25,8 @@ export default function Research({ chatId }) {
         className="card entry-form research-form"
         onSubmit={(event) => {
           event.preventDefault();
-          if (request.trim() && !data.pendingId)
-            void data.submit(request.trim());
+          if (data.request.trim() && !data.formLocked)
+            void data.submit(data.request.trim());
         }}
       >
         <h2>Review saved evidence</h2>
@@ -38,9 +36,9 @@ export default function Research({ chatId }) {
             required
             maxLength={32000}
             rows={4}
-            value={request}
-            disabled={Boolean(data.busy || data.pendingId)}
-            onChange={(event) => setRequest(event.target.value)}
+            value={data.request}
+            disabled={data.formLocked}
+            onChange={(event) => data.updateRequest(event.target.value)}
           />
         </label>
         <p className="form-note">
@@ -51,13 +49,17 @@ export default function Research({ chatId }) {
         <div className="research-actions">
           <button
             className="button primary"
-            disabled={!request.trim() || Boolean(data.busy || data.pendingId)}
+            disabled={!data.request.trim() || data.formLocked}
+            aria-busy={data.busy === "submit" || data.working}
           >
-            {data.busy === "submit"
-              ? "Recording request…"
-              : "Review saved evidence"}
+            Review saved evidence
           </button>
         </div>
+        {data.working && (
+          <p className="form-note" role="status">
+            Research is running. The request field will unlock when it finishes.
+          </p>
+        )}
         {data.pendingId && !data.busy && (
           <div className="research-pending" role="status">
             <p>

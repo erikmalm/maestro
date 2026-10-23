@@ -338,6 +338,7 @@ type MockState = {
   posts: Submission[];
   listReads: number;
   detailReads: number;
+  list?: (route: Route) => Promise<void>;
   create?: (route: Route, body: Submission) => Promise<void>;
   detail?: (route: Route, run: ResearchRun | undefined) => Promise<void>;
 };
@@ -369,6 +370,7 @@ async function fixture(page: Page, runs: ResearchRun[] = []) {
       if (method === "GET") {
         state.listReads += 1;
         expect(url.searchParams.get("limit")).toBe("20");
+        if (state.list) return state.list(route);
         return route.fulfill({
           json: {
             runs: state.runs.map(({ events: _events, ...run }) => run),
@@ -516,6 +518,207 @@ test("Research records requested items and constraints through explicit local ev
   });
 });
 
+test("queued and running submissions lock the form independently of history selection until completion", async ({
+  page,
+}) => {
+  const older = {
+    ...recorded(secondId),
+    request: "Earlier completed research",
+  };
+  const state = await fixture(page, [older]);
+  state.create = async (route, body) => {
+    const run = { ...recorded(firstId, "queued"), ...body };
+    state.runs = [run, older];
+    await route.fulfill({ status: 202, json: { run, created: true } });
+  };
+  await open(page);
+  const input = page.getByRole("textbox", {
+    name: "Research request",
+    exact: true,
+  });
+  const submit = page.getByRole("button", {
+    name: "Review saved evidence",
+    exact: true,
+  });
+  const text = "Assess this request once while its local model is running";
+  await input.fill(text);
+  await submit.click();
+  await expect(selected(page).getByRole("status")).toHaveText("Queued");
+  await expect(input).toBeDisabled();
+  await expect(submit).toBeDisabled();
+  await expect(input).toHaveValue(text);
+  await page.evaluate(() =>
+    document
+      .querySelector(".research-form")!
+      .dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })),
+  );
+  expect(state.posts).toHaveLength(1);
+  const running = { ...recorded(firstId, "running"), ...state.posts[0] };
+  state.runs = [running, older];
+  await focus(page);
+  await expect(selected(page).getByRole("status")).toHaveText("Running");
+  await page
+    .getByRole("region", { name: "Recent research runs" })
+    .getByRole("button", { name: /Earlier completed research/ })
+    .click();
+  await expect(
+    selected(page).getByText(older.request, { exact: true }),
+  ).toBeVisible();
+  await expect(input).toBeDisabled();
+  await expect(submit).toBeDisabled();
+  state.runs = [{ ...assessed(), ...state.posts[0] }, older];
+  await focus(page);
+  await expect(input).toBeEnabled();
+  await expect(input).toHaveValue("");
+  await input.fill("A new draft after confirmed completion");
+  await expect(submit).toBeEnabled();
+  // An older running snapshot cannot resurrect a run already seen terminal.
+  state.runs = [running, older];
+  await focus(page);
+  await expect(input).toBeEnabled();
+  await expect(input).toHaveValue("A new draft after confirmed completion");
+  expect(state.posts).toHaveLength(1);
+});
+
+test("failed reads preserve a known active form lock until a terminal run is confirmed", async ({
+  page,
+}) => {
+  const state = await fixture(page);
+  await open(page);
+  const input = page.getByRole("textbox", {
+    name: "Research request",
+    exact: true,
+  });
+  const submit = page.getByRole("button", {
+    name: "Review saved evidence",
+    exact: true,
+  });
+  const text = "Keep this submitted text while readback is unavailable";
+  await input.fill(text);
+  await submit.click();
+  await expect(selected(page).getByRole("status")).toHaveText("Queued");
+  state.list = async (route) =>
+    route.fulfill({
+      status: 503,
+      json: { detail: "Synthetic recent-run read failure" },
+    });
+  state.detail = async (route) =>
+    route.fulfill({
+      status: 503,
+      json: { detail: "Synthetic detail read failure" },
+    });
+  await focus(page);
+  await expect(page.getByRole("alert")).toContainText("Synthetic");
+  await expect(input).toBeDisabled();
+  await expect(submit).toBeDisabled();
+  await expect(input).toHaveValue(text);
+  state.list = undefined;
+  state.detail = undefined;
+  state.runs = [{ ...assessed(), ...state.posts[0] }];
+  await focus(page);
+  await expect(input).toBeEnabled();
+  await expect(input).toHaveValue("");
+  expect(state.posts).toHaveLength(1);
+});
+
+test("external deletion unlocks only after complete history confirms absence and preserves the draft", async ({
+  page,
+}) => {
+  const state = await fixture(page);
+  await open(page);
+  const input = page.getByRole("textbox", {
+    name: "Research request",
+    exact: true,
+  });
+  const submit = page.getByRole("button", {
+    name: "Review saved evidence",
+    exact: true,
+  });
+  const text = "A removed run is not a confirmed completed submission";
+  await input.fill(text);
+  await submit.click();
+  await expect(selected(page).getByRole("status")).toHaveText("Queued");
+  await expect(input).toBeDisabled();
+  // A filtered history plus 404 may reflect privacy withholding, not deletion.
+  state.runs = [];
+  state.list = async (route) =>
+    route.fulfill({ json: { runs: [], skipped_count: 1 } });
+  await focus(page);
+  await expect(selected(page)).toHaveCount(0);
+  await expect(input).toBeDisabled();
+  await expect(input).toHaveValue(text);
+  // The single active run must appear in a complete recent history if it exists.
+  state.list = undefined;
+  await focus(page);
+  await expect(input).toBeEnabled();
+  await expect(input).toHaveValue(text);
+  await expect(submit).toBeEnabled();
+  // Absence disarms completion clearing: identical newly edited text is a draft.
+  await input.fill("An intermediate new draft");
+  await input.fill(text);
+  state.runs = [{ ...assessed(), ...state.posts[0] }];
+  await focus(page);
+  await expect(selected(page).getByText(text, { exact: true })).toBeVisible();
+  await expect(input).toBeEnabled();
+  await expect(input).toHaveValue(text);
+  expect(state.posts).toHaveLength(1);
+});
+
+test("initial history and reloaded active runs lock the form while unrelated completion preserves drafts", async ({
+  page,
+}) => {
+  const active = {
+    ...recorded(firstId, "running"),
+    request: "Already running research",
+  };
+  const state = await fixture(page, [active]);
+  const initialRead = deferred();
+  state.list = async (route) => {
+    await initialRead.promise;
+    await route.fulfill({ json: { runs: state.runs, skipped_count: 0 } });
+  };
+  try {
+    await open(page, "?research_run=" + firstId);
+    const input = page.getByRole("textbox", {
+      name: "Research request",
+      exact: true,
+    });
+    const submit = page.getByRole("button", {
+      name: "Review saved evidence",
+      exact: true,
+    });
+    await expect(input).toBeDisabled();
+    await expect(submit).toBeDisabled();
+    state.list = undefined;
+    initialRead.release();
+    await expect(selected(page).getByRole("status")).toHaveText("Running");
+    await expect(input).toBeDisabled();
+    await page.reload();
+    await expect(selected(page).getByRole("status")).toHaveText("Running");
+    await expect(input).toBeDisabled();
+    state.runs = [{ ...active, state: "partial" }];
+    await focus(page);
+    await expect(input).toBeEnabled();
+    const draft = "An unsent draft must survive another run finishing";
+    await input.fill(draft);
+    const foreign = {
+      ...recorded(secondId, "queued"),
+      request: "Research started in another tab",
+    };
+    state.runs = [foreign, ...state.runs];
+    await focus(page);
+    await expect(input).toBeDisabled();
+    state.runs = [{ ...foreign, state: "partial" }, state.runs[1]];
+    await focus(page);
+    await expect(input).toBeEnabled();
+    await expect(input).toHaveValue(draft);
+    await expect(submit).toBeEnabled();
+    expect(state.posts).toHaveLength(0);
+  } finally {
+    initialRead.release();
+  }
+});
+
 test("per-item evidence decisions preserve qualifiers, exact passages and bounded-lookup limits", async ({
   page,
 }) => {
@@ -580,7 +783,9 @@ test("per-item evidence decisions preserve qualifiers, exact passages and bounde
   });
   await expect(stale).toContainText("Stale for this request");
   await expect(stale).toContainText("No current observation is available");
-  await expect(stale).toContainText("The old quote does not establish the current price.");
+  await expect(stale).toContainText(
+    "The old quote does not establish the current price.",
+  );
   const conflicting = review.getByRole("region", {
     name: "Evidence for requested item 4",
     exact: true,
@@ -774,6 +979,12 @@ test("failed assessment and rejected submission keep the no-answer boundary", as
     page.getByRole("button", { name: "Review saved evidence", exact: true }),
   ).toBeEnabled();
   await expect(
+    page.getByRole("textbox", { name: "Research request", exact: true }),
+  ).toBeEnabled();
+  await expect(
+    page.getByRole("textbox", { name: "Research request", exact: true }),
+  ).toHaveValue("Assess a new request");
+  await expect(
     page.getByRole("button", { name: "Retry same submission" }),
   ).toHaveCount(0);
   await page.clock.runFor(5100);
@@ -845,6 +1056,12 @@ test("an unknown POST response retries the same identity and a new submission ge
   await expect(
     page.getByRole("button", { name: "Retry same submission" }),
   ).toBeVisible();
+  await expect(
+    page.getByRole("textbox", { name: "Research request", exact: true }),
+  ).toBeDisabled();
+  await expect(
+    page.getByRole("textbox", { name: "Research request", exact: true }),
+  ).toHaveValue(request);
   const stored = await page.evaluate(() =>
     sessionStorage.getItem("maestro.research.pending"),
   );
@@ -856,6 +1073,12 @@ test("an unknown POST response retries the same identity and a new submission ge
   await expect(
     page.getByText("Existing submission restored.", { exact: true }),
   ).toBeVisible();
+  await expect(
+    page.getByRole("textbox", { name: "Research request", exact: true }),
+  ).toBeEnabled();
+  await expect(
+    page.getByRole("textbox", { name: "Research request", exact: true }),
+  ).toHaveValue("");
   expect(
     await page.evaluate(() =>
       sessionStorage.getItem("maestro.research.pending"),
@@ -869,6 +1092,48 @@ test("an unknown POST response retries the same identity and a new submission ge
     .click();
   await expect.poll(() => state.posts.length).toBe(3);
   expect(state.posts[2].submission_id).not.toBe(state.posts[0].submission_id);
+});
+
+test("abandoning an unconfirmed submission disarms late completion clearing even for identical new text", async ({
+  page,
+}) => {
+  const state = await fixture(page);
+  let unconfirmed!: ResearchRun;
+  state.create = async (route, body) => {
+    unconfirmed = { ...recorded(), ...body };
+    await route.abort("failed");
+  };
+  await open(page);
+  const input = page.getByRole("textbox", {
+    name: "Research request",
+    exact: true,
+  });
+  const text = "An identical new draft is not the abandoned submission";
+  await input.fill(text);
+  await page
+    .getByRole("button", { name: "Review saved evidence", exact: true })
+    .click();
+  await expect(
+    page.getByRole("button", { name: "Retry same submission" }),
+  ).toBeVisible();
+  await expect(input).toBeDisabled();
+  await expect(input).toHaveValue(text);
+  await page
+    .getByRole("button", { name: "Start a new submission", exact: true })
+    .click();
+  await expect(input).toBeEnabled();
+  await input.fill("A different draft in between");
+  await input.fill(text);
+  state.runs = [unconfirmed];
+  await focus(page);
+  await expect(selected(page).getByText(text, { exact: true })).toBeVisible();
+  await expect(input).toBeEnabled();
+  await expect(input).toHaveValue(text);
+  expect(state.posts).toHaveLength(1);
+  const storage = await page.evaluate(() =>
+    JSON.stringify({ ...sessionStorage, ...localStorage }),
+  );
+  expect(storage).not.toContain(text);
 });
 
 test("a lost response can be reconciled from its opaque submission identity after reload", async ({
