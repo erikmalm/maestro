@@ -32,6 +32,14 @@ CANDIDATE_SQL_STEPS = 10000000
 CANDIDATE_MAP_BYTES = 4096
 
 
+class CandidateWork:
+    """One private lookup allowance shared by a research run's queries."""
+    def __init__(self):
+        self.deadline = time.monotonic() + CANDIDATE_SECONDS
+        self.steps = 0
+        self.examined = 0
+
+
 @contextmanager
 def _candidate_tokenizer(progress=None):
     # Use the existing index's default unicode61 tokenizer, including its legacy
@@ -409,7 +417,7 @@ class ContextStore:
                 config = {**DEFAULT, **saved, "capture_policy": saved.get("capture_policy", "approved_sources")}
         return configuration(config)
 
-    def lookup_candidates(self, query="", *, limit=10, domain=None, retrieved_from=None, retrieved_to=None, secrets=()):
+    def lookup_candidates(self, query="", *, limit=10, domain=None, retrieved_from=None, retrieved_to=None, secrets=(), work=None):
         """Read verified local candidates, without accepting their suitability or acquiring evidence."""
         filters = validate_candidate_lookup(query, limit=limit, domain=domain,
                                             retrieved_from=retrieved_from, retrieved_to=retrieved_to)
@@ -421,7 +429,11 @@ class ContextStore:
             pass
 
         with self._write_lock:
-            deadline, steps, examined = time.monotonic() + CANDIDATE_SECONDS, 0, 0
+            if work is None:
+                work = CandidateWork()
+            if type(work) is not CandidateWork:
+                raise ValueError("Use the server-owned candidate work allowance.")
+            deadline = work.deadline
             work_exceeded = False
 
             def check_time():
@@ -431,9 +443,9 @@ class ContextStore:
                     raise WorkLimit()
 
             def bounded_query():
-                nonlocal steps, work_exceeded
-                steps += 1000
-                work_exceeded = work_exceeded or steps >= CANDIDATE_SQL_STEPS or time.monotonic() >= deadline
+                nonlocal work_exceeded
+                work.steps += 1000
+                work_exceeded = work_exceeded or work.steps >= CANDIDATE_SQL_STEPS or time.monotonic() >= deadline
                 return int(work_exceeded)
 
             @contextmanager
@@ -486,13 +498,13 @@ class ContextStore:
                         now = self.now()
 
                         def verify(row):
-                            nonlocal examined, work_exceeded
+                            nonlocal work_exceeded
                             check_time()
                             capture_id = row[0] if row else None
-                            if examined >= CANDIDATE_SCAN_LIMIT:
+                            if work.examined >= CANDIDATE_SCAN_LIMIT:
                                 work_exceeded = True
                                 raise WorkLimit()
-                            examined += 1
+                            work.examined += 1
                             if capture_id in verified:
                                 return verified[capture_id]
                             try:

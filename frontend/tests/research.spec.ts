@@ -165,6 +165,160 @@ function assessed(decision: "ready" | "clarify" = "ready"): ResearchRun {
   ];
   return run;
 }
+function evidenceReviewed(): ResearchRun {
+  const run = assessed();
+  run.workflow = "evidence_review";
+  const base = run.assessment!;
+  base.subjects.push({
+    id: "boreal",
+    kind: "company",
+    name: "Boreal",
+    identifiers: [],
+  });
+  base.items = [
+    { ...base.items[0], id: "revenue", criterion: "Northstar revenue" },
+    {
+      ...base.items[0],
+      id: "boreal-revenue",
+      criterion: "Boreal revenue",
+      subject_ids: ["boreal"],
+      period: "FY2024",
+      currency: "SEK",
+    },
+    {
+      ...base.items[0],
+      id: "price",
+      criterion: "Current share price",
+      period: null,
+      unit: null,
+    },
+    { ...base.items[0], id: "profit", criterion: "Operating profit" },
+    {
+      ...base.items[0],
+      id: "expenses",
+      criterion: "Boreal expenses",
+      subject_ids: ["boreal"],
+      period: "FY2024",
+      currency: "SEK",
+    },
+  ];
+  const source = {
+    ...candidate,
+    id: "c1",
+    title: "Saved Northstar annual report",
+    url: "https://example.org/report",
+    published_at: "2026-01-20T12:00:00Z",
+    modified_at: null,
+    completeness: { maestro_truncated: false, full_page: false as const },
+  };
+  const passages = [
+    {
+      id: "p1",
+      source_id: "c1",
+      start: 0,
+      end: 24,
+      text: "FY2025 revenue was USD 10.",
+      passage_hash: "3".repeat(64),
+    },
+    {
+      id: "p2",
+      source_id: "c1",
+      start: 25,
+      end: 50,
+      text: "Old observed share price.",
+      passage_hash: "4".repeat(64),
+    },
+    {
+      id: "p3",
+      source_id: "c1",
+      start: 51,
+      end: 76,
+      text: "Operating profit was 4.",
+      passage_hash: "5".repeat(64),
+    },
+    {
+      id: "p4",
+      source_id: "c2",
+      start: 0,
+      end: 25,
+      text: "Operating profit was 6.",
+      passage_hash: "6".repeat(64),
+    },
+  ];
+  for (const passage of passages)
+    passage.end = passage.start + Array.from(passage.text).length;
+  const support = (
+    index: number,
+    temporal: "historical" | "refresh" = "historical",
+  ) => ({
+    passage_id: passages[index].id,
+    quote: passages[index].text,
+    temporal_scope: temporal,
+    period: temporal === "historical" ? "FY2025" : null,
+    observation_date: null,
+    source_id: passages[index].source_id,
+    start: passages[index].start,
+    end: passages[index].end,
+    freshness_basis:
+      temporal === "historical"
+        ? "explicit_requested_period"
+        : "fresh_origin_check_required",
+    best_before: null,
+  });
+  run.evidence_review = {
+    version: 1,
+    checked_at: "2026-10-23T10:00:00Z",
+    offset_unit: "unicode_codepoint",
+    lookup: { state: "limited", search_limited: true, skipped_count: 3 },
+    selection: { limited: true, omitted_count: 2 },
+    sources: [
+      source,
+      {
+        ...source,
+        id: "c2",
+        capture_id: "d".repeat(32),
+        title: "Alternative profit disclosure",
+        url: "https://example.org/alternative",
+        content_hash: "7".repeat(64),
+      },
+    ],
+    passages,
+    items: [
+      {
+        item_id: "revenue",
+        state: "covered",
+        reason: "The historical period and requested measure match.",
+        supports: [support(0)],
+      },
+      {
+        item_id: "boreal-revenue",
+        state: "missing",
+        reason: "No sufficient support in the inspected candidates.",
+        supports: [],
+      },
+      {
+        item_id: "price",
+        state: "stale",
+        reason: "The old quote does not establish the current price.",
+        suitability_reason: "No current observation is available.",
+        supports: [support(1, "refresh")],
+      },
+      {
+        item_id: "profit",
+        state: "conflicting",
+        reason: "The supplied disclosures disagree.",
+        supports: [support(2), support(3)],
+      },
+      {
+        item_id: "expenses",
+        state: "unavailable",
+        reason: "The saved source could not be verified.",
+        supports: [],
+      },
+    ],
+  };
+  return run;
+}
 function deferred() {
   let release!: () => void;
   const promise = new Promise<void>((resolve) => {
@@ -176,7 +330,7 @@ type Submission = {
   submission_id: string;
   request: string;
   query: string;
-  workflow: "requirements";
+  workflow: "evidence_review";
   chat_id: string | null;
 };
 type MockState = {
@@ -184,6 +338,7 @@ type MockState = {
   posts: Submission[];
   listReads: number;
   detailReads: number;
+  list?: (route: Route) => Promise<void>;
   create?: (route: Route, body: Submission) => Promise<void>;
   detail?: (route: Route, run: ResearchRun | undefined) => Promise<void>;
 };
@@ -215,6 +370,7 @@ async function fixture(page: Page, runs: ResearchRun[] = []) {
       if (method === "GET") {
         state.listReads += 1;
         expect(url.searchParams.get("limit")).toBe("20");
+        if (state.list) return state.list(route);
         return route.fulfill({
           json: {
             runs: state.runs.map(({ events: _events, ...run }) => run),
@@ -280,19 +436,19 @@ async function open(page: Page, suffix = "") {
 const focus = (page: Page) =>
   page.evaluate(() => window.dispatchEvent(new Event("focus")));
 
-test("Research records requested items and constraints through one explicit local assessment", async ({
+test("Research records requested items and constraints through explicit local evidence review", async ({
   page,
 }) => {
   const state = await fixture(page);
   await open(page);
   await expect(
-    page.getByText(/Assessment uses one installed local model call/),
+    page.getByText(/reviews a bounded selection of saved evidence/),
   ).toBeVisible();
   await page
     .getByRole("textbox", { name: "Research request", exact: true })
     .fill(assessed().request);
   await page
-    .getByRole("button", { name: "Assess request", exact: true })
+    .getByRole("button", { name: "Review saved evidence", exact: true })
     .click();
   await expect(selected(page).getByRole("status")).toHaveText("Queued");
   expect(state.posts).toHaveLength(1);
@@ -300,7 +456,7 @@ test("Research records requested items and constraints through one explicit loca
     submission_id: expect.stringMatching(/^[a-f0-9]{32}$/),
     request: assessed().request,
     query: "",
-    workflow: "requirements",
+    workflow: "evidence_review",
     chat_id: chatId,
   });
   const done = { ...assessed(), ...state.posts[0] };
@@ -362,6 +518,380 @@ test("Research records requested items and constraints through one explicit loca
   });
 });
 
+test("queued and running submissions lock the form independently of history selection until completion", async ({
+  page,
+}) => {
+  const older = {
+    ...recorded(secondId),
+    request: "Earlier completed research",
+  };
+  const state = await fixture(page, [older]);
+  state.create = async (route, body) => {
+    const run = { ...recorded(firstId, "queued"), ...body };
+    state.runs = [run, older];
+    await route.fulfill({ status: 202, json: { run, created: true } });
+  };
+  await open(page);
+  const input = page.getByRole("textbox", {
+    name: "Research request",
+    exact: true,
+  });
+  const submit = page.getByRole("button", {
+    name: "Review saved evidence",
+    exact: true,
+  });
+  const text = "Assess this request once while its local model is running";
+  await input.fill(text);
+  await submit.click();
+  await expect(selected(page).getByRole("status")).toHaveText("Queued");
+  await expect(input).toBeDisabled();
+  await expect(submit).toBeDisabled();
+  await expect(input).toHaveValue(text);
+  await page.evaluate(() =>
+    document
+      .querySelector(".research-form")!
+      .dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })),
+  );
+  expect(state.posts).toHaveLength(1);
+  const running = { ...recorded(firstId, "running"), ...state.posts[0] };
+  state.runs = [running, older];
+  await focus(page);
+  await expect(selected(page).getByRole("status")).toHaveText("Running");
+  await page
+    .getByRole("region", { name: "Recent research runs" })
+    .getByRole("button", { name: /Earlier completed research/ })
+    .click();
+  await expect(
+    selected(page).getByText(older.request, { exact: true }),
+  ).toBeVisible();
+  await expect(input).toBeDisabled();
+  await expect(submit).toBeDisabled();
+  state.runs = [{ ...assessed(), ...state.posts[0] }, older];
+  await focus(page);
+  await expect(input).toBeEnabled();
+  await expect(input).toHaveValue("");
+  await input.fill("A new draft after confirmed completion");
+  await expect(submit).toBeEnabled();
+  // An older running snapshot cannot resurrect a run already seen terminal.
+  state.runs = [running, older];
+  await focus(page);
+  await expect(input).toBeEnabled();
+  await expect(input).toHaveValue("A new draft after confirmed completion");
+  expect(state.posts).toHaveLength(1);
+});
+
+test("failed reads preserve a known active form lock until a terminal run is confirmed", async ({
+  page,
+}) => {
+  const state = await fixture(page);
+  await open(page);
+  const input = page.getByRole("textbox", {
+    name: "Research request",
+    exact: true,
+  });
+  const submit = page.getByRole("button", {
+    name: "Review saved evidence",
+    exact: true,
+  });
+  const text = "Keep this submitted text while readback is unavailable";
+  await input.fill(text);
+  await submit.click();
+  await expect(selected(page).getByRole("status")).toHaveText("Queued");
+  state.list = async (route) =>
+    route.fulfill({
+      status: 503,
+      json: { detail: "Synthetic recent-run read failure" },
+    });
+  state.detail = async (route) =>
+    route.fulfill({
+      status: 503,
+      json: { detail: "Synthetic detail read failure" },
+    });
+  await focus(page);
+  await expect(page.getByRole("alert")).toContainText("Synthetic");
+  await expect(input).toBeDisabled();
+  await expect(submit).toBeDisabled();
+  await expect(input).toHaveValue(text);
+  state.list = undefined;
+  state.detail = undefined;
+  state.runs = [{ ...assessed(), ...state.posts[0] }];
+  await focus(page);
+  await expect(input).toBeEnabled();
+  await expect(input).toHaveValue("");
+  expect(state.posts).toHaveLength(1);
+});
+
+test("external deletion unlocks only after complete history confirms absence and preserves the draft", async ({
+  page,
+}) => {
+  const state = await fixture(page);
+  await open(page);
+  const input = page.getByRole("textbox", {
+    name: "Research request",
+    exact: true,
+  });
+  const submit = page.getByRole("button", {
+    name: "Review saved evidence",
+    exact: true,
+  });
+  const text = "A removed run is not a confirmed completed submission";
+  await input.fill(text);
+  await submit.click();
+  await expect(selected(page).getByRole("status")).toHaveText("Queued");
+  await expect(input).toBeDisabled();
+  // A filtered history plus 404 may reflect privacy withholding, not deletion.
+  state.runs = [];
+  state.list = async (route) =>
+    route.fulfill({ json: { runs: [], skipped_count: 1 } });
+  await focus(page);
+  await expect(selected(page)).toHaveCount(0);
+  await expect(input).toBeDisabled();
+  await expect(input).toHaveValue(text);
+  // The single active run must appear in a complete recent history if it exists.
+  state.list = undefined;
+  await focus(page);
+  await expect(input).toBeEnabled();
+  await expect(input).toHaveValue(text);
+  await expect(submit).toBeEnabled();
+  // Absence disarms completion clearing: identical newly edited text is a draft.
+  await input.fill("An intermediate new draft");
+  await input.fill(text);
+  state.runs = [{ ...assessed(), ...state.posts[0] }];
+  await focus(page);
+  await expect(selected(page).getByText(text, { exact: true })).toBeVisible();
+  await expect(input).toBeEnabled();
+  await expect(input).toHaveValue(text);
+  expect(state.posts).toHaveLength(1);
+});
+
+test("initial history and reloaded active runs lock the form while unrelated completion preserves drafts", async ({
+  page,
+}) => {
+  const active = {
+    ...recorded(firstId, "running"),
+    request: "Already running research",
+  };
+  const state = await fixture(page, [active]);
+  const initialRead = deferred();
+  state.list = async (route) => {
+    await initialRead.promise;
+    await route.fulfill({ json: { runs: state.runs, skipped_count: 0 } });
+  };
+  try {
+    await open(page, "?research_run=" + firstId);
+    const input = page.getByRole("textbox", {
+      name: "Research request",
+      exact: true,
+    });
+    const submit = page.getByRole("button", {
+      name: "Review saved evidence",
+      exact: true,
+    });
+    await expect(input).toBeDisabled();
+    await expect(submit).toBeDisabled();
+    state.list = undefined;
+    initialRead.release();
+    await expect(selected(page).getByRole("status")).toHaveText("Running");
+    await expect(input).toBeDisabled();
+    await page.reload();
+    await expect(selected(page).getByRole("status")).toHaveText("Running");
+    await expect(input).toBeDisabled();
+    state.runs = [{ ...active, state: "partial" }];
+    await focus(page);
+    await expect(input).toBeEnabled();
+    const draft = "An unsent draft must survive another run finishing";
+    await input.fill(draft);
+    const foreign = {
+      ...recorded(secondId, "queued"),
+      request: "Research started in another tab",
+    };
+    state.runs = [foreign, ...state.runs];
+    await focus(page);
+    await expect(input).toBeDisabled();
+    state.runs = [{ ...foreign, state: "partial" }, state.runs[1]];
+    await focus(page);
+    await expect(input).toBeEnabled();
+    await expect(input).toHaveValue(draft);
+    await expect(submit).toBeEnabled();
+    expect(state.posts).toHaveLength(0);
+  } finally {
+    initialRead.release();
+  }
+});
+
+test("per-item evidence decisions preserve qualifiers, exact passages and bounded-lookup limits", async ({
+  page,
+}) => {
+  const run = evidenceReviewed();
+  const state = await fixture(page, [run]);
+  await open(page, "?research_run=" + firstId);
+  const review = selected(page).getByRole("region", {
+    name: "Saved-evidence review",
+    exact: true,
+  });
+  await expect(review).toContainText(
+    "No answer has been written or finally reviewed",
+  );
+  await expect(review).toContainText(
+    "Supporting evidence may exist outside the inspected candidates",
+  );
+  await expect(review).toContainText("3 records were skipped");
+  await expect(review).toContainText(
+    "2 candidates were not included in this assessment",
+  );
+  await expect(review).toContainText(
+    "it does not establish that evidence is absent elsewhere",
+  );
+  const covered = review.getByRole("region", {
+    name: "Evidence for requested item 1",
+    exact: true,
+  });
+  await expect(covered).toContainText("Covered");
+  await expect(covered).toContainText(
+    "Northstar Class A · FY2025 · millions · USD",
+  );
+  await expect(covered.getByRole("blockquote")).toHaveText(
+    "FY2025 revenue was USD 10.",
+  );
+  await expect(covered).toContainText("Outside reuse window");
+  await expect(covered).toContainText(
+    "does not establish suitability for the requested period",
+  );
+  await expect(covered).toContainText("Historical reporting period");
+  await expect(covered).toContainText("Best-before dateNot established");
+  await expect(
+    covered.getByRole("link", { name: "Open live source" }),
+  ).toHaveAttribute("href", "https://example.org/report");
+  await covered
+    .getByText("Passage and saved-version references", { exact: true })
+    .click();
+  await expect(
+    covered.getByText(candidate.content_hash, { exact: true }),
+  ).toBeVisible();
+  await expect(
+    covered.getByText(candidate.manifest_hash, { exact: true }),
+  ).toBeVisible();
+  const missing = review.getByRole("region", {
+    name: "Evidence for requested item 2",
+    exact: true,
+  });
+  await expect(missing).toContainText("Boreal · FY2024 · millions · SEK");
+  await expect(missing).toContainText("Missing");
+  const stale = review.getByRole("region", {
+    name: "Evidence for requested item 3",
+    exact: true,
+  });
+  await expect(stale).toContainText("Stale for this request");
+  await expect(stale).toContainText("No current observation is available");
+  await expect(stale).toContainText(
+    "The old quote does not establish the current price.",
+  );
+  const conflicting = review.getByRole("region", {
+    name: "Evidence for requested item 4",
+    exact: true,
+  });
+  await expect(conflicting).toContainText("Conflicting");
+  await expect(conflicting.getByRole("blockquote")).toHaveCount(2);
+  await expect(conflicting).toContainText("Operating profit was 4.");
+  await expect(conflicting).toContainText("Operating profit was 6.");
+  await expect(
+    review.getByRole("region", {
+      name: "Evidence for requested item 5",
+      exact: true,
+    }),
+  ).toContainText("Unavailable");
+  await expect(selected(page).getByRole("status")).toHaveText(
+    "Partial — no reviewed answer",
+  );
+  expect(state.posts).toHaveLength(0);
+});
+
+test("refreshed source withholding removes old passages and uses authoritative suitability reasons", async ({
+  page,
+}) => {
+  const run = evidenceReviewed();
+  const state = await fixture(page, [run]);
+  await open(page, "?research_run=" + firstId);
+  const review = selected(page).getByRole("region", {
+    name: "Saved-evidence review",
+    exact: true,
+  });
+  await expect(review).toContainText("FY2025 revenue was USD 10.");
+  const withheld = structuredClone(run);
+  withheld.evidence_review!.sources = [];
+  withheld.evidence_review!.passages = [];
+  for (const item of withheld.evidence_review!.items) {
+    item.model_state = item.state;
+    item.state = "unavailable";
+    item.supports = [];
+    item.reason = "Source verification failed; coverage must be reassessed.";
+    item.suitability_reason =
+      "Saved evidence is no longer available for this assessment.";
+  }
+  state.runs = [withheld];
+  await focus(page);
+  await expect(review).not.toContainText("FY2025 revenue was USD 10.");
+  await expect(review).not.toContainText("Saved Northstar annual report");
+  await expect(review).toContainText(
+    "Source verification failed; coverage must be reassessed.",
+  );
+  await expect(review).not.toContainText(
+    "The historical period and requested measure match.",
+  );
+  await expect(review.getByText("Unavailable", { exact: true })).toHaveCount(5);
+  await expect(review.getByRole("link")).toHaveCount(0);
+  await expect(review).toContainText(
+    "Saved evidence is no longer available for this assessment",
+  );
+  expect(state.posts).toHaveLength(0);
+});
+
+test("historical requirements and lookup runs retain their separate readable views", async ({
+  page,
+}) => {
+  const requirements = assessed();
+  const lookup = {
+    ...recorded(secondId),
+    request: "Historical saved-evidence lookup",
+  };
+  await fixture(page, [requirements, lookup]);
+  await open(page, "?research_run=" + firstId);
+  await expect(
+    selected(page).getByRole("region", {
+      name: "Requirements assessment",
+      exact: true,
+    }),
+  ).toBeVisible();
+  await expect(
+    selected(page).getByRole("region", {
+      name: "Saved-evidence review",
+      exact: true,
+    }),
+  ).toHaveCount(0);
+  await page
+    .getByRole("region", { name: "Recent research runs" })
+    .getByRole("button", { name: /Historical saved-evidence lookup/ })
+    .click();
+  await expect(
+    selected(page).getByRole("region", {
+      name: "Saved-version receipt",
+      exact: true,
+    }),
+  ).toBeVisible();
+  await expect(
+    selected(page).getByRole("region", {
+      name: "Requirements assessment",
+      exact: true,
+    }),
+  ).toHaveCount(0);
+  await expect(
+    selected(page).getByRole("region", {
+      name: "Saved-evidence review",
+      exact: true,
+    }),
+  ).toHaveCount(0);
+});
+
 test("material ambiguity displays clarification and remains stopped after polling and reload", async ({
   page,
 }) => {
@@ -371,7 +901,7 @@ test("material ambiguity displays clarification and remains stopped after pollin
     .getByRole("textbox", { name: "Research request", exact: true })
     .fill(assessed("clarify").request);
   await page
-    .getByRole("button", { name: "Assess request", exact: true })
+    .getByRole("button", { name: "Review saved evidence", exact: true })
     .click();
   await expect(selected(page).getByRole("status")).toHaveText("Queued");
   state.runs = [{ ...assessed("clarify"), ...state.posts[0] }];
@@ -440,14 +970,20 @@ test("failed assessment and rejected submission keep the no-answer boundary", as
     .getByRole("textbox", { name: "Research request", exact: true })
     .fill("Assess a new request");
   await page
-    .getByRole("button", { name: "Assess request", exact: true })
+    .getByRole("button", { name: "Review saved evidence", exact: true })
     .click();
   await expect(page.getByRole("alert")).toContainText(
     "Choose an installed local model before assessing requirements.",
   );
   await expect(
-    page.getByRole("button", { name: "Assess request", exact: true }),
+    page.getByRole("button", { name: "Review saved evidence", exact: true }),
   ).toBeEnabled();
+  await expect(
+    page.getByRole("textbox", { name: "Research request", exact: true }),
+  ).toBeEnabled();
+  await expect(
+    page.getByRole("textbox", { name: "Research request", exact: true }),
+  ).toHaveValue("Assess a new request");
   await expect(
     page.getByRole("button", { name: "Retry same submission" }),
   ).toHaveCount(0);
@@ -515,11 +1051,17 @@ test("an unknown POST response retries the same identity and a new submission ge
     .getByRole("textbox", { name: "Research request", exact: true })
     .fill(request);
   await page
-    .getByRole("button", { name: "Assess request", exact: true })
+    .getByRole("button", { name: "Review saved evidence", exact: true })
     .click();
   await expect(
     page.getByRole("button", { name: "Retry same submission" }),
   ).toBeVisible();
+  await expect(
+    page.getByRole("textbox", { name: "Research request", exact: true }),
+  ).toBeDisabled();
+  await expect(
+    page.getByRole("textbox", { name: "Research request", exact: true }),
+  ).toHaveValue(request);
   const stored = await page.evaluate(() =>
     sessionStorage.getItem("maestro.research.pending"),
   );
@@ -531,6 +1073,12 @@ test("an unknown POST response retries the same identity and a new submission ge
   await expect(
     page.getByText("Existing submission restored.", { exact: true }),
   ).toBeVisible();
+  await expect(
+    page.getByRole("textbox", { name: "Research request", exact: true }),
+  ).toBeEnabled();
+  await expect(
+    page.getByRole("textbox", { name: "Research request", exact: true }),
+  ).toHaveValue("");
   expect(
     await page.evaluate(() =>
       sessionStorage.getItem("maestro.research.pending"),
@@ -540,10 +1088,52 @@ test("an unknown POST response retries the same identity and a new submission ge
     .getByRole("textbox", { name: "Research request", exact: true })
     .fill("A new request");
   await page
-    .getByRole("button", { name: "Assess request", exact: true })
+    .getByRole("button", { name: "Review saved evidence", exact: true })
     .click();
   await expect.poll(() => state.posts.length).toBe(3);
   expect(state.posts[2].submission_id).not.toBe(state.posts[0].submission_id);
+});
+
+test("abandoning an unconfirmed submission disarms late completion clearing even for identical new text", async ({
+  page,
+}) => {
+  const state = await fixture(page);
+  let unconfirmed!: ResearchRun;
+  state.create = async (route, body) => {
+    unconfirmed = { ...recorded(), ...body };
+    await route.abort("failed");
+  };
+  await open(page);
+  const input = page.getByRole("textbox", {
+    name: "Research request",
+    exact: true,
+  });
+  const text = "An identical new draft is not the abandoned submission";
+  await input.fill(text);
+  await page
+    .getByRole("button", { name: "Review saved evidence", exact: true })
+    .click();
+  await expect(
+    page.getByRole("button", { name: "Retry same submission" }),
+  ).toBeVisible();
+  await expect(input).toBeDisabled();
+  await expect(input).toHaveValue(text);
+  await page
+    .getByRole("button", { name: "Start a new submission", exact: true })
+    .click();
+  await expect(input).toBeEnabled();
+  await input.fill("A different draft in between");
+  await input.fill(text);
+  state.runs = [unconfirmed];
+  await focus(page);
+  await expect(selected(page).getByText(text, { exact: true })).toBeVisible();
+  await expect(input).toBeEnabled();
+  await expect(input).toHaveValue(text);
+  expect(state.posts).toHaveLength(1);
+  const storage = await page.evaluate(() =>
+    JSON.stringify({ ...sessionStorage, ...localStorage }),
+  );
+  expect(storage).not.toContain(text);
 });
 
 test("a lost response can be reconciled from its opaque submission identity after reload", async ({
@@ -560,7 +1150,7 @@ test("a lost response can be reconciled from its opaque submission identity afte
     .getByRole("textbox", { name: "Research request", exact: true })
     .fill("Reconcile this saved request");
   await page
-    .getByRole("button", { name: "Assess request", exact: true })
+    .getByRole("button", { name: "Review saved evidence", exact: true })
     .click();
   await expect(
     page.getByRole("button", { name: "Retry same submission" }),

@@ -1,5 +1,6 @@
 import { sourceDate } from "../Evidence/useEvidence";
 import Assessment from "./Assessment";
+import EvidenceReview from "./EvidenceReview";
 
 const number = (value) =>
   typeof value === "number" && Number.isFinite(value)
@@ -26,7 +27,9 @@ const lookupLabels = {
 };
 
 export default function RunDetails({ run, busy, onCancel, onDelete }) {
-  const requirements = run.workflow === "requirements";
+  const requirements = ["requirements", "evidence_review"].includes(
+    run.workflow,
+  );
   const result = run.result;
   const candidates = result?.candidates || [];
   return (
@@ -81,6 +84,12 @@ export default function RunDetails({ run, busy, onCancel, onDelete }) {
         </div>
       </dl>
       {requirements && <Assessment assessment={run.assessment} />}
+      {run.evidence_review && (
+        <EvidenceReview
+          review={run.evidence_review}
+          assessment={run.assessment}
+        />
+      )}
       <section
         aria-label="Captured sharing permissions"
         className="research-section"

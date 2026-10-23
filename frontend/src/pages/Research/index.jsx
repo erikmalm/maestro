@@ -1,4 +1,3 @@
-import { useState } from "react";
 import useResearchRuns from "./useResearchRuns";
 import RunDetails, { stateLabel } from "./RunDetails";
 import "./styles.css";
@@ -7,54 +6,60 @@ export { researchPageRequested } from "./useResearchRuns";
 
 export default function Research({ chatId }) {
   const data = useResearchRuns(chatId);
-  const [request, setRequest] = useState("");
   return (
     <main className="page-content research-page">
       <div className="page-heading">
         <div>
           <h1>Research</h1>
-          <p>Record the scope of an explicit research request.</p>
+          <p>Assess requirements and review saved evidence.</p>
         </div>
         <span className="badge neutral">Preview</span>
       </div>
       <p className="page-note">
-        Assessment uses one installed local model call, with no hosted searches
-        or personal-memory recall. It records requirements and clarification
-        questions, and produces no reviewed answer.
+        This preview assesses your request, then reviews a bounded selection of
+        saved evidence with an installed local model. It makes no hosted
+        searches or personal-memory recall, and produces no written or finally
+        reviewed answer.
       </p>
       <form
         className="card entry-form research-form"
         onSubmit={(event) => {
           event.preventDefault();
-          if (request.trim() && !data.pendingId)
-            void data.submit(request.trim());
+          if (data.request.trim() && !data.formLocked)
+            void data.submit(data.request.trim());
         }}
       >
-        <h2>Assess research requirements</h2>
+        <h2>Review saved evidence</h2>
         <label>
           Research request
           <textarea
             required
             maxLength={32000}
             rows={4}
-            value={request}
-            disabled={Boolean(data.busy || data.pendingId)}
-            onChange={(event) => setRequest(event.target.value)}
+            value={data.request}
+            disabled={data.formLocked}
+            onChange={(event) => data.updateRequest(event.target.value)}
           />
         </label>
         <p className="form-note">
-          The current conversation's sharing restrictions are retained. Evidence
-          review, answer writing and final review are later steps; this
-          assessment does not perform them.
+          The current conversation's sharing restrictions are retained. Material
+          ambiguity stops the run for clarification. Answer writing and final
+          review are later steps.
         </p>
         <div className="research-actions">
           <button
             className="button primary"
-            disabled={!request.trim() || Boolean(data.busy || data.pendingId)}
+            disabled={!data.request.trim() || data.formLocked}
+            aria-busy={data.busy === "submit" || data.working}
           >
-            {data.busy === "submit" ? "Recording request…" : "Assess request"}
+            Review saved evidence
           </button>
         </div>
+        {data.working && (
+          <p className="form-note" role="status">
+            Research is running. The request field will unlock when it finishes.
+          </p>
+        )}
         {data.pendingId && !data.busy && (
           <div className="research-pending" role="status">
             <p>

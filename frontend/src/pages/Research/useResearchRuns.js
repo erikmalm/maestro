@@ -20,8 +20,17 @@ export const researchPageRequested = () =>
   Boolean(initialSelection() || pendingIdentity());
 const message = (reason, fallback) =>
   reason instanceof Error ? reason.message : fallback;
+const activeStates = new Set(["queued", "running"]);
+const terminalStates = new Set([
+  "partial",
+  "clarification",
+  "cancelled",
+  "failed",
+  "interrupted",
+]);
 
 export default function useResearchRuns(chatId) {
+  const [request, setRequest] = useState("");
   const [runs, setRuns] = useState([]);
   const [skipped, setSkipped] = useState(0);
   const [selectedId, setSelectedId] = useState(initialSelection);
@@ -33,7 +42,15 @@ export default function useResearchRuns(chatId) {
   const [actionError, setActionError] = useState("");
   const [notice, setNotice] = useState("");
   const [busy, setBusy] = useState("");
+  const [working, setWorking] = useState(false);
+  const [historyReady, setHistoryReady] = useState(false);
   const mounted = useRef(false);
+  const draft = useRef("");
+  // Keep draft ownership in memory; only the opaque pending ID is stored.
+  const submission = useRef(null);
+  const activeRuns = useRef(new Set());
+  const completedRuns = useRef(new Set());
+  const historyRead = useRef(false);
   const selection = useRef(selectedId);
   const pending = useRef(pendingId);
   const pendingBody = useRef(null);
@@ -50,6 +67,7 @@ export default function useResearchRuns(chatId) {
     refreshQueued.current = false;
   }
   function remember(run) {
+    observe(run);
     setRuns((previous) =>
       [run, ...previous.filter((item) => item.id !== run.id)]
         .filter((item) => !removed.current.has(item.id))
@@ -62,6 +80,30 @@ export default function useResearchRuns(chatId) {
     pendingBody.current = null;
     pendingIdentity(null);
     setPendingId(null);
+  }
+  function finishSubmission() {
+    if (!submission.current) return;
+    if (draft.current.trim() === submission.current.request) {
+      draft.current = "";
+      setRequest("");
+    }
+    submission.current = null;
+  }
+  function observe(run) {
+    const owned = submission.current?.id === run.submission_id;
+    if (owned) submission.current.runId = run.id;
+    if (terminalStates.has(run.state)) {
+      completedRuns.current.add(run.id);
+      activeRuns.current.delete(run.id);
+      if (owned) finishSubmission();
+    } else if (
+      activeStates.has(run.state) &&
+      // A stale list/detail snapshot cannot revive a completed run's lock.
+      !completedRuns.current.has(run.id)
+    ) {
+      activeRuns.current.add(run.id);
+    }
+    setWorking(activeRuns.current.size > 0);
   }
   function select(id, run = null) {
     fence();
@@ -101,11 +143,29 @@ export default function useResearchRuns(chatId) {
     setLoading(false);
     const errors = [];
     if (list.status === "fulfilled") {
+      historyRead.current = true;
+      setHistoryReady(true);
       const visible = list.value.runs.filter(
         (run) => !removed.current.has(run.id),
       );
       setRuns(visible);
       setSkipped(list.value.skipped_count);
+      visible.forEach(observe);
+      if (list.value.skipped_count === 0) {
+        // Admission permits only one active run, so it must appear in the
+        // newest history. A clean absence can reconcile deletion in another
+        // tab; filtered or failed reads cannot establish that absence.
+        const present = new Set(visible.map((run) => run.id));
+        for (const id of activeRuns.current) {
+          if (!present.has(id)) {
+            activeRuns.current.delete(id);
+            completedRuns.current.add(id);
+            // Absence unlocks the form but is not accepted completion.
+            if (submission.current?.runId === id) submission.current = null;
+          }
+        }
+        setWorking(activeRuns.current.size > 0);
+      }
       const restored =
         pending.current &&
         visible.find((run) => run.submission_id === pending.current);
@@ -123,6 +183,7 @@ export default function useResearchRuns(chatId) {
         return;
       }
     } else {
+      // Keep known active runs locked: a failed read is not completion.
       setRuns([]);
       errors.push(message(list.reason, "Could not load research runs."));
     }
@@ -132,6 +193,7 @@ export default function useResearchRuns(chatId) {
       detail.value &&
       !removed.current.has(id)
     ) {
+      observe(detail.value);
       setSelected(detail.value);
       setDetailLoading(false);
     } else if (id && detail.status === "rejected") {
@@ -169,16 +231,22 @@ export default function useResearchRuns(chatId) {
   }, []);
 
   async function submit(request) {
-    if (writing.current) return;
+    if (writing.current || activeRuns.current.size || !historyRead.current)
+      return;
     if (pending.current && !pendingBody.current) return;
     const body = pendingBody.current || {
       submission_id: crypto.randomUUID().replaceAll("-", ""),
       request,
       query: "",
-      workflow: "requirements",
+      workflow: "evidence_review",
       chat_id: chatId || null,
     };
     pendingBody.current = body;
+    submission.current ||= {
+      id: body.submission_id,
+      request: body.request,
+      runId: null,
+    };
     pending.current = body.submission_id;
     pendingIdentity(body.submission_id);
     setPendingId(body.submission_id);
@@ -202,6 +270,7 @@ export default function useResearchRuns(chatId) {
       if (!mounted.current) return;
       if (reason?.status && reason.status < 500) {
         clearPending();
+        submission.current = null;
         setActionError(
           message(reason, "Could not record this research request."),
         );
@@ -231,6 +300,10 @@ export default function useResearchRuns(chatId) {
         await api.deleteResearchRun(id);
         if (!mounted.current) return;
         removed.current.add(id);
+        activeRuns.current.delete(id);
+        completedRuns.current.add(id);
+        setWorking(activeRuns.current.size > 0);
+        if (submission.current?.runId === id) finishSubmission();
         setRuns((previous) => previous.filter((run) => run.id !== id));
         select(null);
         setNotice("Research run deleted.");
@@ -253,6 +326,18 @@ export default function useResearchRuns(chatId) {
     }
   }
   return {
+    request,
+    updateRequest: (value) => {
+      if (
+        writing.current ||
+        pending.current ||
+        activeRuns.current.size ||
+        !historyRead.current
+      )
+        return;
+      draft.current = value;
+      setRequest(value);
+    },
     runs,
     skipped,
     selectedId,
@@ -260,15 +345,18 @@ export default function useResearchRuns(chatId) {
     loading,
     detailLoading,
     busy,
+    working,
+    formLocked: Boolean(busy || pendingId || working || !historyReady),
     readError,
     actionError,
     notice,
     pendingId,
-    canRetry: Boolean(pendingBody.current),
+    canRetry: Boolean(pendingBody.current) && !working,
     submit,
     retry: () => submit(),
     newSubmission: () => {
       clearPending();
+      submission.current = null;
       setActionError("");
       setNotice("");
     },
