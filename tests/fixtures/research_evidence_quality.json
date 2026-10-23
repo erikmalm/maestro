@@ -34,7 +34,7 @@
       "expected": {
         "criterion": "employee headcount", "period": null, "currency": null, "unit": "people",
         "current_qualifier": "current",
-        "states": ["stale", "unavailable"], "minimum_sources": 0, "minimum_support_offset": 0,
+        "states": ["stale", "unavailable", "missing"], "minimum_sources": 0, "minimum_support_offset": 0,
         "support_fragments": [], "old_observation": "2020-01-02"
       }
     },

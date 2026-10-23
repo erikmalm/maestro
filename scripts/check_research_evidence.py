@@ -19,6 +19,7 @@ import time
 from unittest.mock import patch
 from urllib.parse import urlsplit
 import uuid
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -165,6 +166,7 @@ def main(argv=None):
     parser.add_argument("--base-url", default="http://127.0.0.1:11434")
     parser.add_argument("--context-tokens", type=int, default=16384)
     parser.add_argument("--output-tokens", type=int, default=1024)
+    parser.add_argument("--timezone", default="UTC", help="Explicit server timezone for this isolated trial")
     parser.add_argument("--case", action="append", dest="case_ids", help="Run this fixture once; repeatable")
     parser.add_argument("--report", type=Path, help="Write a new JSON report containing only synthetic records")
     args = parser.parse_args(argv)
@@ -179,6 +181,10 @@ def main(argv=None):
         parser.error("Use a bounded local model ID.")
     if not 1024 <= args.context_tokens <= 131072 or not 64 <= args.output_tokens <= 32768:
         parser.error("Use supported context and output limits.")
+    try:
+        ZoneInfo(args.timezone)
+    except (ZoneInfoNotFoundError, ValueError):
+        parser.error("Use a valid server timezone.")
     cases = load_cases()
     if args.case_ids:
         if set(args.case_ids) - {case["id"] for case in cases}:
@@ -214,7 +220,7 @@ def main(argv=None):
         require(scratch.parent == Path(tempfile.gettempdir()).resolve(), "Unexpected temporary directory")
         guards.enter_context(patch.dict(os.environ, {
             "MAESTRO_DATA_DIR": str(scratch / "bootstrap"), "MAESTRO_CONTEXT_ARCHIVE_DIR": str(scratch / "bootstrap-archive"),
-            "MAESTRO_OLLAMA_URL": endpoint, "MAESTRO_TIMEZONE": "UTC", "MAESTRO_PORT": "8765",
+            "MAESTRO_OLLAMA_URL": endpoint, "MAESTRO_TIMEZONE": args.timezone, "MAESTRO_PORT": "8765",
             "MAESTRO_API_KEY_FILE": "", "MAESTRO_SEARCH_KEY_FILE": "", "OPENAI_API_KEY": "",
         }))
         guards.enter_context(patch.object(credentials, "read", return_value=(None, "synthetic-quality")))
@@ -275,6 +281,7 @@ def main(argv=None):
             if recovery_required:
                 break
     report = {"model": args.model, "context_tokens": args.context_tokens, "output_tokens": args.output_tokens,
+              "timezone": args.timezone,
               "results": results, "passed": len(results) == len(cases) and all(result["passed"] for result in results),
               "recovery_required": recovery_required}
     if args.report:

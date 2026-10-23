@@ -56,6 +56,16 @@ class ResearchEvidenceApiTests(unittest.TestCase):
         if self.chat_hook:
             self.chat_hook(review, selected)
         raw = self.review_builder(selected) if review else self.raw
+        if review and payload["format"]["properties"]["version"].get("const") == 2:
+            # Adapt valid legacy-shaped fixtures to the selected wire contract
+            # without hiding malformed keys or collapsing duplicate item rows.
+            rows = raw.get("items") if type(raw) is dict else None
+            if (type(raw) is dict and type(raw.get("version")) is int and raw["version"] == 1
+                    and type(rows) is list and all(type(row) is dict and isinstance(row.get("item_id"), str)
+                                                  for row in rows)
+                    and len({row["item_id"] for row in rows}) == len(rows)):
+                raw = {**raw, "version": 2, "items": {row["item_id"]: {
+                    key: value for key, value in row.items() if key != "item_id"} for row in rows}}
         return {"done": True, "message": {"role": "assistant", "content": json.dumps(raw)},
                 "prompt_eval_count": 41, "eval_count": 7}
 
@@ -187,6 +197,37 @@ class ResearchEvidenceApiTests(unittest.TestCase):
         self.assertEqual(run["state"], "partial")
         self.assert_usage(run)
 
+    def test_v2_partial_coverage_keeps_both_required_ids_and_publishes_the_stable_array(self):
+        quote = "Acme revenue for FY2025 was USD 42 million."
+        self.capture(quote)
+        self.raw["items"].append({**self.raw["items"][0], "id": "i2", "criterion": "operating profit"})
+        self.review_builder = lambda selected: {"version": 1, "items": [
+            {"item_id": "i1", "state": "covered", "reason": "The requested revenue period and currency are quoted.",
+             "supports": [self.support(selected, quote)]},
+            {"item_id": "i2", "state": "missing", "reason": "The selected source does not state operating profit.",
+             "supports": []}]}
+        run = self.run_now(request="Assess Acme revenue and operating profit in USD for FY2025.")
+        self.assertEqual(run["state"], "partial")
+        review = run["evidence_review"]
+        self.assertEqual(review["version"], 1)
+        self.assertEqual([(item["item_id"], item["state"]) for item in review["items"]],
+                         [("i1", "covered"), ("i2", "missing")])
+        self.assertEqual(review["items"][0]["supports"][0]["quote"], quote)
+        self.assertEqual(review["items"][1]["supports"], [])
+        wire = self.fixture.chats()[1][2]["format"]
+        self.assertEqual(wire["properties"]["version"]["const"], 2)
+        rows = wire["properties"]["items"]
+        self.assertEqual(rows["type"], "object")
+        self.assertEqual(set(rows["required"]), {"i1", "i2"})
+        self.assertEqual(set(rows["properties"]), {"i1", "i2"})
+        self.assertIs(rows["additionalProperties"], False)
+        with closing(sqlite3.connect(backend.DATABASE)) as db:
+            stage = json.loads(db.execute("SELECT output FROM research_stages WHERE run_id=? AND kind='evidence_review'",
+                                          (run["id"],)).fetchone()[0])
+        self.assertEqual(stage["version"], 2)
+        self.assertEqual(set(stage["items"]), {"i1", "i2"})
+        self.assert_usage(run)
+
     def test_malformed_or_dangling_reviews_are_withheld_without_retry_but_keep_actual_usage(self):
         self.capture()
         for malformed in ({"version": 1, "items": []}, {"version": 1, "items": [{"item_id": "i1", "state": "covered",
@@ -215,54 +256,69 @@ class ResearchEvidenceApiTests(unittest.TestCase):
              "supports": [self.support(selected, quote)]},
             {"item_id": "i2", "state": "missing", "reason": "No evidence found for Acme operating profit FY2025.",
              "supports": []}]}
-        # Actual malformed syntax from the public synthetic two-item trial:
-        # the second array element switches to an object key and lacks item_id.
-        malformed = ('{"version":1,"items":[{"item_id":"i1","state":"covered",'
-                     '"reason":"Evidence found for Acme revenue FY2025 in USD.",'
-                     '"supports":[{"passage_id":"p1","quote":"Acme revenue for FY2025 was USD 42 million.",'
-                     '"temporal_scope":"historical","period":"FY2025","observation_date":null}]},'
-                     '"i2":{"state":"missing","reason":"No evidence found for Acme operating profit FY2025.",'
-                     '"supports":[]}}}')
-        with self.assertRaises(json.JSONDecodeError):
-            json.loads(malformed)
+        # Both actual malformed replies from the public synthetic trials remain
+        # raw text. Neither the wire-contract fixture adapter nor JSON repair
+        # may turn them into an accepted partial result.
+        keyed_array = ('{"version":1,"items":[{"item_id":"i1","state":"covered",'
+                       '"reason":"Evidence found for Acme revenue FY2025 in USD.",'
+                       '"supports":[{"passage_id":"p1","quote":"Acme revenue for FY2025 was USD 42 million.",'
+                       '"temporal_scope":"historical","period":"FY2025","observation_date":null}]},'
+                       '"i2":{"state":"missing","reason":"No evidence found for Acme operating profit FY2025.",'
+                       '"supports":[]}}}')
+        extra_quote = ('{"version":1,"items":[{"item_id":"i1","state":"covered",'
+                       '"reason":"Revenue figure provided for FY2025.",'
+                       '"supports":[{"passage_id":"p1","quote":"Acme revenue for FY2025 was USD 42 million.",'
+                       '"temporal_scope":"historical","period":"FY2025","observation_date":null}]},'
+                       '"{"item_id":"i2","state":"missing",'
+                       '"reason":"No operating profit information found in the selected passage.","supports":[]}]}')
         inference = self.inference
+        for name, malformed, actuals in (
+                ("keyed_array_entry", keyed_array, ((2395, 184), (2230, 180))),
+                ("extra_quote_before_second_row", extra_quote, ((2398, 184), (2498, 147)))):
+            with self.subTest(syntax=name):
+                with self.assertRaises(json.JSONDecodeError):
+                    json.loads(malformed)
+                before = len(self.fixture.chats())
 
-        def malformed_reply(config, path, payload, deadline):
-            reply = inference(config, path, payload, deadline)
-            if path == "/api/chat":
-                if "decision" in payload["format"]["properties"]:
-                    reply.update(prompt_eval_count=2395, eval_count=184)
-                else:
-                    # Inject raw text after the fixture's normal JSON encoder;
-                    # encoding a Python object cannot reproduce this failure.
-                    reply["message"]["content"] = malformed
-                    reply.update(prompt_eval_count=2230, eval_count=180)
-            return reply
+                def malformed_reply(config, path, payload, deadline):
+                    reply = inference(config, path, payload, deadline)
+                    if path == "/api/chat":
+                        is_review = "decision" not in payload["format"]["properties"]
+                        if is_review:
+                            # Inject after json.dumps: encoding a Python object
+                            # cannot reproduce the observed invalid syntax.
+                            reply["message"]["content"] = malformed
+                        counts = actuals[int(is_review)]
+                        reply.update(prompt_eval_count=counts[0], eval_count=counts[1])
+                    return reply
 
-        with patch("backend.provider.background_network", side_effect=malformed_reply):
-            run = self.run_now(request=request)
-        self.assertEqual(run["state"], "failed")
-        self.assertIsNone(run["evidence_review"])
-        self.assertEqual(run["assessment"]["decision"], "ready")
-        self.assertEqual(run["assessment"]["completion_criterion"], request)
-        self.assertEqual([(item["id"], item["criterion"], item["period"], item["currency"])
-                          for item in run["assessment"]["items"]],
-                         [("i1", "revenue", "FY2025", "USD"), ("i2", "operating profit", "FY2025", "USD")])
-        self.assertNotIn("No evidence found for Acme operating profit FY2025.", json.dumps(run))
-        self.assertEqual(len(self.fixture.chats()), 2)
-        self.assert_no_review_output(run["id"])
-        consumed = run["budget"]["consumed"]
-        self.assertEqual((consumed["model_calls"], consumed["tokens"], consumed["hosted_searches"]), (2, 4989, 0))
-        self.assertTrue(all(value == 0 for value in run["budget"]["reserved"].values()))
-        ledger = backend.provider().read_state()["ledger"]
-        self.assertEqual([(entry["status"], entry["input_tokens"], entry["output_tokens"]) for entry in ledger],
-                         [("settled", 2395, 184), ("settled", 2230, 180)])
-        with closing(sqlite3.connect(backend.DATABASE)) as db:
-            self.assertEqual(db.execute("SELECT state,output FROM research_stages WHERE run_id=? AND kind='evidence_review'",
-                                        (run["id"],)).fetchall(), [("failed", None)])
-            self.assertEqual(db.execute("SELECT COUNT(*) FROM research_finishing WHERE run_id=?", (run["id"],)).fetchone()[0], 0)
-        self.assertEqual(self.archive_fixture.source_snapshot(), snapshot)
-        self.fixture.assert_released()
+                with patch("backend.provider.background_network", side_effect=malformed_reply):
+                    run = self.run_now(request=request)
+                self.assertEqual(run["state"], "failed")
+                self.assertIsNone(run["evidence_review"])
+                self.assertEqual(run["assessment"]["decision"], "ready")
+                self.assertEqual(run["assessment"]["completion_criterion"], request)
+                self.assertEqual([(item["id"], item["criterion"], item["period"], item["currency"])
+                                  for item in run["assessment"]["items"]],
+                                 [("i1", "revenue", "FY2025", "USD"), ("i2", "operating profit", "FY2025", "USD")])
+                for rejected_reason in ("No evidence found for Acme operating profit FY2025.",
+                                        "No operating profit information found in the selected passage."):
+                    self.assertNotIn(rejected_reason, json.dumps(run))
+                self.assertEqual(len(self.fixture.chats()), before + 2)
+                self.assert_no_review_output(run["id"])
+                consumed = run["budget"]["consumed"]
+                self.assertEqual((consumed["model_calls"], consumed["tokens"], consumed["hosted_searches"]),
+                                 (2, sum(sum(counts) for counts in actuals), 0))
+                self.assertTrue(all(value == 0 for value in run["budget"]["reserved"].values()))
+                ledger = backend.provider().read_state()["ledger"][-2:]
+                self.assertEqual([(entry["status"], entry["input_tokens"], entry["output_tokens"]) for entry in ledger],
+                                 [("settled", *counts) for counts in actuals])
+                with closing(sqlite3.connect(backend.DATABASE)) as db:
+                    self.assertEqual(db.execute("SELECT state,output FROM research_stages WHERE run_id=? AND kind='evidence_review'",
+                                                (run["id"],)).fetchall(), [("failed", None)])
+                    self.assertEqual(db.execute("SELECT COUNT(*) FROM research_finishing WHERE run_id=?", (run["id"],)).fetchone()[0], 0)
+                self.assertEqual(self.archive_fixture.source_snapshot(), snapshot)
+                self.fixture.assert_released()
 
     def test_source_delete_tamper_or_disable_after_metadata_blocks_review_dispatch(self):
         for action in ("delete", "tamper", "disable"):

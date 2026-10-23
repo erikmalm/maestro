@@ -8,7 +8,7 @@ import unittest
 from unittest.mock import patch
 
 from backend import app as backend
-from backend.research_evidence import validate_review
+from backend.research_evidence import validate_response
 from backend.research_passages import evidence_packet_hash, select_packet
 from tests import test_research_evidence_api as fixtures
 
@@ -68,7 +68,7 @@ class ResearchEvidenceBindingTests(unittest.TestCase):
             # Both captures are real, eligible and hash-checked. Only the first
             # packet was supplied to this model stage.
             backend._verified_evidence_packet(packet, lambda value: value, secrets=secrets)
-            replacement = validate_review(self.stage_output(stage), assessment, packet, review["checked_at"])
+            replacement = validate_response(self.stage_output(stage), assessment, packet, review["checked_at"])
             self.assertNotEqual(evidence_packet_hash(packet), evidence_packet_hash(backend._review_packet(review)))
             with self.assertRaisesRegex(ValueError, "differs from the owned stage"):
                 self.finish(store, run_id, token, replacement, stage=stage, secrets=secrets)
@@ -97,7 +97,7 @@ class ResearchEvidenceBindingTests(unittest.TestCase):
                 "end": alternate + len(fixtures.HISTORICAL), "text": fixtures.HISTORICAL,
                 "passage_hash": hashlib.sha256(fixtures.HISTORICAL.encode()).hexdigest()}]
             backend._verified_evidence_packet(packet, lambda value: value, secrets=secrets)
-            replacement = validate_review(self.stage_output(stage), assessment, packet, review["checked_at"])
+            replacement = validate_response(self.stage_output(stage), assessment, packet, review["checked_at"])
             self.assertNotEqual(replacement["items"][0]["supports"][0]["start"], support["start"])
             with self.assertRaisesRegex(ValueError, "differs from the owned stage"):
                 self.finish(store, run_id, token, replacement, stage=stage, secrets=secrets)

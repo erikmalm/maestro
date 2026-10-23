@@ -82,7 +82,9 @@ class ResearchEvidenceQualityTests(unittest.TestCase):
             scratch = Path(temporary).resolve()
             self.assertEqual(scratch.parent, Path(tempfile.gettempdir()).resolve())
             ambient = scratch / "must-not-touch"
-            for options in (["--help"], ["--model", "synthetic:latest", "--base-url", "http://localhost:11434"]):
+            for options in (["--help"],
+                            ["--model", "synthetic:latest", "--base-url", "http://localhost:11434"],
+                            ["--model", "synthetic:latest", "--timezone", "Not/A-Timezone"]):
                 for optimization in ([], ["-O"]):
                     with self.subTest(options=options, optimization=optimization):
                         result = subprocess.run([sys.executable, *optimization, "-B",
@@ -98,6 +100,13 @@ class ResearchEvidenceQualityTests(unittest.TestCase):
             with self.subTest(case=case["id"]):
                 run, sources, loader, _, _ = canonical(case)
                 check_run(case, run, sources, loader)
+        # No sufficient current support is also a truthful missing gap; the old
+        # dated passage stays in the packet and is never accepted as current.
+        case = self.cases["current_old_observation"]
+        run, sources, loader, raw, packet = canonical(case)
+        raw["items"][0].update(state="missing", supports=[], reason="No evidence establishes current headcount.")
+        run["evidence_review"] = validate_review(raw, run["assessment"], packet, CHECKED)
+        check_run(case, run, sources, loader)
         tail = self.cases["historical_tail"]["sources"][0]
         self.assertGreater(source_text(tail).index(tail["quote"]), 1200)
 

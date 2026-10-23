@@ -480,7 +480,7 @@ class ResearchStore:
 
     def finish_evidence_review(self, run_id, token, review, *, stage=None, secrets=()):
         """Publish a revalidated packet while the caller holds archive locks."""
-        from backend.research_evidence import validate_saved_review, validate_review
+        from backend.research_evidence import validate_saved_review, validate_stage_review
         from backend.research_stages import ResearchStage, _row, _states, _hash, safe_stage_content
         _identifier(run_id)
         with self._transaction() as db:
@@ -513,7 +513,8 @@ class ResearchStore:
                         for source in packet["sources"]]
                 if spec.get("packet_hash") != evidence_packet_hash(packet) or spec["evidence"] != pins:
                     raise ValueError("The selected evidence packet differs from the owned stage.")
-                if validate_review(json.loads(record[10]), run["assessment"], packet, review["checked_at"]) != review:
+                if validate_stage_review(json.loads(record[10]), run["assessment"], packet,
+                                         review["checked_at"], spec["schema"]) != review:
                     raise ValueError("The evidence decision changed after validation.")
             elif review["passages"] or review["sources"] or any(item["state"] == "covered" for item in review["items"]):
                 raise ValueError("Source acceptance requires an owned model stage.")
