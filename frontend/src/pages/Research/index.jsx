@@ -11,15 +11,15 @@ export default function Research({ chatId }) {
       <div className="page-heading">
         <div>
           <h1>Research</h1>
-          <p>Assess requirements and review saved evidence.</p>
+          <p>Write an unreviewed draft from assessed saved evidence.</p>
         </div>
         <span className="badge neutral">Preview</span>
       </div>
       <p className="page-note">
-        This preview assesses your request, then reviews a bounded selection of
-        saved evidence with an installed local model. It makes no hosted
-        searches or personal-memory recall, and produces no written or finally
-        reviewed answer.
+        This preview assesses your requirements, reviews a bounded selection of
+        saved evidence, and writes a cited draft with an installed local model.
+        It makes no hosted searches or personal-memory recall. The draft has not
+        received final review.
       </p>
       <form
         className="card entry-form research-form"
@@ -29,7 +29,7 @@ export default function Research({ chatId }) {
             void data.submit(data.request.trim());
         }}
       >
-        <h2>Review saved evidence</h2>
+        <h2>Write saved-evidence draft</h2>
         <label>
           Research request
           <textarea
@@ -43,8 +43,8 @@ export default function Research({ chatId }) {
         </label>
         <p className="form-note">
           The current conversation's sharing restrictions are retained. Material
-          ambiguity stops the run for clarification. Answer writing and final
-          review are later steps.
+          ambiguity stops the run for clarification. Missing or unsuitable
+          evidence remains explicit in the draft. Final review is a later step.
         </p>
         <div className="research-actions">
           <button
@@ -52,7 +52,7 @@ export default function Research({ chatId }) {
             disabled={!data.request.trim() || data.formLocked}
             aria-busy={data.busy === "submit" || data.working}
           >
-            Review saved evidence
+            Write saved-evidence draft
           </button>
         </div>
         {data.working && (
