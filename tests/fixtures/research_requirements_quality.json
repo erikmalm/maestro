@@ -1,0 +1,425 @@
+{
+  "version": 1,
+  "cases": [
+    {
+      "id": "multiple_metrics_global_restrictions",
+      "request": "Research Novo Nordisk revenue and operating profit in DKK for FY2025 using annual reports only; do not search.",
+      "decision": "ready",
+      "items": [
+        {
+          "subject": "Novo Nordisk",
+          "criterion": "revenue",
+          "period": "FY2025",
+          "currency": "DKK"
+        },
+        {
+          "subject": "Novo Nordisk",
+          "criterion": "operating profit",
+          "period": "FY2025",
+          "currency": "DKK"
+        }
+      ],
+      "constraints": [
+        {
+          "kind": "source",
+          "strength": "require",
+          "quote": "annual reports only",
+          "applies_to": [
+            0,
+            1
+          ]
+        },
+        {
+          "kind": "search",
+          "strength": "forbid",
+          "quote": "do not search",
+          "applies_to": [
+            0,
+            1
+          ]
+        }
+      ],
+      "clarifications": []
+    },
+    {
+      "id": "distinct_subjects_and_qualifiers",
+      "request": "Compare Acme revenue for FY2024 in millions of USD with Boreal operating profit for FY2025 in billions of SEK.",
+      "decision": "ready",
+      "items": [
+        {
+          "subject": "Acme",
+          "criterion": "revenue",
+          "period": "FY2024",
+          "currency": "USD",
+          "unit": "millions"
+        },
+        {
+          "subject": "Boreal",
+          "criterion": "operating profit",
+          "period": "FY2025",
+          "currency": "SEK",
+          "unit": "billions"
+        }
+      ],
+      "constraints": [],
+      "clarifications": []
+    },
+    {
+      "id": "same_subject_distinct_periods",
+      "request": "Compare Acme revenue for FY2024 in USD with Acme revenue for FY2025 in SEK.",
+      "decision": "ready",
+      "items": [
+        {
+          "subject": "Acme",
+          "criterion": "revenue",
+          "period": "FY2024",
+          "currency": "USD"
+        },
+        {
+          "subject": "Acme",
+          "criterion": "revenue",
+          "period": "FY2025",
+          "currency": "SEK"
+        }
+      ],
+      "constraints": [],
+      "clarifications": []
+    },
+    {
+      "id": "item_scoped_sources_global_search",
+      "request": "Compare Acme revenue and Boreal revenue for FY2025 in USD. For Acme, use annual reports only. For Boreal, prefer quarterly filings. Do not search for either company.",
+      "decision": "ready",
+      "items": [
+        {
+          "subject": "Acme",
+          "criterion": "revenue",
+          "period": "FY2025",
+          "currency": "USD"
+        },
+        {
+          "subject": "Boreal",
+          "criterion": "revenue",
+          "period": "FY2025",
+          "currency": "USD"
+        }
+      ],
+      "constraints": [
+        {
+          "kind": "source",
+          "strength": "require",
+          "quote": "annual reports only",
+          "applies_to": [
+            0
+          ]
+        },
+        {
+          "kind": "source",
+          "strength": "prefer",
+          "quote": "quarterly filings",
+          "applies_to": [
+            1
+          ]
+        },
+        {
+          "kind": "search",
+          "strength": "forbid",
+          "quote": "Do not search",
+          "applies_to": [
+            0,
+            1
+          ]
+        }
+      ],
+      "clarifications": []
+    },
+    {
+      "id": "unrestricted_explicit_metric",
+      "request": "Research Acme revenue for FY2025 in millions of USD.",
+      "decision": "ready",
+      "items": [
+        {
+          "subject": "Acme",
+          "criterion": "revenue",
+          "period": "FY2025",
+          "currency": "USD",
+          "unit": "millions"
+        }
+      ],
+      "constraints": [],
+      "clarifications": []
+    },
+    {
+      "id": "ambiguous_security_and_currency",
+      "request": "Research QZX stock price in kr.",
+      "decision": "clarify",
+      "items": [
+        {
+          "subject": "QZX",
+          "criterion": "stock price",
+          "period": null,
+          "currency": "kr"
+        }
+      ],
+      "constraints": [],
+      "clarifications": [
+        {
+          "kind": "security",
+          "quote": "QZX"
+        },
+        {
+          "kind": "currency",
+          "quote": "kr"
+        }
+      ]
+    },
+    {
+      "id": "unresolved_single_reporting_period",
+      "request": "Research Acme revenue in USD for FY2024/FY2025; I need one reporting period, but the intended year is unresolved.",
+      "decision": "clarify",
+      "items": [
+        {
+          "subject": "Acme",
+          "criterion": "revenue",
+          "period": "FY2024/FY2025",
+          "currency": "USD"
+        }
+      ],
+      "constraints": [],
+      "clarifications": [
+        {
+          "kind": "period",
+          "quote": "FY2024/FY2025"
+        }
+      ],
+      "optional_clarifications": [
+        {
+          "kind": "subject",
+          "quote": "Acme"
+        }
+      ]
+    },
+    {
+      "id": "single_novo",
+      "request": "Research Novo Nordisk revenue in DKK for FY2025 using annual reports only; do not search.",
+      "decision": "ready",
+      "items": [
+        {
+          "subject": "Novo Nordisk",
+          "criterion": "revenue",
+          "period": "FY2025",
+          "currency": "DKK"
+        }
+      ],
+      "constraints": [
+        {
+          "kind": "source",
+          "strength": "require",
+          "quote": "annual reports only",
+          "applies_to": [
+            0
+          ]
+        },
+        {
+          "kind": "search",
+          "strength": "forbid",
+          "quote": "do not search",
+          "applies_to": [
+            0
+          ]
+        }
+      ],
+      "clarifications": []
+    },
+    {
+      "id": "single_solvena_exclusive_filings_no_browse",
+      "request": "Research Solvena revenue in EUR for FY2024 from annual filings exclusively; do not browse the web.",
+      "decision": "ready",
+      "items": [
+        {
+          "subject": "Solvena",
+          "criterion": "revenue",
+          "period": "FY2024",
+          "currency": "EUR"
+        }
+      ],
+      "constraints": [
+        {
+          "kind": "source",
+          "strength": "require",
+          "quote": "annual filings exclusively",
+          "applies_to": [
+            0
+          ]
+        },
+        {
+          "kind": "search",
+          "strength": "forbid",
+          "quote": "do not browse the web",
+          "applies_to": [
+            0
+          ]
+        }
+      ],
+      "clarifications": []
+    },
+    {
+      "id": "single_atlas_without_internet_searches",
+      "request": "Assess Atlas operating income in SEK for FY2023 using issuer annual reports only; without internet searches.",
+      "decision": "ready",
+      "allow_subject_clarification": "Atlas",
+      "items": [
+        {
+          "subject": "Atlas",
+          "criterion": "operating income",
+          "period": "FY2023",
+          "currency": "SEK"
+        }
+      ],
+      "constraints": [
+        {
+          "kind": "source",
+          "strength": "require",
+          "quote": "issuer annual reports only",
+          "applies_to": [
+            0
+          ]
+        },
+        {
+          "kind": "search",
+          "strength": "forbid",
+          "quote": "without internet searches",
+          "applies_to": [
+            0
+          ]
+        }
+      ],
+      "clarifications": []
+    },
+    {
+      "id": "single_apple_preferred_filings_no_hosted_searches",
+      "request": "Research Apple revenue in USD for FY2024; prefer official company filings; no hosted searches.",
+      "decision": "ready",
+      "items": [
+        {
+          "subject": "Apple",
+          "criterion": "revenue",
+          "period": "FY2024",
+          "currency": "USD"
+        }
+      ],
+      "constraints": [
+        {
+          "kind": "source",
+          "strength": "prefer",
+          "quote": "official company filings",
+          "applies_to": [
+            0
+          ]
+        },
+        {
+          "kind": "search",
+          "strength": "forbid",
+          "quote": "no hosted searches",
+          "applies_to": [
+            0
+          ]
+        }
+      ],
+      "clarifications": []
+    },
+    {
+      "id": "ambiguous_abc_relative_period_and_currency",
+      "request": "Assess ABC stock price last quarter in kr.",
+      "decision": "clarify",
+      "items": [
+        {
+          "subject": "ABC",
+          "criterion": "stock price",
+          "period": "last quarter",
+          "currency": "kr"
+        }
+      ],
+      "constraints": [],
+      "clarifications": [
+        {
+          "kind": "security",
+          "quote": "ABC"
+        },
+        {
+          "kind": "currency",
+          "quote": "kr"
+        }
+      ],
+      "optional_clarifications": [
+        {
+          "kind": "period",
+          "quote": "last quarter"
+        }
+      ]
+    },
+    {
+      "id": "single_acme_required_reports_no_search",
+      "request": "Research ACME revenue in USD for FY2025 using annual reports only; do not search.",
+      "decision": "ready",
+      "items": [
+        {
+          "subject": "ACME",
+          "criterion": "revenue",
+          "period": "FY2025",
+          "currency": "USD"
+        }
+      ],
+      "constraints": [
+        {
+          "kind": "source",
+          "strength": "require",
+          "quote": "annual reports only",
+          "applies_to": [
+            0
+          ]
+        },
+        {
+          "kind": "search",
+          "strength": "forbid",
+          "quote": "do not search",
+          "applies_to": [
+            0
+          ]
+        }
+      ],
+      "clarifications": []
+    },
+    {
+      "id": "source_exclusion_is_not_search_ban",
+      "request": "Research Acme revenue for FY2025 in USD; prefer annual reports; exclude blog posts.",
+      "decision": "ready",
+      "items": [
+        {
+          "subject": "Acme",
+          "criterion": "revenue",
+          "period": "FY2025",
+          "currency": "USD"
+        }
+      ],
+      "constraints": [
+        {
+          "kind": "source",
+          "strength": "prefer",
+          "quote": "annual reports",
+          "applies_to": [
+            0
+          ]
+        },
+        {
+          "kind": "source",
+          "strength": "forbid",
+          "quote": "blog posts",
+          "applies_to": [
+            0
+          ]
+        }
+      ],
+      "clarifications": []
+    }
+  ]
+}

@@ -102,6 +102,41 @@
   margin: 0 0 12px;
   font-size: 15px;
 }
+.research-section h4 {
+  margin: 18px 0 10px;
+  font-size: 14px;
+}
+.research-assessment-list,
+.research-clarifications ol {
+  padding-left: 22px;
+  display: grid;
+  gap: 14px;
+  margin: 12px 0;
+  font-size: 13px;
+  line-height: 1.6;
+}
+.research-assessment-list ul {
+  padding-left: 20px;
+  margin-top: 6px;
+}
+.research-assessment-list .research-metadata {
+  margin: 8px 0 0;
+}
+.research-clarifications {
+  padding: 1px 16px 12px;
+  margin: 16px 0;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: #f4f2fb;
+  font-size: 13px;
+  line-height: 1.6;
+}
+.research-clarifications blockquote {
+  border-left: 3px solid var(--line);
+  padding-left: 12px;
+  margin: 8px 0;
+  white-space: pre-wrap;
+}
 .research-section > p {
   font-size: 13px;
   line-height: 1.6;

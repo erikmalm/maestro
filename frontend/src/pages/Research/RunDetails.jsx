@@ -1,4 +1,5 @@
 import { sourceDate } from "../Evidence/useEvidence";
+import Assessment from "./Assessment";
 
 const number = (value) =>
   typeof value === "number" && Number.isFinite(value)
@@ -10,6 +11,7 @@ export const stateLabel = (state) =>
     queued: "Queued",
     running: "Running",
     partial: "Partial — no reviewed answer",
+    clarification: "Clarification needed — no reviewed answer",
     cancelled: "Cancelled",
     interrupted: "Interrupted",
     failed: "Failed",
@@ -24,6 +26,7 @@ const lookupLabels = {
 };
 
 export default function RunDetails({ run, busy, onCancel, onDelete }) {
+  const requirements = run.workflow === "requirements";
   const result = run.result;
   const candidates = result?.candidates || [];
   return (
@@ -60,10 +63,12 @@ export default function RunDetails({ run, busy, onCancel, onDelete }) {
           <dt>Request</dt>
           <dd className="research-request">{run.request}</dd>
         </div>
-        <div>
-          <dt>Saved-evidence keywords</dt>
-          <dd>{run.query || "No keywords — bounded saved inventory"}</dd>
-        </div>
+        {!requirements && (
+          <div>
+            <dt>Saved-evidence keywords</dt>
+            <dd>{run.query || "No keywords — bounded saved inventory"}</dd>
+          </div>
+        )}
         <div>
           <dt>Run ID</dt>
           <dd>
@@ -75,6 +80,7 @@ export default function RunDetails({ run, busy, onCancel, onDelete }) {
           <dd>{date(run.updated_at)}</dd>
         </div>
       </dl>
+      {requirements && <Assessment assessment={run.assessment} />}
       <section
         aria-label="Captured sharing permissions"
         className="research-section"
@@ -128,79 +134,84 @@ export default function RunDetails({ run, busy, onCancel, onDelete }) {
           <p className="form-note">No recorded activity is available yet.</p>
         )}
       </section>
-      <section aria-label="Saved-version receipt" className="research-section">
-        <h3>Saved-version receipt</h3>
-        {result ? (
-          <>
-            <p>
-              {lookupLabels[result.lookup_state] ||
-                "Lookup outcome is unavailable."}
-            </p>
-            {result.summary && <p className="form-note">{result.summary}</p>}
-            <p>
-              {number(candidates.length)} available saved-version references.
-            </p>
-            {result.references_unavailable > 0 && (
-              <p className="form-note">
-                {number(result.references_unavailable)} previously recorded{" "}
-                {result.references_unavailable === 1
-                  ? "reference is"
-                  : "references are"}{" "}
-                no longer available.
+      {!requirements && (
+        <section
+          aria-label="Saved-version receipt"
+          className="research-section"
+        >
+          <h3>Saved-version receipt</h3>
+          {result ? (
+            <>
+              <p>
+                {lookupLabels[result.lookup_state] ||
+                  "Lookup outcome is unavailable."}
               </p>
-            )}
-            {(result.search_limited || result.skipped_count > 0) && (
-              <p className="form-note">
-                Results may be incomplete. {number(result.skipped_count)}{" "}
-                records were skipped.
+              {result.summary && <p className="form-note">{result.summary}</p>}
+              <p>
+                {number(candidates.length)} available saved-version references.
               </p>
-            )}
-            {candidates.map((candidate) => (
-              <details
-                className="research-candidate"
-                key={candidate.capture_id}
-              >
-                <summary>
-                  Saved version <code>{candidate.capture_id}</code>
-                </summary>
-                <dl className="research-metadata">
-                  <div>
-                    <dt>Retrieved</dt>
-                    <dd>{date(candidate.retrieved_at)}</dd>
-                  </div>
-                  <div>
-                    <dt>Reuse-window flag at lookup</dt>
-                    <dd>
-                      {candidate.stale
-                        ? "Outside reuse window"
-                        : "Within reuse window"}
-                    </dd>
-                  </div>
-                  <div>
-                    <dt>Content hash</dt>
-                    <dd>
-                      <code>{candidate.content_hash}</code>
-                    </dd>
-                  </div>
-                  <div>
-                    <dt>Manifest hash</dt>
-                    <dd>
-                      <code>{candidate.manifest_hash}</code>
-                    </dd>
-                  </div>
-                </dl>
-              </details>
-            ))}
-            <p className="form-note">
-              These are saved-version candidates, not accepted evidence.
-              Retrieval time and the reuse-window flag do not establish that
-              facts are current.
-            </p>
-          </>
-        ) : (
-          <p className="form-note">No lookup receipt has been recorded.</p>
-        )}
-      </section>
+              {result.references_unavailable > 0 && (
+                <p className="form-note">
+                  {number(result.references_unavailable)} previously recorded{" "}
+                  {result.references_unavailable === 1
+                    ? "reference is"
+                    : "references are"}{" "}
+                  no longer available.
+                </p>
+              )}
+              {(result.search_limited || result.skipped_count > 0) && (
+                <p className="form-note">
+                  Results may be incomplete. {number(result.skipped_count)}{" "}
+                  records were skipped.
+                </p>
+              )}
+              {candidates.map((candidate) => (
+                <details
+                  className="research-candidate"
+                  key={candidate.capture_id}
+                >
+                  <summary>
+                    Saved version <code>{candidate.capture_id}</code>
+                  </summary>
+                  <dl className="research-metadata">
+                    <div>
+                      <dt>Retrieved</dt>
+                      <dd>{date(candidate.retrieved_at)}</dd>
+                    </div>
+                    <div>
+                      <dt>Reuse-window flag at lookup</dt>
+                      <dd>
+                        {candidate.stale
+                          ? "Outside reuse window"
+                          : "Within reuse window"}
+                      </dd>
+                    </div>
+                    <div>
+                      <dt>Content hash</dt>
+                      <dd>
+                        <code>{candidate.content_hash}</code>
+                      </dd>
+                    </div>
+                    <div>
+                      <dt>Manifest hash</dt>
+                      <dd>
+                        <code>{candidate.manifest_hash}</code>
+                      </dd>
+                    </div>
+                  </dl>
+                </details>
+              ))}
+              <p className="form-note">
+                These are saved-version candidates, not accepted evidence.
+                Retrieval time and the reuse-window flag do not establish that
+                facts are current.
+              </p>
+            </>
+          ) : (
+            <p className="form-note">No lookup receipt has been recorded.</p>
+          )}
+        </section>
+      )}
       {run.budget && (
         <section aria-label="Shared allowance" className="research-section">
           <h3>Shared allowance</h3>

@@ -8,29 +8,29 @@ export { researchPageRequested } from "./useResearchRuns";
 export default function Research({ chatId }) {
   const data = useResearchRuns(chatId);
   const [request, setRequest] = useState("");
-  const [query, setQuery] = useState("");
   return (
     <main className="page-content research-page">
       <div className="page-heading">
         <div>
           <h1>Research</h1>
-          <p>Preview recorded requests and saved-evidence lookup.</p>
+          <p>Record the scope of an explicit research request.</p>
         </div>
         <span className="badge neutral">Preview</span>
       </div>
       <p className="page-note">
-        This preview records your request and inspects saved evidence. It makes
-        no model calls or hosted searches and produces no reviewed answer.
+        Assessment uses one installed local model call, with no hosted searches
+        or personal-memory recall. It records requirements and clarification
+        questions, and produces no reviewed answer.
       </p>
       <form
         className="card entry-form research-form"
         onSubmit={(event) => {
           event.preventDefault();
           if (request.trim() && !data.pendingId)
-            void data.submit(request.trim(), query.trim());
+            void data.submit(request.trim());
         }}
       >
-        <h2>Inspect saved evidence</h2>
+        <h2>Assess research requirements</h2>
         <label>
           Research request
           <textarea
@@ -42,28 +42,17 @@ export default function Research({ chatId }) {
             onChange={(event) => setRequest(event.target.value)}
           />
         </label>
-        <label>
-          Saved-evidence keywords (optional)
-          <input
-            maxLength={512}
-            value={query}
-            disabled={Boolean(data.busy || data.pendingId)}
-            onChange={(event) => setQuery(event.target.value)}
-          />
-        </label>
         <p className="form-note">
-          Leave keywords empty to inspect a bounded saved inventory. The current
-          conversation's sharing restrictions are retained; personal memory is
-          not recalled.
+          The current conversation's sharing restrictions are retained. Evidence
+          review, answer writing and final review are later steps; this
+          assessment does not perform them.
         </p>
         <div className="research-actions">
           <button
             className="button primary"
             disabled={!request.trim() || Boolean(data.busy || data.pendingId)}
           >
-            {data.busy === "submit"
-              ? "Recording request…"
-              : "Inspect saved evidence"}
+            {data.busy === "submit" ? "Recording request…" : "Assess request"}
           </button>
         </div>
         {data.pendingId && !data.busy && (

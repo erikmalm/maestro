@@ -274,6 +274,8 @@ class ResearchInput(StrictModel):
     request: str = Field(min_length=1, max_length=32000, strict=True)
     query: str = Field(default="", max_length=512, strict=True)
     chat_id: str | None = Field(default=None, min_length=1, max_length=100, strict=True)
+    # Lookup remains the compatibility default for already-open clients (#31).
+    workflow: Literal["lookup", "requirements"] = "lookup"
 
 
 _context_lock = threading.RLock()
@@ -770,6 +772,13 @@ def safe_research_run(run, *, secrets):
     # that the browser reconstructs from the response.
     safe_private_content(run["request"], run["query"], run["submission_id"], run["chat_id"] or "",
                          json.dumps(run, ensure_ascii=False), secrets=secrets)
+    if run.get("workflow") == "requirements" or run.get("assessment") is not None:
+        from backend.research_requirements import validate_saved_assessment
+        from backend.research_stages import safe_stage_content
+        if run.get("assessment") is not None:
+            validate_saved_assessment(run["assessment"], run["request"])
+        safe_stage_content([run, json.dumps(run, ensure_ascii=False, allow_nan=False)],
+                           {"protocol": "ollama"}, secrets=secrets)
     return run
 
 
@@ -824,13 +833,55 @@ def research_view(run):
         raise HTTPException(404, "That research run is unavailable.") from None
 
 
+def requirements_model(state=None):
+    """Use the selected local connection without testing or downloading models."""
+    state = provider().read_state() if state is None else state
+    config = state["config"]
+    model = config.get("orchestrator_model") or config.get("model")
+    if config.get("protocol") != "ollama" or not model or model not in state.get("models", []):
+        raise ValueError("Choose an installed Local Ollama model in Settings and test the connection before research.")
+    return model
+
+
+def execute_requirements(run, token, store):
+    from backend.research_requirements import SCHEMA, INSTRUCTIONS, MESSAGE, validate_assessment
+    from backend.research_stages import safe_stage_content
+    try:
+        operation_secrets = source_secrets()
+        safe_stage_content([run["request"], json.dumps(run["request"])],
+                           {"protocol": "ollama"}, secrets=operation_secrets)
+        # Select the model under the same writer lock that captures its stage
+        # settings, so a concurrent Settings save cannot bind an old selection
+        # to the new connection configuration.
+        with provider().transaction(with_db=True) as (state, db):
+            stage = store.prepare_stage(run["id"], token, "requirements", model=requirements_model(state),
+                                        schema=SCHEMA, assignment="Extract only the requested research requirements; do not answer them.",
+                                        permitted_actions=["emit_requirements", "report_gap"], seconds=90, db=db)
+        instructions = (INSTRUCTIONS + "\nServer request time: " + run["created_at"]
+                        + ". Server timezone: " + TIMEZONE.key + ".")
+        provider().generate_research_stage(stage, instructions, [{"role": "user", "content": MESSAGE}],
+                                           max_output_tokens=4096, output_validator=validate_assessment)
+        store.finish_requirements(run["id"], token, stage, secrets=(*operation_secrets, *source_secrets()))
+    except Exception:
+        # Invalid/truncated/late model output is a controlled terminal outcome;
+        # it cannot become an ordinary answer or launch dependent work.
+        store.fail(run["id"], token, "requirements_failed")
+
+
 def execute_research_run(run_id):
-    """One in-process local lookup; recovery never resubmits this callback."""
+    """One explicitly selected workflow; recovery never resubmits it."""
     store = research_store()
-    claimed = store.claim(run_id)
+    try:
+        workflow = store.get(run_id).get("workflow", "lookup")
+    except (KeyError, ValueError):
+        return
+    claimed = store.claim(run_id, lookup=workflow == "lookup")
     if claimed is None:
         return
     run, token = claimed
+    if workflow == "requirements":
+        execute_requirements(run, token, store)
+        return
     try:
         safe_private_content(run["request"], run["query"], secrets=source_secrets())
         packet = search_context_candidates(ContextCandidateSearch(query=run["query"], limit=20))
@@ -854,16 +905,25 @@ def execute_research_run(run_id):
 @app.post("/api/research/runs", status_code=202)
 def create_research_run(entry: ResearchInput, background_tasks: BackgroundTasks):
     invalid = "Check the research request and remove credentials before saving."
+    if entry.workflow == "requirements" and entry.query:
+        raise HTTPException(422, "Requirements assessment does not use saved-evidence keywords.")
     try:
         operation_secrets = source_secrets()
         safe_private_content(entry.request, entry.query, entry.submission_id, entry.chat_id or "",
                              secrets=operation_secrets)
+        if entry.workflow == "requirements":
+            from backend.research_stages import safe_stage_content
+            safe_stage_content([entry.request, entry.query, entry.submission_id, entry.chat_id or "",
+                                json.dumps(entry.model_dump(), ensure_ascii=False, allow_nan=False)],
+                               {"protocol": "ollama"}, secrets=operation_secrets)
     except (OSError, sqlite3.Error, ValueError, TypeError, UnicodeError, RuntimeError):
         raise HTTPException(422, invalid) from None
     with conflict_errors(), workspace_transaction(with_db=True) as (state, db):
         permissions = research_permissions(state, entry.chat_id)
         run, created = research_store().create(entry.submission_id, entry.request, entry.query, entry.chat_id,
-                                               permissions, research_budget(state), db)
+                                               permissions, research_budget(state), db, workflow=entry.workflow)
+        if created and entry.workflow == "requirements":
+            requirements_model()
         try:
             safe_research_run(run, secrets=(*operation_secrets, *source_secrets()))
         except (OSError, sqlite3.Error, ValueError, KeyError, TypeError, UnicodeError, RuntimeError):

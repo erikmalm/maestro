@@ -168,13 +168,14 @@ export default function useResearchRuns(chatId) {
     };
   }, []);
 
-  async function submit(request, query) {
+  async function submit(request) {
     if (writing.current) return;
     if (pending.current && !pendingBody.current) return;
     const body = pendingBody.current || {
       submission_id: crypto.randomUUID().replaceAll("-", ""),
       request,
-      query,
+      query: "",
+      workflow: "requirements",
       chat_id: chatId || null,
     };
     pendingBody.current = body;
