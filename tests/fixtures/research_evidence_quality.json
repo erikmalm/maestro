@@ -1,5 +1,5 @@
 {
-  "version": 1,
+  "version": 2,
   "description": "Public synthetic Acme examples only; no real company facts or personal content.",
   "cases": [
     {
@@ -59,6 +59,33 @@
         "criterion": "revenue", "period": "FY2025", "currency": "USD", "unit": null,
         "states": ["conflicting"], "minimum_sources": 2, "minimum_support_offset": 0,
         "support_fragments": [["FY2025", "USD", "42"], ["FY2025", "USD", "55"]]
+      }
+    },
+    {
+      "id": "partial_revenue_only",
+      "request": "Assess Acme revenue and operating profit in USD for FY2025.",
+      "sources": [
+        {
+          "title": "Synthetic Acme FY2025 disclosure",
+          "url": "https://reports.example.org/acme/historical",
+          "retrieved_at": "2026-01-10T12:00:00+00:00",
+          "padding": {"text": "Unrelated public synthetic background. ", "repeat": 70},
+          "quote": "Acme revenue for FY2025 was USD 42 million."
+        }
+      ],
+      "expected": {
+        "items": [
+          {
+            "criterion": "revenue", "period": "FY2025", "currency": "USD", "unit": null,
+            "states": ["covered"], "minimum_sources": 1, "minimum_support_offset": 1200,
+            "support_fragments": [["FY2025", "USD", "42"]]
+          },
+          {
+            "criterion": "operating profit", "period": "FY2025", "currency": "USD", "unit": null,
+            "states": ["missing"], "minimum_sources": 0, "minimum_support_offset": 0,
+            "support_fragments": []
+          }
+        ]
       }
     }
   ]

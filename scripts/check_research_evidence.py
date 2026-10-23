@@ -54,43 +54,64 @@ def source_text(source):
 
 def load_cases(path=CORPUS):
     corpus = json.loads(Path(path).read_text(encoding="utf-8"))
-    require(type(corpus.get("version")) is int and corpus["version"] == 1, "Unsupported evidence corpus version")
+    require(type(corpus.get("version")) is int and corpus["version"] in (1, 2), "Unsupported evidence corpus version")
     cases = corpus["cases"]
     require(bool(cases) and len({case["id"] for case in cases}) == len(cases), "Fixture IDs must be unique")
     for case in cases:
         require(re.fullmatch(r"[a-z][a-z0-9_]{0,63}", case["id"]) is not None, "Invalid fixture ID")
         require(1 <= len(case["sources"]) <= 3, "Invalid fixture source count")
+        require(corpus["version"] == 2 or "items" not in case["expected"], "Multiple expected items require corpus version 2")
+        expected_items(case)
         for source in case["sources"]:
             require(urlsplit(source["url"]).hostname == "reports.example.org", "Only synthetic fixture origins are allowed")
             source_text(source)
     return cases
 
 
+def expected_items(case):
+    """Version 1's single expectation remains strict; version 2 can list items."""
+    expected = case["expected"]
+    items = expected.get("items", [expected])
+    require(type(items) is list and 1 <= len(items) <= 16, "Invalid expected item count")
+    require(len({item["criterion"] for item in items}) == len(items), "Expected metrics must remain distinct")
+    return items
+
+
 def check_qualifiers(case, assessment):
     """Allow explicit current scope in equivalent structured qualifier fields."""
-    require(assessment["decision"] == "ready" and len(assessment["items"]) == 1, "Expected one ready mandatory item")
-    item, expected = assessment["items"][0], case["expected"]
+    expectations = expected_items(case)
+    require(assessment["decision"] == "ready" and len(assessment["items"]) == len(expectations),
+            "Expected every ready mandatory item exactly once")
     names = {subject["id"]: subject["name"] for subject in assessment["subjects"]}
-    require(any(names[identity] == "Acme" for identity in item["subject_ids"]), "Requested subject was not retained")
-    require(expected["criterion"] in item["criterion"], "Requested metric was not retained")
-    current = expected.get("current_qualifier")
+    matched, seen = [], set()
+    for expected in expectations:
+        candidates = [item for item in assessment["items"] if expected["criterion"] in item["criterion"]
+                      and not any(other["criterion"] in item["criterion"]
+                                  for other in expectations if other is not expected)]
+        require(len(candidates) == 1 and candidates[0]["id"] not in seen, "Expected distinct requested metrics on separate item IDs")
+        item = candidates[0]
+        seen.add(item["id"])
+        require(any(names[identity] == "Acme" for identity in item["subject_ids"]), "Requested subject was not retained")
+        current = expected.get("current_qualifier")
 
-    def has_current(value):
-        return isinstance(value, str) and re.search(r"(?<!\w)" + re.escape(current) + r"(?!\w)", value) is not None
+        def has_current(value):
+            return isinstance(value, str) and re.search(r"(?<!\w)" + re.escape(current) + r"(?!\w)", value) is not None
 
-    for field in ("period", "currency", "unit"):
-        wanted, actual = expected[field], item[field]
-        if field == "period" and current and actual is not None:
-            require(has_current(actual), "Requested qualifiers were changed")
-            continue
-        require(actual is None if wanted is None else isinstance(actual, str) and wanted in actual,
-                "Requested qualifiers were changed")
-    if current:
-        preserved = has_current(item["period"]) or has_current(item["freshness"]) or any(
-            constraint["kind"] == "freshness" and constraint["strength"] == "require"
-            and (not constraint["item_ids"] or item["id"] in constraint["item_ids"])
-            and has_current(constraint["criterion"]) for constraint in assessment["constraints"])
-        require(preserved, "The explicit current qualifier was omitted")
+        for field in ("period", "currency", "unit"):
+            wanted, actual = expected[field], item[field]
+            if field == "period" and current and actual is not None:
+                require(has_current(actual), "Requested qualifiers were changed")
+                continue
+            require(actual is None if wanted is None else isinstance(actual, str) and wanted in actual,
+                    "Requested qualifiers were changed")
+        if current:
+            preserved = has_current(item["period"]) or has_current(item["freshness"]) or any(
+                constraint["kind"] == "freshness" and constraint["strength"] == "require"
+                and (not constraint["item_ids"] or item["id"] in constraint["item_ids"])
+                and has_current(constraint["criterion"]) for constraint in assessment["constraints"])
+            require(preserved, "The explicit current qualifier was omitted")
+        matched.append((expected, item))
+    return matched
 
 
 def check_run(case, run, captured, loader):
@@ -103,33 +124,34 @@ def check_run(case, run, captured, loader):
         validate_packet(packet, loader)
     except (ValueError, KeyError, TypeError):
         raise AssertionError("Missing or noncanonical assessment, review or saved-source pins") from None
-    check_qualifiers(case, assessment)
-    item, expected = assessment["items"][0], case["expected"]
-    require(len(review["items"]) == 1 and review["items"][0]["item_id"] == item["id"], "Requirement coverage changed")
-    checked = review["items"][0]
-    require(checked["state"] in expected["states"], "Unexpected semantic evidence state")
+    matched = check_qualifiers(case, assessment)
+    reviewed = {item["item_id"]: item for item in review["items"]}
+    require(len(review["items"]) == len(matched) and set(reviewed) == {item["id"] for _, item in matched}, "Requirement coverage changed")
     pins = {source["capture_id"]: source for source in captured}
     selected = {source["id"]: source for source in review["sources"]}
     for source in selected.values():
         original = pins.get(source["capture_id"])
         require(original is not None and all(source[key] == original[key] for key in ("content_hash", "manifest_hash")),
                 "A selected source does not belong to this synthetic case")
-    supports = checked["supports"]
-    require(len({support["source_id"] for support in supports}) >= expected["minimum_sources"], "Too few distinct supporting sources")
-    for fragments in expected["support_fragments"]:
-        require(any(all(fragment in support["quote"] for fragment in fragments) for support in supports),
-                "Expected period/currency/value support was omitted")
-    for support in supports:
-        source = selected[support["source_id"]]
-        body = pins[source["capture_id"]]["content"]
-        require(body[support["start"]:support["end"]] == support["quote"], "Support offsets do not reconstruct the saved quote")
-    if expected["minimum_support_offset"]:
-        require(any(support["start"] > expected["minimum_support_offset"] for support in supports), "Relevant saved tail was not used")
-    if expected.get("old_observation"):
-        require(any(expected["old_observation"] in passage["text"] for passage in review["passages"]), "Old observation was not inspected")
-        require(checked["state"] != "covered", "Old observation was promoted to current coverage")
-        require(all(support["suitability"] != "suitable" and support["best_before"] is None for support in supports),
-                "Fresh origin verification was fabricated")
+    for expected, item in matched:
+        checked = reviewed[item["id"]]
+        require(checked["state"] in expected["states"], "Unexpected semantic evidence state")
+        supports = checked["supports"]
+        require(len({support["source_id"] for support in supports}) >= expected["minimum_sources"], "Too few distinct supporting sources")
+        for fragments in expected["support_fragments"]:
+            require(any(all(fragment in support["quote"] for fragment in fragments) for support in supports),
+                    "Expected period/currency/value support was omitted")
+        for support in supports:
+            source = selected[support["source_id"]]
+            body = pins[source["capture_id"]]["content"]
+            require(body[support["start"]:support["end"]] == support["quote"], "Support offsets do not reconstruct the saved quote")
+        if expected["minimum_support_offset"]:
+            require(any(support["start"] > expected["minimum_support_offset"] for support in supports), "Relevant saved tail was not used")
+        if expected.get("old_observation"):
+            require(any(expected["old_observation"] in passage["text"] for passage in review["passages"]), "Old observation was not inspected")
+            require(checked["state"] != "covered", "Old observation was promoted to current coverage")
+            require(all(support["suitability"] != "suitable" and support["best_before"] is None for support in supports),
+                    "Fresh origin verification was fabricated")
     consumed = run["budget"]["consumed"]
     require(consumed["model_calls"] == 2, "Expected exactly two local calls for the populated fixture")
     require(consumed["hosted_searches"] == 0, "Unexpected hosted usage")

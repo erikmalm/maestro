@@ -153,7 +153,7 @@ Requirements extraction also has a versioned [quality corpus](tests/fixtures/res
 
 This makes real local calls in a disposable workspace, with no existing workspace/credential reads, memory recall, evidence lookup or hosted search. It is excluded from normal unit tests. `--case` selects a single fixture; there are no automatic retries. An uncertain completion stops the run with exit code 2 and `recovery_required`; restart the original Ollama server before running further checks. A passing corpus establishes only those annotated cases for the selected model/configuration, not general semantic accuracy.
 
-Saved-evidence review has a separate opt-in local check using public synthetic saved sources, including historical/current dates and support beyond character 1,200:
+Saved-evidence review has a separate opt-in local check using public synthetic saved sources, including historical/current dates, conflicting figures, support beyond character 1,200 and two-item partial coverage with an explicit missing metric:
 
 ```powershell
 .\.venv\Scripts\python.exe scripts/check_research_evidence.py --model gpt-oss:20b --base-url http://127.0.0.1:11434 --report "$env:TEMP\maestro-evidence-quality.json"

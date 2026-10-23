@@ -204,6 +204,66 @@ class ResearchEvidenceApiTests(unittest.TestCase):
                 self.assert_no_review_output(run["id"])
                 self.assert_usage(run)
 
+    def test_observed_malformed_partial_coverage_json_is_not_repaired_or_persisted(self):
+        request = "Assess Acme revenue and operating profit in USD for FY2025."
+        quote = "Acme revenue for FY2025 was USD 42 million."
+        self.capture(quote)
+        snapshot = self.archive_fixture.source_snapshot()
+        self.raw["items"].append({**self.raw["items"][0], "id": "i2", "criterion": "operating profit"})
+        self.review_builder = lambda selected: {"version": 1, "items": [
+            {"item_id": "i1", "state": "covered", "reason": "Evidence found for Acme revenue FY2025 in USD.",
+             "supports": [self.support(selected, quote)]},
+            {"item_id": "i2", "state": "missing", "reason": "No evidence found for Acme operating profit FY2025.",
+             "supports": []}]}
+        # Actual malformed syntax from the public synthetic two-item trial:
+        # the second array element switches to an object key and lacks item_id.
+        malformed = ('{"version":1,"items":[{"item_id":"i1","state":"covered",'
+                     '"reason":"Evidence found for Acme revenue FY2025 in USD.",'
+                     '"supports":[{"passage_id":"p1","quote":"Acme revenue for FY2025 was USD 42 million.",'
+                     '"temporal_scope":"historical","period":"FY2025","observation_date":null}]},'
+                     '"i2":{"state":"missing","reason":"No evidence found for Acme operating profit FY2025.",'
+                     '"supports":[]}}}')
+        with self.assertRaises(json.JSONDecodeError):
+            json.loads(malformed)
+        inference = self.inference
+
+        def malformed_reply(config, path, payload, deadline):
+            reply = inference(config, path, payload, deadline)
+            if path == "/api/chat":
+                if "decision" in payload["format"]["properties"]:
+                    reply.update(prompt_eval_count=2395, eval_count=184)
+                else:
+                    # Inject raw text after the fixture's normal JSON encoder;
+                    # encoding a Python object cannot reproduce this failure.
+                    reply["message"]["content"] = malformed
+                    reply.update(prompt_eval_count=2230, eval_count=180)
+            return reply
+
+        with patch("backend.provider.background_network", side_effect=malformed_reply):
+            run = self.run_now(request=request)
+        self.assertEqual(run["state"], "failed")
+        self.assertIsNone(run["evidence_review"])
+        self.assertEqual(run["assessment"]["decision"], "ready")
+        self.assertEqual(run["assessment"]["completion_criterion"], request)
+        self.assertEqual([(item["id"], item["criterion"], item["period"], item["currency"])
+                          for item in run["assessment"]["items"]],
+                         [("i1", "revenue", "FY2025", "USD"), ("i2", "operating profit", "FY2025", "USD")])
+        self.assertNotIn("No evidence found for Acme operating profit FY2025.", json.dumps(run))
+        self.assertEqual(len(self.fixture.chats()), 2)
+        self.assert_no_review_output(run["id"])
+        consumed = run["budget"]["consumed"]
+        self.assertEqual((consumed["model_calls"], consumed["tokens"], consumed["hosted_searches"]), (2, 4989, 0))
+        self.assertTrue(all(value == 0 for value in run["budget"]["reserved"].values()))
+        ledger = backend.provider().read_state()["ledger"]
+        self.assertEqual([(entry["status"], entry["input_tokens"], entry["output_tokens"]) for entry in ledger],
+                         [("settled", 2395, 184), ("settled", 2230, 180)])
+        with closing(sqlite3.connect(backend.DATABASE)) as db:
+            self.assertEqual(db.execute("SELECT state,output FROM research_stages WHERE run_id=? AND kind='evidence_review'",
+                                        (run["id"],)).fetchall(), [("failed", None)])
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM research_finishing WHERE run_id=?", (run["id"],)).fetchone()[0], 0)
+        self.assertEqual(self.archive_fixture.source_snapshot(), snapshot)
+        self.fixture.assert_released()
+
     def test_source_delete_tamper_or_disable_after_metadata_blocks_review_dispatch(self):
         for action in ("delete", "tamper", "disable"):
             with self.subTest(action=action):

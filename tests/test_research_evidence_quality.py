@@ -11,27 +11,29 @@ import unittest
 from backend.research_evidence import validate_review
 from backend.research_passages import select_packet
 from backend.research_requirements import validate_assessment
-from scripts.check_research_evidence import check_qualifiers, check_run, load_cases, source_text
+from scripts.check_research_evidence import check_qualifiers, check_run, expected_items, load_cases, source_text
 
 
 CHECKED = "2026-10-23T12:00:00+00:00"
 
 
 def canonical(case, *, current_location="freshness"):
-    expected = case["expected"]
+    expectations = expected_items(case)
     raw_assessment = {
         "version": 1, "decision": "ready", "subjects": [
             {"id": "s1", "kind": "company", "name": "Acme", "identifiers": []}],
-        "items": [{"id": "i1", "subject_ids": ["s1"], "criterion": expected["criterion"],
-                   "period": expected["period"], "currency": expected["currency"], "unit": expected["unit"], "freshness": None}],
+        "items": [{"id": f"i{index}", "subject_ids": ["s1"], "criterion": expected["criterion"],
+                   "period": expected["period"], "currency": expected["currency"], "unit": expected["unit"], "freshness": None}
+                  for index, expected in enumerate(expectations, 1)],
         "constraints": [], "clarifications": [],
     }
-    current = expected.get("current_qualifier")
-    if current and current_location in ("period", "freshness"):
-        raw_assessment["items"][0][current_location] = current
-    elif current and current_location == "constraint":
-        raw_assessment["constraints"].append({"kind": "freshness", "strength": "require",
-                                               "item_ids": [], "criterion": current})
+    for item, expected in zip(raw_assessment["items"], expectations):
+        current = expected.get("current_qualifier")
+        if current and current_location in ("period", "freshness"):
+            item[current_location] = current
+        elif current and current_location == "constraint":
+            raw_assessment["constraints"].append({"kind": "freshness", "strength": "require",
+                                                   "item_ids": [], "criterion": current})
     assessment = validate_assessment(raw_assessment, case["request"])
     sources = []
     for number, fixture in enumerate(case["sources"], 1):
@@ -42,15 +44,20 @@ def canonical(case, *, current_location="freshness"):
             "published_at": None, "modified_at": None, "stale": fixture["retrieved_at"] != "runtime",
             "completeness": {"maestro_truncated": False, "full_page": False}, "content": body})
     packet = select_packet(sources, assessment, {"state": "ready", "search_limited": False, "skipped_count": 0})
-    supports = []
-    for fixture in case["sources"]:
-        quote = fixture["quote"]
-        passage = next(passage for passage in packet["passages"] if quote in passage["text"])
-        supports.append({"passage_id": passage["id"], "quote": quote,
-            "temporal_scope": "historical" if expected["period"] else "current",
-            "period": expected["period"], "observation_date": expected.get("old_observation")})
-    raw = {"version": 1, "items": [{"item_id": "i1", "state": "conflicting" if len(supports) > 1 else "covered",
-                                   "reason": "Synthetic public fixture assessment.", "supports": supports}]}
+    raw = {"version": 1, "items": []}
+    for item, expected in zip(assessment["items"], expectations):
+        supports = []
+        for fixture in case["sources"]:
+            quote = fixture["quote"]
+            if not expected.get("old_observation") and not any(
+                    all(fragment in quote for fragment in fragments) for fragments in expected["support_fragments"]):
+                continue
+            passage = next(passage for passage in packet["passages"] if quote in passage["text"])
+            supports.append({"passage_id": passage["id"], "quote": quote,
+                "temporal_scope": "historical" if expected["period"] else "current",
+                "period": expected["period"], "observation_date": expected.get("old_observation")})
+        raw["items"].append({"item_id": item["id"], "state": "covered" if expected.get("old_observation") else expected["states"][0],
+                             "reason": "Synthetic public fixture assessment.", "supports": supports})
     review = validate_review(raw, assessment, packet, CHECKED)
     amounts = {"model_calls": 2, "tokens": 100, "seconds": 1, "estimated_model_usd": 0, "hosted_searches": 0}
     run = {"workflow": "evidence_review", "state": "partial", "request": case["request"], "assessment": assessment,
@@ -86,7 +93,7 @@ class ResearchEvidenceQualityTests(unittest.TestCase):
                         self.assertFalse(ambient.exists())
 
     def test_versioned_public_synthetic_cases_and_independent_canonical_results_pass(self):
-        self.assertEqual(set(self.cases), {"historical_tail", "current_old_observation", "conflicting_fy2025_disclosures"})
+        self.assertEqual(set(self.cases), {"historical_tail", "current_old_observation", "conflicting_fy2025_disclosures", "partial_revenue_only"})
         for case in self.cases.values():
             with self.subTest(case=case["id"]):
                 run, sources, loader, _, _ = canonical(case)
@@ -141,6 +148,51 @@ class ResearchEvidenceQualityTests(unittest.TestCase):
             change(run)
             with self.subTest(change=change), self.assertRaises(AssertionError):
                 check_run(case, run, sources, loader)
+
+    def test_partial_coverage_requires_both_distinct_metrics_and_their_exact_item_states(self):
+        case = self.cases["partial_revenue_only"]
+        run, sources, loader, raw, packet = canonical(case)
+        self.assertEqual([item["state"] for item in run["evidence_review"]["items"]], ["covered", "missing"])
+        self.assertEqual(run["evidence_review"]["items"][1]["supports"], [])
+        check_run(case, run, sources, loader)
+        # IDs and order are model-selected, but every expected metric must bind
+        # to its own ID and keep the requested currency/reporting period.
+        run["assessment"]["items"].reverse()
+        run["evidence_review"] = validate_review(raw, run["assessment"], packet, CHECKED)
+        check_run(case, run, sources, loader)
+        for change in ("missing_item", "extra_item", "wrong_metric", "merged_metrics"):
+            with self.subTest(change=change):
+                changed, sources, loader, changed_raw, packet = canonical(case)
+                items = changed["assessment"]["items"]
+                if change == "missing_item":
+                    items.pop()
+                    changed_raw["items"].pop()
+                elif change == "extra_item":
+                    items.append({**deepcopy(items[-1]), "id": "i3", "criterion": "Assess"})
+                    changed_raw["items"].append({"item_id": "i3", "state": "missing", "reason": "Synthetic extra item.", "supports": []})
+                elif change == "wrong_metric":
+                    items[1]["criterion"] = "USD"
+                else:
+                    for item in items:
+                        item["criterion"] = "revenue and operating profit"
+                changed["evidence_review"] = validate_review(changed_raw, changed["assessment"], packet, CHECKED)
+                with self.assertRaisesRegex(AssertionError, "mandatory item|distinct requested metrics"):
+                    check_run(case, changed, sources, loader)
+        for change in ("covered_profit", "missing_revenue", "wrong_item_id"):
+            with self.subTest(change=change):
+                changed, sources, loader, changed_raw, packet = canonical(case)
+                if change == "covered_profit":
+                    changed_raw["items"][1].update(state="covered", supports=deepcopy(changed_raw["items"][0]["supports"]))
+                elif change == "missing_revenue":
+                    changed_raw["items"][0].update(state="missing", supports=[])
+                else:
+                    changed["evidence_review"]["items"][1]["item_id"] = "i3"
+                    with self.assertRaises(AssertionError):
+                        check_run(case, changed, sources, loader)
+                    continue
+                changed["evidence_review"] = validate_review(changed_raw, changed["assessment"], packet, CHECKED)
+                with self.assertRaisesRegex(AssertionError, "semantic evidence state"):
+                    check_run(case, changed, sources, loader)
 
 
 if __name__ == "__main__":
