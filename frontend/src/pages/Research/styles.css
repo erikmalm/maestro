@@ -137,6 +137,30 @@
   margin: 8px 0;
   white-space: pre-wrap;
 }
+.research-evidence-notice {
+  border-left: 3px solid var(--line);
+  padding-left: 12px;
+}
+.research-evidence-items h4 {
+  margin-top: 0;
+}
+.research-reviewed-passages {
+  list-style: none;
+  padding: 0;
+  display: grid;
+  gap: 18px;
+}
+.research-reviewed-passage blockquote {
+  border-left: 3px solid var(--line);
+  margin: 10px 0;
+  padding-left: 12px;
+  white-space: pre-wrap;
+}
+.research-passage-text {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font: inherit;
+}
 .research-section > p {
   font-size: 13px;
   line-height: 1.6;

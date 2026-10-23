@@ -19,7 +19,7 @@ MAX_RESULT_BYTES = 32768
 MAX_PROVIDER_STATE_BYTES = 16 * 1024 ** 2
 MAX_EVENTS = 32
 ACTIVE = ("queued", "running")
-WORKFLOWS = ("lookup", "requirements")
+WORKFLOWS = ("lookup", "requirements", "evidence_review")
 AMOUNTS = ("model_calls", "tokens", "seconds", "estimated_model_usd", "hosted_searches")
 EVENTS = {
     "submitted": "Local research preview submitted.",
@@ -33,6 +33,8 @@ EVENTS = {
     "stage_finished": "Local model stage completed.",
     "stage_failed": "Local model stage did not produce an accepted result.",
     "stage_uncertain": "Local model completion is unknown; its allowance remains reserved.",
+    "evidence_started": "Inspecting bounded saved-source candidates for the recorded requirements.",
+    "evidence_recorded": "Saved evidence assessed. Writing and final review have not run.",
     "requirements_started": "Assessing the research requirements with the local model.",
     "requirements_recorded": "Requirements recorded. Evidence assessment, writing and final review have not run.",
     "clarification_needed": "Clarification is needed before dependent research. No answer was produced.",
@@ -44,6 +46,7 @@ FAILURES = {
     "deadline": "Research preview reached its deadline before completion.",
     "permissions_changed": "Research permissions changed before completion. No result was saved.",
     "requirements_failed": "Requirements assessment did not produce an accepted result. No answer was produced.",
+    "evidence_failed": "Saved-evidence assessment did not produce an accepted result. No answer was produced.",
 }
 
 
@@ -222,6 +225,7 @@ class ResearchStore:
                   "created_at": row[5], "updated_at": row[6], **data}
         result.setdefault("workflow", "lookup")
         result.setdefault("assessment", None)
+        result.setdefault("evidence_review", None)
         if events:
             rows = db.execute("SELECT sequence,at,kind,summary FROM research_events WHERE run_id=? ORDER BY sequence LIMIT ?",
                               (row[0], MAX_EVENTS + 1)).fetchall()
@@ -273,7 +277,7 @@ class ResearchStore:
         _text(query, 512, empty=True)
         if chat_id is not None:
             _text(chat_id, 100)
-        if workflow not in WORKFLOWS or workflow == "requirements" and query:
+        if workflow not in WORKFLOWS or workflow != "lookup" and query:
             raise ValueError("Use a supported research workflow without lookup keywords for requirements.")
         identity = [request, query, chat_id]
         # Keep old lookup retries stable; a different workflow cannot reuse one.
@@ -296,7 +300,7 @@ class ResearchStore:
                 raise ValueError("Another request is active or its completion is unknown. Wait before starting research.")
             run_id, stamp = uuid.uuid4().hex, self.stamp()
             payload = {"request": request, "query": query, "permissions": captured, "budget": allowance,
-                       "result": None, "workflow": workflow, "assessment": None}
+                       "result": None, "workflow": workflow, "assessment": None, "evidence_review": None}
             connection.execute("INSERT INTO research_runs VALUES(?,?,?,?,?,?,?,?,?)",
                                (run_id, submission_id, fingerprint, chat_id, "queued", stamp, stamp, None, _encoded(payload)))
             self._event(connection, run_id, "submitted")
@@ -347,7 +351,8 @@ class ResearchStore:
     def _save(self, db, run, state, *, token=None):
         run["state"], run["updated_at"] = state, self.stamp()
         payload = {name: run[name] for name in ("request", "query", "permissions", "budget", "result")}
-        payload.update(workflow=run.get("workflow", "lookup"), assessment=run.get("assessment"))
+        payload.update(workflow=run.get("workflow", "lookup"), assessment=run.get("assessment"),
+                       evidence_review=run.get("evidence_review"))
         db.execute("UPDATE research_runs SET state=?,updated_at=?,claim_token=?,payload=? WHERE id=?",
                    (state, run["updated_at"], token, _encoded(payload), run["id"]))
 
@@ -382,7 +387,7 @@ class ResearchStore:
             token = uuid.uuid4().hex
             run["permissions"]["memory_derived"] |= self._chat_memory(db, run["chat_id"])
             self._save(db, run, "running", token=token)
-            if run.get("workflow") == "requirements":
+            if run.get("workflow") in ("requirements", "evidence_review"):
                 self._event(db, run_id, "requirements_started")
             elif lookup:
                 self._event(db, run_id, "local_lookup_started")
@@ -425,6 +430,8 @@ class ResearchStore:
             if not self._chat_exists(db, run["chat_id"]):
                 self._purge(db, run_id)
                 return False
+            if reason == "evidence_failed":
+                db.execute("UPDATE research_stages SET output=NULL,state=CASE WHEN state IN ('completed','prepared') THEN 'failed' ELSE state END WHERE run_id=? AND kind='evidence_review'", (run_id,))
             self._terminal(db, run, "failed", "failed", FAILURES[reason])
             return True
 
@@ -443,7 +450,7 @@ class ResearchStore:
             if not self._chat_exists(db, run["chat_id"]):
                 self._purge(db, run_id)
                 return False
-            if run.get("workflow") != "requirements" or stage.run_id != run_id or stage.claim_token != token:
+            if run.get("workflow") not in ("requirements", "evidence_review") or stage.run_id != run_id or stage.claim_token != token:
                 raise ValueError("Use the owned requirements assessment.")
             record = _row(db, stage)
             if record[2] != "requirements" or record[3] != "completed" or record[10] is None:
@@ -463,8 +470,58 @@ class ResearchStore:
             if self.clock() >= deadline:
                 raise ValueError("Research requirements reached their deadline.")
             clarify = assessment["decision"] == "clarify"
+            if run.get("workflow") == "evidence_review" and not clarify:
+                self._save(db, run, "running", token=token)
+                self._event(db, run_id, "evidence_started")
+                return True
             self._terminal(db, run, "clarification" if clarify else "partial",
                            "clarification_needed" if clarify else "requirements_recorded")
+            return True
+
+    def finish_evidence_review(self, run_id, token, review, *, stage=None, secrets=()):
+        """Publish a revalidated packet while the caller holds archive locks."""
+        from backend.research_evidence import validate_saved_review, validate_review
+        from backend.research_stages import ResearchStage, _row, _states, _hash, safe_stage_content
+        _identifier(run_id)
+        with self._transaction() as db:
+            row = self._row(db, run_id)
+            if row is None or row[4] != "running" or row[7] != token:
+                return False
+            run = self._public(db, row)
+            if not self._chat_exists(db, run["chat_id"]):
+                self._purge(db, run_id)
+                return False
+            if run.get("workflow") != "evidence_review" or run.get("assessment") is None:
+                raise ValueError("Use the owned saved-evidence assessment.")
+            validate_saved_review(review, run["assessment"])
+            workspace, provider_state = _states(db)
+            scope = db.execute("SELECT config_hash,limits_hash FROM research_stage_scope WHERE run_id=?", (run_id,)).fetchone()
+            if scope != (_hash(provider_state["config"]), _hash(workspace["limits"])):
+                raise ValueError("Research model settings or parent limits changed.")
+            if stage is not None:
+                if type(stage) is not ResearchStage or stage.run_id != run_id or stage.claim_token != token:
+                    raise ValueError("Use the owned saved-evidence stage.")
+                record = _row(db, stage)
+                if record[2] != "evidence_review" or record[3] != "completed" or record[10] is None:
+                    raise ValueError("A completed evidence-review stage is required.")
+                if json.loads(record[5])["model"] not in provider_state.get("models", []):
+                    raise ValueError("The selected model is unavailable.")
+                packet = {key: review[key] for key in ("version", "offset_unit", "lookup", "selection", "sources", "passages")}
+                from backend.research_passages import evidence_packet_hash
+                spec = json.loads(record[5])
+                pins = [{key: source[key] for key in ("capture_id", "content_hash", "manifest_hash", "retrieved_at", "stale")}
+                        for source in packet["sources"]]
+                if spec.get("packet_hash") != evidence_packet_hash(packet) or spec["evidence"] != pins:
+                    raise ValueError("The selected evidence packet differs from the owned stage.")
+                if validate_review(json.loads(record[10]), run["assessment"], packet, review["checked_at"]) != review:
+                    raise ValueError("The evidence decision changed after validation.")
+            elif review["passages"] or review["sources"] or any(item["state"] == "covered" for item in review["items"]):
+                raise ValueError("Source acceptance requires an owned model stage.")
+            run["evidence_review"] = review
+            safe_stage_content([run, _encoded(run)], provider_state["config"], secrets=secrets)
+            if self.clock() >= _date(run["budget"]["deadline"]).timestamp():
+                raise ValueError("The research deadline has passed.")
+            self._terminal(db, run, "partial", "evidence_recorded")
             return True
 
     def cancel(self, run_id):
@@ -513,10 +570,10 @@ class ResearchStore:
             return 1
 
     def prepare_stage(self, run_id, claim_token, kind, *, model, schema, assignment, evidence=(),
-                      permitted_actions=(), seconds=5, db=None):
+                      permitted_actions=(), seconds=5, db=None, packet_hash=None):
         from backend.research_stages import prepare
         return prepare(self, run_id, claim_token, kind, model=model, schema=schema, assignment=assignment,
-                       evidence=evidence, permitted_actions=permitted_actions, seconds=seconds, db=db)
+                       evidence=evidence, permitted_actions=permitted_actions, seconds=seconds, db=db, packet_hash=packet_hash)
 
     def authorize_stage(self, stage, workspace, provider_state, db, *, reserved=False):
         from backend.research_stages import authorize

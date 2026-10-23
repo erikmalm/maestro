@@ -519,10 +519,11 @@ class Provider:
                              context={"instructions": instructions, "messages": history, "max_output_tokens": max_output_tokens,
                                       "job": job, "schema": schema, "deadline": deadline})
 
-    def generate_research_stage(self, stage, instructions, messages, *, max_output_tokens=None, output_validator=None):
+    def generate_research_stage(self, stage, instructions, messages, *, max_output_tokens=None, output_validator=None, pre_dispatch=None):
         """Internal owned local stage; authority and allowances come from storage."""
         from backend.research_stages import ResearchStage
         if (type(stage) is not ResearchStage or output_validator is not None and not callable(output_validator)
+                or pre_dispatch is not None and not callable(pre_dispatch)
                 or not isinstance(instructions, str) or not instructions.strip()
                 or len(instructions.encode("utf-8")) > 16000
                 or (max_output_tokens is not None and (type(max_output_tokens) is not int
@@ -537,7 +538,7 @@ class Provider:
             raise ValueError("Research context is too large. Use a smaller evidence packet.")
         result = self.generate("", None, role="research", context={
             "research": stage, "instructions": instructions, "messages": history,
-            "max_output_tokens": max_output_tokens, "job": None, "output_validator": output_validator})
+            "max_output_tokens": max_output_tokens, "job": None, "output_validator": output_validator, "pre_dispatch": pre_dispatch})
         return {name: result[name] for name in ("reply", "request_id", "input_tokens", "output_tokens")}
 
     def generate(self, text, chat_id, title_for=None, model="", role="chat", context=None):
@@ -765,6 +766,11 @@ class Provider:
                 if time.monotonic() >= deadline:
                     raise ProviderFailure("Background reflection exceeded its deadline before inference.", False)
             if research is not None:
+                if context.get("pre_dispatch") is not None:
+                    # The archive callback runs without a provider writer.
+                    # Recheck ownership/configuration after it returns because
+                    # cancellation or Settings may change while it waits.
+                    context["pre_dispatch"]()
                 with self.transaction(with_db=True) as (state, db):
                     current_workspace = json.loads(db.execute("SELECT value FROM workspace WHERE id=1").fetchone()[0])
                     research_packet = research_store.authorize_stage(research, current_workspace, state, db, reserved=True)

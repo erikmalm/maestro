@@ -500,13 +500,58 @@ export type ResearchAssessment = {
   }[];
   completion_criterion: string;
 };
+export type ResearchEvidenceReview = {
+  version: 1;
+  checked_at: string;
+  lookup: {
+    state: "ready" | "limited" | "disabled" | "unconfigured" | "unavailable";
+    search_limited: boolean;
+    skipped_count: number;
+  };
+  selection: { limited: boolean; omitted_count: number };
+  offset_unit: "unicode_codepoint";
+  sources: (Omit<ContextSource, "content_kind"> & {
+    id: string;
+    stale: boolean;
+  })[];
+  passages: {
+    id: string;
+    source_id: string;
+    start: number;
+    end: number;
+    text: string;
+    passage_hash: string;
+  }[];
+  items: {
+    item_id: string;
+    state: "covered" | "missing" | "stale" | "conflicting" | "unavailable";
+    model_state?:
+      "covered" | "missing" | "stale" | "conflicting" | "unavailable";
+    reason: string;
+    suitability_reason?: string;
+    supports: {
+      passage_id: string;
+      quote: string;
+      temporal_scope: "historical" | "current" | "refresh" | "unspecified";
+      period: string | null;
+      observation_date: string | null;
+      source_id: string;
+      start: number;
+      end: number;
+      suitability?: "suitable" | "stale" | "unavailable";
+      freshness_basis: string;
+      best_before: string | null;
+    }[];
+  }[];
+};
 export type ResearchRun = {
   id: string;
   submission_id: string;
   request: string;
   query: string;
-  workflow?: "lookup" | "requirements";
+  workflow?: "lookup" | "requirements" | "evidence_review";
   assessment?: ResearchAssessment | null;
+  evidence_review?: ResearchEvidenceReview | null;
   chat_id: string | null;
   state:
     | "queued"
@@ -554,7 +599,7 @@ export const createResearchRun = (body: {
   submission_id: string;
   request: string;
   query: string;
-  workflow?: "lookup" | "requirements";
+  workflow?: "lookup" | "requirements" | "evidence_review";
   chat_id: string | null;
 }) =>
   request<{ run: ResearchRun; created: boolean }>(

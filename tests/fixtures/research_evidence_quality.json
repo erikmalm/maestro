@@ -1,0 +1,65 @@
+{
+  "version": 1,
+  "description": "Public synthetic Acme examples only; no real company facts or personal content.",
+  "cases": [
+    {
+      "id": "historical_tail",
+      "request": "Assess Acme revenue in USD for FY2025.",
+      "sources": [
+        {
+          "title": "Synthetic Acme FY2025 disclosure",
+          "url": "https://reports.example.org/acme/historical",
+          "retrieved_at": "2026-01-10T12:00:00+00:00",
+          "padding": {"text": "Unrelated public synthetic background. ", "repeat": 70},
+          "quote": "Acme revenue for FY2025 was USD 42 million."
+        }
+      ],
+      "expected": {
+        "criterion": "revenue", "period": "FY2025", "currency": "USD", "unit": null,
+        "states": ["covered"], "minimum_sources": 1, "minimum_support_offset": 1200,
+        "support_fragments": [["FY2025", "USD", "42"]]
+      }
+    },
+    {
+      "id": "current_old_observation",
+      "request": "Assess Acme current employee headcount in people.",
+      "sources": [
+        {
+          "title": "Synthetic Acme old headcount observation",
+          "url": "https://reports.example.org/acme/old-headcount",
+          "retrieved_at": "runtime",
+          "quote": "Acme employee headcount was 150 people on 2020-01-02."
+        }
+      ],
+      "expected": {
+        "criterion": "employee headcount", "period": null, "currency": null, "unit": "people",
+        "current_qualifier": "current",
+        "states": ["stale", "unavailable"], "minimum_sources": 0, "minimum_support_offset": 0,
+        "support_fragments": [], "old_observation": "2020-01-02"
+      }
+    },
+    {
+      "id": "conflicting_fy2025_disclosures",
+      "request": "Assess Acme revenue in USD for FY2025.",
+      "sources": [
+        {
+          "title": "Synthetic Acme disclosure A",
+          "url": "https://reports.example.org/acme/disclosure-a",
+          "retrieved_at": "2026-01-10T12:00:00+00:00",
+          "quote": "Acme revenue for FY2025 was USD 42 million."
+        },
+        {
+          "title": "Synthetic Acme disclosure B",
+          "url": "https://reports.example.org/acme/disclosure-b",
+          "retrieved_at": "2026-01-11T12:00:00+00:00",
+          "quote": "Acme revenue for FY2025 was USD 55 million."
+        }
+      ],
+      "expected": {
+        "criterion": "revenue", "period": "FY2025", "currency": "USD", "unit": null,
+        "states": ["conflicting"], "minimum_sources": 2, "minimum_support_offset": 0,
+        "support_fragments": [["FY2025", "USD", "42"], ["FY2025", "USD", "55"]]
+      }
+    }
+  ]
+}

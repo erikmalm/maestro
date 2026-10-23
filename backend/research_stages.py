@@ -179,7 +179,7 @@ def _change(run, amounts, multiplier):
     _remainder(run)
 
 
-def prepare(store, run_id, claim_token, kind, *, model, schema, assignment, evidence, permitted_actions, seconds, db=None):
+def prepare(store, run_id, claim_token, kind, *, model, schema, assignment, evidence, permitted_actions, seconds, db=None, packet_hash=None):
     if kind not in KINDS:
         raise ValueError("Use a supported research stage.")
     _text(model, 200)
@@ -190,6 +190,8 @@ def prepare(store, run_id, claim_token, kind, *, model, schema, assignment, evid
             or not isinstance(permitted_actions, (tuple, list)) or len(permitted_actions) > 8
             or any(action not in ("return_json", "report_gap", STAGE_ACTIONS[kind]) for action in permitted_actions)):
         raise ValueError("Use a bounded server research assignment.")
+    if packet_hash is not None and (not isinstance(packet_hash, str) or not re.fullmatch(r"[a-f0-9]{64}", packet_hash)):
+        raise ValueError("Use an exact selected-evidence packet hash.")
     _encoded(schema, 8192)
     references = _result({"lookup_state": "ready", "search_limited": False, "skipped_count": 0,
                           "candidates": list(evidence), "summary": "Server-selected evidence references."})["candidates"]
@@ -220,6 +222,8 @@ def prepare(store, run_id, claim_token, kind, *, model, schema, assignment, evid
         spec = {"model": model, "schema": schema, "assignment": assignment, "evidence": references,
                 "permitted_actions": list(permitted_actions), "seconds": seconds,
                 "permissions": {**run["permissions"], "memory_derived": bool(run["permissions"]["memory_derived"] or store._chat_memory(connection, run["chat_id"]))}}
+        if packet_hash is not None:
+            spec["packet_hash"] = packet_hash
         encoded_spec = _encoded(spec, MAX_SPEC_BYTES)
         safe_stage_content([{"objective": run["request"], **spec}, encoded_spec], config)
         connection.execute("INSERT OR IGNORE INTO research_stage_scope VALUES(?,?,?)",

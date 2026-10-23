@@ -175,7 +175,7 @@ export default function useResearchRuns(chatId) {
       submission_id: crypto.randomUUID().replaceAll("-", ""),
       request,
       query: "",
-      workflow: "requirements",
+      workflow: "evidence_review",
       chat_id: chatId || null,
     };
     pendingBody.current = body;

@@ -13,14 +13,15 @@ export default function Research({ chatId }) {
       <div className="page-heading">
         <div>
           <h1>Research</h1>
-          <p>Record the scope of an explicit research request.</p>
+          <p>Assess requirements and review saved evidence.</p>
         </div>
         <span className="badge neutral">Preview</span>
       </div>
       <p className="page-note">
-        Assessment uses one installed local model call, with no hosted searches
-        or personal-memory recall. It records requirements and clarification
-        questions, and produces no reviewed answer.
+        This preview assesses your request, then reviews a bounded selection of
+        saved evidence with an installed local model. It makes no hosted
+        searches or personal-memory recall, and produces no written or finally
+        reviewed answer.
       </p>
       <form
         className="card entry-form research-form"
@@ -30,7 +31,7 @@ export default function Research({ chatId }) {
             void data.submit(request.trim());
         }}
       >
-        <h2>Assess research requirements</h2>
+        <h2>Review saved evidence</h2>
         <label>
           Research request
           <textarea
@@ -43,16 +44,18 @@ export default function Research({ chatId }) {
           />
         </label>
         <p className="form-note">
-          The current conversation's sharing restrictions are retained. Evidence
-          review, answer writing and final review are later steps; this
-          assessment does not perform them.
+          The current conversation's sharing restrictions are retained. Material
+          ambiguity stops the run for clarification. Answer writing and final
+          review are later steps.
         </p>
         <div className="research-actions">
           <button
             className="button primary"
             disabled={!request.trim() || Boolean(data.busy || data.pendingId)}
           >
-            {data.busy === "submit" ? "Recording request…" : "Assess request"}
+            {data.busy === "submit"
+              ? "Recording request…"
+              : "Review saved evidence"}
           </button>
         </div>
         {data.pendingId && !data.busy && (
