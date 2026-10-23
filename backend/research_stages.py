@@ -21,6 +21,8 @@ STAGE_ACTIONS = {"requirements": "emit_requirements", "evidence_review": "assess
 MAX_STAGES = 8
 FINISHING_TOKENS = 8192
 FINISHING_SECONDS = 5
+DRAFT_FINISHING_TOKENS = 32768
+DRAFT_FINISHING_SECONDS = 20
 MAX_SPEC_BYTES = 32768
 _JSON_ESCAPE_RUN = re.compile(r'(?:\\(?:["\\/bfnrt]|u[0-9a-fA-F]{4}))+')
 
@@ -167,6 +169,16 @@ def _held(db, run_id):
     return json.loads(row[0]) if row else None
 
 
+def _finishing_holds(run, config):
+    if run.get("workflow") == "research_draft":
+        tokens = min(config["ollama_context_tokens"], DRAFT_FINISHING_TOKENS)
+        seconds = DRAFT_FINISHING_SECONDS
+    else:
+        tokens, seconds = FINISHING_TOKENS, FINISHING_SECONDS
+    return {kind: _amounts(model_calls=1, tokens=tokens, seconds=seconds)
+            for kind in ("writer", "reviewer")}
+
+
 def _remainder(run):
     budget = run["budget"]
     for name in AMOUNTS:
@@ -179,7 +191,7 @@ def _change(run, amounts, multiplier):
     _remainder(run)
 
 
-def prepare(store, run_id, claim_token, kind, *, model, schema, assignment, evidence, permitted_actions, seconds, db=None, packet_hash=None):
+def prepare(store, run_id, claim_token, kind, *, model, schema, assignment, evidence, permitted_actions, seconds, db=None, packet_hash=None, coverage_hash=None):
     if kind not in KINDS:
         raise ValueError("Use a supported research stage.")
     _text(model, 200)
@@ -192,6 +204,8 @@ def prepare(store, run_id, claim_token, kind, *, model, schema, assignment, evid
         raise ValueError("Use a bounded server research assignment.")
     if packet_hash is not None and (not isinstance(packet_hash, str) or not re.fullmatch(r"[a-f0-9]{64}", packet_hash)):
         raise ValueError("Use an exact selected-evidence packet hash.")
+    if coverage_hash is not None and (not isinstance(coverage_hash, str) or not re.fullmatch(r"[a-f0-9]{64}", coverage_hash)):
+        raise ValueError("Use an exact saved-evidence coverage hash.")
     _encoded(schema, 8192)
     references = _result({"lookup_state": "ready", "search_limited": False, "skipped_count": 0,
                           "candidates": list(evidence), "summary": "Server-selected evidence references."})["candidates"]
@@ -224,6 +238,8 @@ def prepare(store, run_id, claim_token, kind, *, model, schema, assignment, evid
                 "permissions": {**run["permissions"], "memory_derived": bool(run["permissions"]["memory_derived"] or store._chat_memory(connection, run["chat_id"]))}}
         if packet_hash is not None:
             spec["packet_hash"] = packet_hash
+        if coverage_hash is not None:
+            spec["coverage_hash"] = coverage_hash
         encoded_spec = _encoded(spec, MAX_SPEC_BYTES)
         safe_stage_content([{"objective": run["request"], **spec}, encoded_spec], config)
         connection.execute("INSERT OR IGNORE INTO research_stage_scope VALUES(?,?,?)",
@@ -269,7 +285,25 @@ def authorize(store, stage, workspace, provider_state, db, *, reserved=False):
               "deadline": datetime.fromtimestamp(deadline, timezone.utc).isoformat()}
     held = _held(db, stage.run_id)
     finishing_slot = spec.get("finishing_slot", False) if reserved else row[2] in (("writer", "reviewer") if held is None else held)
-    packet.update(kind=row[2], finishing_token_limit=FINISHING_TOKENS if finishing_slot else None)
+    token_limit, seconds_limit = (FINISHING_TOKENS, FINISHING_SECONDS) if finishing_slot else (None, None)
+    if finishing_slot and run.get("workflow") == "research_draft":
+        if reserved:
+            assigned = json.loads(row[9])
+            token_limit, seconds_limit = assigned["tokens"], assigned["seconds"]
+        else:
+            captured = _finishing_holds(run, config) if held is None else held
+            slot = captured[row[2]]
+            # Before the first reservation the two finishing holds are still
+            # virtual. Preserve any actual overrun rather than adding this slot
+            # to a remaining amount whose negative deficit was clamped to zero.
+            def available(name):
+                budget = run["budget"]
+                protected = budget["reserved"][name]
+                if held is None:
+                    protected += sum(value[name] for value in captured.values())
+                return max(0, budget["total"][name] - budget["consumed"][name] - protected + slot[name])
+            token_limit, seconds_limit = available("tokens"), available("seconds")
+    packet.update(kind=row[2], finishing_token_limit=token_limit, finishing_seconds_limit=seconds_limit)
     safe_stage_content(packet, config)
     _encoded(packet, 131072)
     return packet
@@ -285,17 +319,21 @@ def reserve(store, stage, workspace, provider_state, request_id, input_bound, ou
     store._elapsed(run)
     held = _held(db, stage.run_id)
     if held is None:
-        held = {kind: _amounts(model_calls=1, tokens=FINISHING_TOKENS, seconds=FINISHING_SECONDS)
-                for kind in ("writer", "reviewer")}
+        held = _finishing_holds(run, provider_state["config"])
         for amounts in held.values():
             _change(run, amounts, 1)
     if row[2] in held:
         slot = held.pop(row[2])
-        if input_bound + output_bound > slot["tokens"] or json.loads(row[5])["seconds"] > slot["seconds"]:
+        if (run.get("workflow") != "research_draft"
+                and (input_bound + output_bound > slot["tokens"] or json.loads(row[5])["seconds"] > slot["seconds"])):
             raise ValueError("This finishing stage exceeds its saved finishing capacity.")
         _change(run, slot, -1)
         spec = json.loads(row[5])
         spec["finishing_slot"] = True
+        if run.get("workflow") == "research_draft":
+            # A failed preflight must restore this original protected slot,
+            # rather than the larger capacity temporarily assigned to the call.
+            spec["finishing_hold"] = slot
         db.execute("UPDATE research_stages SET spec=? WHERE id=?", (_encoded(spec, MAX_SPEC_BYTES), stage.stage_id))
     amounts = _amounts(model_calls=1, tokens=input_bound + output_bound, seconds=json.loads(row[5])["seconds"])
     if any(run["budget"]["consumed"][name] + run["budget"]["reserved"][name] + amounts[name] > run["budget"]["total"][name]
@@ -358,7 +396,8 @@ def settle(store, stage, request_id, *, db, input_tokens, output_tokens, outcome
             if row[2] not in held:
                 # A model check did not use this promised finishing call.
                 # Keep its full capacity protected from optional stages.
-                held[row[2]] = _amounts(model_calls=1, tokens=FINISHING_TOKENS, seconds=FINISHING_SECONDS)
+                held[row[2]] = json.loads(row[5]).get("finishing_hold", _amounts(
+                    model_calls=1, tokens=FINISHING_TOKENS, seconds=FINISHING_SECONDS))
                 _change(run, held[row[2]], 1)
                 db.execute("INSERT INTO research_finishing VALUES(?,?) ON CONFLICT(run_id) DO UPDATE SET held=excluded.held",
                            (stage.run_id, _encoded(held)))

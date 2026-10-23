@@ -16,7 +16,8 @@ const temporalLabels = {
 const freshnessLabels = {
   explicit_requested_period: "Matches the requested historical period",
   requested_period_not_established: "Requested period is not established",
-  past_observation_for_current_requirement: "Observation is too old for a current request",
+  past_observation_for_current_requirement:
+    "Observation is too old for a current request",
   current_origin_verification_unknown: "Current source verification is unknown",
   fresh_origin_check_required: "A fresh source check is required",
   no_temporal_requirement: "No time-sensitive condition was requested",
@@ -58,7 +59,9 @@ function Passage({ support, passages, sources }) {
         )}
         <div>
           <dt>Freshness basis</dt>
-          <dd>{freshnessLabels[support.freshness_basis] || "Not established"}</dd>
+          <dd>
+            {freshnessLabels[support.freshness_basis] || "Not established"}
+          </dd>
         </div>
         <div>
           <dt>Best-before date</dt>
@@ -170,8 +173,8 @@ export default function EvidenceReview({ review, assessment }) {
     <section className="research-section" aria-label="Saved-evidence review">
       <h3>Saved-evidence review</h3>
       <p>
-        Evidence was assessed against the requested items. No answer has been
-        written or finally reviewed.
+        This section records the saved-evidence assessment. Final answer review
+        has not run.
       </p>
       <p className="form-note">
         Assessment recorded: {date(review.checked_at)}
@@ -223,9 +226,10 @@ export default function EvidenceReview({ review, assessment }) {
                   <strong>{stateLabels[item.state] || "Unavailable"}</strong>
                 </p>
                 <p className="research-request">{item.reason}</p>
-                {item.suitability_reason && item.suitability_reason !== item.reason && (
-                  <p className="form-note">{item.suitability_reason}</p>
-                )}
+                {item.suitability_reason &&
+                  item.suitability_reason !== item.reason && (
+                    <p className="form-note">{item.suitability_reason}</p>
+                  )}
                 {(item.supports || []).length > 0 && (
                   <ul className="research-reviewed-passages">
                     {item.supports.map((support, index) => (

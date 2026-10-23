@@ -2,7 +2,7 @@
 
 Each case gets a disposable private workspace and sibling archive. No existing
 workspace, configuration, credentials, memory or hosted search is used. A case
-is attempted once, with at most two local inference requests. Unknown completion
+is attempted once, with at most two evidence calls or three draft calls. Unknown completion
 stops the entire run and requires operator recovery of the original server.
 """
 import argparse
@@ -32,6 +32,7 @@ from backend.context_policy import DEFAULT as ARCHIVE_DEFAULT, SOURCE_BYTES
 from backend.memory import MemoryStore
 from backend.provider import DEFAULT, Provider, validate_ollama_url
 from backend.research_evidence import validate_saved_review
+from backend.research_draft import has_support, validate_saved_draft
 from backend.research_passages import validate_packet
 from backend.research_requirements import validate_saved_assessment
 from backend.web_search import WebSearch
@@ -115,9 +116,14 @@ def check_qualifiers(case, assessment):
     return matched
 
 
-def check_run(case, run, captured, loader):
+def check_run(case, run, captured, loader, *, workflow="evidence_review"):
     """Typed/pin checks plus narrow semantic expectations for this versioned corpus."""
-    require(run["workflow"] == "evidence_review" and run["state"] == "partial", "Expected terminal partial evidence review")
+    require(workflow in ("evidence_review", "research_draft") and run["workflow"] == workflow,
+            "Unexpected research workflow")
+    if workflow == "research_draft":
+        require(type(run.get("draft")) is dict, "Missing or noncanonical draft")
+    require(run["state"] == ("draft" if workflow == "research_draft" and run["draft"].get("state") == "unreviewed"
+                              else "partial"), "Expected a terminal partial review or unreviewed draft")
     try:
         assessment = validate_saved_assessment(run.get("assessment"), case["request"])
         review = validate_saved_review(run.get("evidence_review"), assessment)
@@ -154,7 +160,40 @@ def check_run(case, run, captured, loader):
             require(all(support["suitability"] != "suitable" and support["best_before"] is None for support in supports),
                     "Fresh origin verification was fabricated")
     consumed = run["budget"]["consumed"]
-    require(consumed["model_calls"] == 2, "Expected exactly two local calls for the populated fixture")
+    calls = 2
+    if workflow == "research_draft":
+        try:
+            draft = validate_saved_draft(run.get("draft"), assessment, review)
+        except (ValueError, TypeError, KeyError):
+            raise AssertionError("Missing or noncanonical draft") from None
+        supported = has_support(review)
+        require(draft["state"] == ("unreviewed" if supported else "unavailable"),
+                "A supported fixture did not produce an unreviewed draft")
+        calls += int(supported)
+        drafted = {row["item_id"]: row for row in draft["items"]}
+        for expected, item in matched:
+            row = drafted[item["id"]]
+            require(row["coverage_state"] == reviewed[item["id"]]["state"], "Draft coverage changed")
+            if row["coverage_state"] != "covered":
+                require(row["kind"] == "gap" and not row["supports"], "Unsupported requirement became factual prose")
+                continue
+            require(row["kind"] != "gap", "Covered fixture was not drafted")
+            visible = " ".join(str(value) for value in (row["text"], row["period"], row["unit"], row["currency"]) if value)
+            for fragments in expected["support_fragments"]:
+                require(all(fragment.casefold() in visible.casefold() for fragment in fragments),
+                        "Draft omitted an expected fixture value or qualifier")
+            numbers = set(re.findall(r"[+-]?[0-9]+(?:\.[0-9]+)?", row["text"]))
+            # This is finite numeric provenance, not proof of prose truth.
+            # Other packet rows or unrelated request text cannot authorize a
+            # figure in this row. Canonical validation already pins citations
+            # and copies this requirement's qualifiers from its assessment.
+            provenance = " ".join([support["quote"] for support in row["supports"]] +
+                                  [row[field] for field in ("period", "unit", "currency", "freshness") if row[field]])
+            allowed = set(re.findall(r"[+-]?[0-9]+(?:\.[0-9]+)?", provenance))
+            if row["calculation"]:
+                allowed.add(row["calculation"]["result"])
+            require(numbers <= allowed, "Draft introduced an unsupported numeric literal")
+    require(consumed["model_calls"] == calls, "Unexpected local call count for the populated fixture")
     require(consumed["hosted_searches"] == 0, "Unexpected hosted usage")
     require(all(amount == 0 for amount in run["budget"]["reserved"].values()), "Unreleased allowance")
     require(run["result"] is None, "An ordinary answer or lookup result was produced")
@@ -167,6 +206,8 @@ def main(argv=None):
     parser.add_argument("--context-tokens", type=int, default=16384)
     parser.add_argument("--output-tokens", type=int, default=1024)
     parser.add_argument("--timezone", default="UTC", help="Explicit server timezone for this isolated trial")
+    parser.add_argument("--workflow", choices=("evidence_review", "research_draft"), default="evidence_review",
+                        help="Check coverage alone or add an unreviewed saved-evidence draft")
     parser.add_argument("--case", action="append", dest="case_ids", help="Run this fixture once; repeatable")
     parser.add_argument("--report", type=Path, help="Write a new JSON report containing only synthetic records")
     args = parser.parse_args(argv)
@@ -203,7 +244,8 @@ def main(argv=None):
                 "Credentials must not be sent")
         if request.url.path == "/api/chat":
             with lock:
-                require(active["chats"] < 2, "A fixture cannot make more than two inference requests")
+                require(active["chats"] < (3 if args.workflow == "research_draft" else 2),
+                        "A fixture exceeded its explicit inference request limit")
                 active["chats"] += 1
 
     def guarded_sync(transport, request):
@@ -259,7 +301,7 @@ def main(argv=None):
                     active["chats"] = 0
                     started = time.monotonic()
                     response = client.post("/api/research/runs", json={"submission_id": uuid.uuid4().hex,
-                        "request": case["request"], "query": "", "chat_id": None, "workflow": "evidence_review"}, headers=headers)
+                        "request": case["request"], "query": "", "chat_id": None, "workflow": args.workflow}, headers=headers)
                     response.raise_for_status()
                     detail = client.get("/api/research/runs/" + response.json()["run"]["id"])
                     detail.raise_for_status()
@@ -267,21 +309,21 @@ def main(argv=None):
                     result = {"case": case["id"], "state": run["state"], "seconds": round(time.monotonic() - started, 2),
                         "consumed": run["budget"]["consumed"], "reserved": run["budget"]["reserved"],
                         "network_chat_requests": active["chats"], "assessment": run.get("assessment"),
-                        "evidence_review": run.get("evidence_review"), "passed": False}
+                        "evidence_review": run.get("evidence_review"), "draft": run.get("draft"), "passed": False}
                     try:
-                        check_run(case, run, captured, store.get_capture)
-                        require(active["chats"] == 2, "Unexpected local inference request count")
+                        check_run(case, run, captured, store.get_capture, workflow=args.workflow)
+                        require(active["chats"] == run["budget"]["consumed"]["model_calls"], "Unexpected local inference request count")
                         result["passed"] = True
                     except AssertionError as error:
                         result["failure"] = str(error)
                     results.append(result)
-                    print(json.dumps({key: value for key, value in result.items() if key not in ("assessment", "evidence_review")}), flush=True)
+                    print(json.dumps({key: value for key, value in result.items() if key not in ("assessment", "evidence_review", "draft")}), flush=True)
                     recovery_required = (any(run["budget"]["reserved"].values()) or
                                          any(entry["status"] in ("reserved", "uncertain") for entry in service.read_state()["ledger"]))
             if recovery_required:
                 break
     report = {"model": args.model, "context_tokens": args.context_tokens, "output_tokens": args.output_tokens,
-              "timezone": args.timezone,
+              "timezone": args.timezone, "workflow": args.workflow,
               "results": results, "passed": len(results) == len(cases) and all(result["passed"] for result in results),
               "recovery_required": recovery_required}
     if args.report:
