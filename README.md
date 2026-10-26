@@ -14,7 +14,9 @@ Windows, Python 3.11+, and Node.js 20.19+ or 22.12+:
 .\scripts\start.ps1 -NoBrowser
 ```
 
-Open [http://127.0.0.1:8765](http://127.0.0.1:8765). Stop with `.\scripts\stop.ps1`. If script execution is blocked, run `powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\start.ps1 -NoBrowser`.
+Open the URL printed by the launcher; the default is [http://127.0.0.1:8765](http://127.0.0.1:8765). Choose a fixed port with `-Port 8791`, or use `-Port 0` to let Windows assign an available loopback port. An explicit `-Port` overrides `MAESTRO_PORT`; without either, the default is 8765. The launcher records the actual port and process identity in `server.json` under the private data directory and sets `MAESTRO_PORT` in the launching PowerShell session. Running it again without an explicit port, or with port 0, reopens the matching running instance. Stop with `.\scripts\stop.ps1` before requesting a different fixed port. If script execution is blocked, run `powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\start.ps1 -NoBrowser`.
+
+For frontend development, start the backend first, then run `npm run dev` from `frontend` in the same PowerShell session. Vite reads the actual backend `MAESTRO_PORT` for its API proxy; in a separate shell, set that variable to the backend's printed port. The production interface uses relative API URLs. Maestro's port is independent of the saved Ollama address and any container tunnel; see the [startup guidance](docs/WINDOWS_BACKGROUND.md#application-lifetime-and-startup).
 
 For a non-root Podman container, private workspace volume and host Ollama, follow the [container runbook](docs/CONTAINERS.md). It includes build/start/stop, loopback networking, mounted secrets, migration and backup/restore.
 
