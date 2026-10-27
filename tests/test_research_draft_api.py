@@ -2,6 +2,7 @@
 from contextlib import closing
 from copy import deepcopy
 from datetime import datetime
+import hashlib
 import json
 import sqlite3
 import unittest
@@ -200,6 +201,98 @@ class ResearchDraftApiTests(unittest.TestCase):
     def test_separated_grouping_cannot_supply_partial_calculation_operand(self):
         self.assert_rejected_numeric_cases((("1\t234", "234"), ("1  234", "234"), ("1, 234", "234"),
                                             ("1\u2009\u2009234", "234"), ("1,\u202f234", "234")))
+
+    def test_original_currency_symbol_cannot_lose_sign_after_compatibility_expansion(self):
+        # U+FDFC is a currency symbol whose NFKC spelling has four letters.
+        self.assert_rejected_numeric_cases((("-\ufdfc 42", "42"),))
+
+    def assert_natural_currency_edge_rejected(self, content, side):
+        source = self.fixture.capture(content)
+        snapshot = self.fixture.archive_fixture.source_snapshot()
+
+        def selected_support(selected):
+            passage = selected["packet"]["passages"][0]
+            return {"passage_id": passage["id"], "quote": passage["text"], "temporal_scope": "historical",
+                    "period": "FY2025", "observation_date": None}
+
+        self.fixture.review_builder = lambda selected: {"version": 1, "items": [{
+            "item_id": "i1", "state": "covered", "reason": fixtures.REASON,
+            "supports": [selected_support(selected)]}]}
+
+        def calculated(selected):
+            passage = selected["packet"]["passages"][0]
+            return {"version": 1, "items": {"i1": {
+                "kind": "calculation", "text": "The supplied amounts produce a declared sum.",
+                "supports": [{"passage_id": passage["id"], "quote": passage["text"]}],
+                "calculation": {"operation": "sum", "operands": [
+                    {"value": "42", "support_index": 0}, {"value": "0", "support_index": 0}], "precision": 2}}}}
+
+        self.writer_builder = calculated
+        run = self.run_now()
+        self.assertEqual(len(self.writer_inputs), 1)
+        packet = self.writer_inputs[0]["packet"]
+        self.assertEqual(len(packet["passages"]), 1)
+        passage = packet["passages"][0]
+        # No selector mock or fabricated packet: its real 1,200-character
+        # window omits the sign that is still present in the archived source.
+        self.assertEqual((passage["start"], passage["end"]), (600, 1800))
+        self.assertEqual(passage["text"], content[600:1800])
+        self.assertEqual(passage["passage_hash"], hashlib.sha256(passage["text"].encode()).hexdigest())
+        self.assertEqual(packet["sources"][0]["capture_id"], source["capture_id"])
+        self.assertEqual(packet["sources"][0]["content_hash"], hashlib.sha256(content.encode()).hexdigest())
+        if side == "left":
+            self.assertEqual(content[599], "-")
+            self.assertTrue(passage["text"].startswith("USD 42 and 0."))
+        else:
+            self.assertEqual(content[1800], "-")
+            self.assertTrue(passage["text"].endswith("42 USD"))
+        self.assertEqual(backend._review_packet(run["evidence_review"]), packet)
+        self.assertEqual(run["evidence_review"]["items"][0]["state"], "covered")
+        self.assertEqual(run["assessment"]["completion_criterion"], requirements.REQUEST)
+        self.assert_usage(run)
+        self.assertEqual(run["state"], "failed")
+        self.assertIsNone(run["draft"])
+        self.assertEqual(self.writer_rows(run["id"])[0][:2], ("failed", None))
+        reloaded = self.fixture.fixture.get(run["id"])
+        for field in ("state", "draft", "assessment", "evidence_review", "budget"):
+            self.assertEqual(reloaded[field], run[field])
+        self.assertEqual(self.fixture.archive_fixture.source_snapshot(), snapshot)
+
+    def test_real_left_passage_crop_cannot_hide_sign_before_currency(self):
+        content = ("x" * 599 + "-USD 42 and 0. ").ljust(1500) + "Acme revenue FY2025."
+        self.assert_natural_currency_edge_rejected(content.ljust(1795) + " End.", "left")
+
+    def test_real_right_passage_crop_cannot_hide_sign_after_currency(self):
+        content = (" " * 700 + "Acme revenue FY2025. Amount 0 recorded. ").ljust(1794) + "42 USD-"
+        self.assert_natural_currency_edge_rejected(content.ljust(2795) + " End.", "right")
+
+    def test_visible_currency_at_source_start_keeps_complete_signed_operand(self):
+        quote = "USD +42 and 0. Acme revenue FY2025. End."
+        self.fixture.capture(quote)
+        self.calculation_from_quote(quote, "+42")
+        run = self.run_now()
+        self.assertEqual(run["state"], "draft")
+        self.assertEqual(self.writer_inputs[0]["packet"]["passages"][0]["start"], 0)
+        self.assertEqual(run["draft"]["items"][0]["calculation"]["result"], "42.00")
+        self.assertEqual(self.fixture.fixture.get(run["id"])["draft"], run["draft"])
+        self.assert_usage(run)
+
+    def test_real_nonzero_passage_keeps_currency_with_visible_original_context(self):
+        content = ("x" * 600 + "Visible boundary. USD +42 and 0. ").ljust(1500) + "Acme revenue FY2025."
+        content = content.ljust(1795) + " End."
+        self.fixture.capture(content)
+        self.calculation_from_quote(content[600:1800], "+42")
+        run = self.run_now()
+        self.assertEqual(run["state"], "draft")
+        packet = self.writer_inputs[0]["packet"]
+        self.assertEqual(len(packet["passages"]), 1)
+        passage = packet["passages"][0]
+        self.assertEqual((passage["start"], passage["end"]), (600, 1800))
+        self.assertEqual(passage["text"], content[600:1800])
+        self.assertTrue(passage["text"].startswith("Visible boundary. USD +42"))
+        self.assertEqual(run["draft"]["items"][0]["calculation"]["result"], "42.00")
+        self.assertEqual(self.fixture.fixture.get(run["id"])["draft"], run["draft"])
+        self.assert_usage(run)
 
     def test_plain_signed_currency_operand_preserves_sum_and_reload(self):
         quote = "Acme FY2025 revenue was USD -42 and 0. Amounts recorded."

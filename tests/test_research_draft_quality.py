@@ -1,5 +1,8 @@
 """The opt-in draft oracle rejects typed but unsupported fixture prose offline."""
 from copy import deepcopy
+import json
+from pathlib import Path
+import tempfile
 import unittest
 
 from backend.research_draft import gap_draft, has_support, validate_response
@@ -94,6 +97,81 @@ class ResearchDraftQualityTests(unittest.TestCase):
             self.replace_fact(run, text)
             with self.subTest(text=text):
                 check_run(case, run, sources, loader, workflow="research_draft")
+
+    def test_conflicting_fixture_currency_is_rejected_independently_of_label_case(self):
+        case = self.cases["historical_tail"]
+        for label in ("EUR", "eur", "eUr"):
+            for amount in (f"{label} 42 million", f"42 million {label}", f"42million{label}"):
+                run, sources, loader = self.draft_run(case)
+                self.replace_fact(run, "Acme revenue for FY2025 was " + amount + ".")
+                with self.subTest(amount=amount), self.assertRaisesRegex(AssertionError, "quantity"):
+                    check_run(case, run, sources, loader, workflow="research_draft")
+
+    def test_correct_fixture_currency_case_and_copied_qualifier_remain_valid(self):
+        case = self.cases["historical_tail"]
+        amounts = [f"{label} 42 million" for label in ("USD", "usd", "uSd")]
+        amounts += [f"42 million {label}" for label in ("USD", "usd", "uSd")]
+        amounts += ["42 million", "42millionusd"]
+        for amount in amounts:
+            run, sources, loader = self.draft_run(case)
+            self.replace_fact(run, "Acme revenue was " + amount + ".")
+            with self.subTest(amount=amount):
+                check_run(case, run, sources, loader, workflow="research_draft")
+
+    def test_unknown_uppercase_currency_keeps_legacy_conflict_guard(self):
+        case = self.cases["historical_tail"]
+        self.assertNotIn("GBP", case["expected"]["draft_currency_codes"])
+        self.assertNotIn("JPY", case["expected"]["draft_currency_codes"])
+        for label in ("GBP", "JPY"):
+            for amount in (f"{label} 42 million", f"42 million {label}", f"42million{label}"):
+                run, sources, loader = self.draft_run(case)
+                self.replace_fact(run, "Acme revenue for FY2025 was " + amount + ".")
+                with self.subTest(amount=amount), self.assertRaisesRegex(AssertionError, "quantity"):
+                    check_run(case, run, sources, loader, workflow="research_draft")
+
+    def test_leading_decimal_cannot_borrow_the_supported_integer_suffix(self):
+        case = self.cases["historical_tail"]
+        for amount in (".42", "-.42", "+.42", ",42", "-,42", "1..42"):
+            run, sources, loader = self.draft_run(case)
+            self.replace_fact(run, "Acme revenue for FY2025 was USD 42 million. "
+                              "Another amount was USD " + amount + " million.")
+            with self.subTest(amount=amount), self.assertRaisesRegex(AssertionError, "numeric"):
+                check_run(case, run, sources, loader, workflow="research_draft")
+
+    def test_complete_plain_decimal_requires_its_own_exact_fixture_support(self):
+        for value in ("0.42", "+0.42"):
+            case = deepcopy(self.cases["historical_tail"])
+            case["sources"][0]["quote"] = "Acme revenue for FY2025 was USD " + value + " million."
+            case["expected"]["support_fragments"] = [["FY2025", "USD", value]]
+            case["expected"]["draft_quantities"][0]["value"] = value
+            run, sources, loader = self.draft_run(case)
+            with self.subTest(value=value):
+                check_run(case, run, sources, loader, workflow="research_draft")
+            # A complete decimal must not fall back to its integer suffix even
+            # when the row still cites the original supported value of 42.
+            original = self.cases["historical_tail"]
+            run, sources, loader = self.draft_run(original)
+            self.replace_fact(run, "Acme revenue for FY2025 was USD 42 million. "
+                              "Another amount was USD " + value + " million.")
+            with self.subTest(unsupported=value), self.assertRaisesRegex(AssertionError, "numeric"):
+                check_run(original, run, sources, loader, workflow="research_draft")
+
+    def test_quantity_fixture_requires_a_valid_bounded_currency_vocabulary(self):
+        bad = (None, "USD", [], ["EUR"], ["USD", "USD"], ["usd", "EUR"],
+               ["USD", "EURO"], ["USD", 7],
+               ["USD"] + ["AA" + chr(ord("A") + index) for index in range(26)] + ["AB" + chr(ord("A") + index) for index in range(6)])
+        with tempfile.TemporaryDirectory(prefix="maestro-draft-currency-vocabulary-") as temporary:
+            path = Path(temporary) / "corpus.json"
+            for vocabulary in bad:
+                case = deepcopy(self.cases["historical_tail"])
+                case["expected"]["draft_currency_codes"] = vocabulary
+                path.write_text(json.dumps({"version": 2, "cases": [case]}), encoding="utf-8")
+                with self.subTest(vocabulary=vocabulary), self.assertRaisesRegex(AssertionError, "currency"):
+                    load_cases(path)
+            case["expected"].pop("draft_currency_codes")
+            path.write_text(json.dumps({"version": 2, "cases": [case]}), encoding="utf-8")
+            with self.assertRaisesRegex(AssertionError, "currency"):
+                load_cases(path)
 
     def test_server_calculation_retains_scale_and_cannot_authorize_a_different_one(self):
         case = self.cases["historical_tail"]

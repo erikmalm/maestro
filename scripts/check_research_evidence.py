@@ -41,7 +41,11 @@ from backend.web_search import WebSearch
 
 CORPUS = ROOT / "tests" / "fixtures" / "research_evidence_quality.json"
 PLAIN_NUMBER = r"[+-]?[0-9]+(?:\.[0-9]+)?"
+# Recognize a leading decimal separator as part of its candidate, then refuse
+# that unsupported spelling rather than authorizing its integer suffix.
+NUMBER_CANDIDATE = r"[+-]?(?:[0-9]+(?:\.[0-9]+)?|[.,][0-9]+)"
 SCALES = ("thousand", "million", "billion", "trillion")
+MAX_CURRENCY_CODES = 32
 
 
 def require(condition, message):
@@ -76,17 +80,33 @@ def plain_numbers(text):
             and re.search(r"[+-]\s*" + currency + r"\s*[0-9]", text) is None, unsupported)
     postfix = r"[0-9](?:\s*" + currency + r"\s*)?[+-](?![0-9])"
     require(re.search(postfix, text) is None, unsupported)
-    return set(re.findall(PLAIN_NUMBER, text))
+    candidates = re.findall(NUMBER_CANDIDATE, text)
+    require(all(re.fullmatch(PLAIN_NUMBER, value) is not None for value in candidates), unsupported)
+    return set(candidates)
 
 
-def quantities(text):
-    """Recognize adjacent value/scale/currency phrases in the finite corpus."""
-    # Keep currency codes uppercase so prose such as "was 42 million USD"
-    # cannot manufacture a second currency called WAS.
-    forward = r"(?<!\w)([A-Z]{3})\s*(" + PLAIN_NUMBER + r")\s*((?i:" + "|".join(SCALES) + r"))s?\b"
-    reverse = r"(?<![\w.+-])(" + PLAIN_NUMBER + r")\s*((?i:" + "|".join(SCALES) + r"))s?\s+([A-Z]{3})(?!\w)"
-    found = {(value, currency, scale.lower()) for currency, value, scale in re.findall(forward, text)}
-    found.update((value, currency, scale.lower()) for value, scale, currency in re.findall(reverse, text))
+def draft_currency_codes(expected):
+    """Validate the fixture's recognition scope, not permission to use a unit."""
+    codes = expected.get("draft_currency_codes")
+    invalid = "Invalid or missing fixture draft currency vocabulary"
+    require(type(codes) is list and 1 <= len(codes) <= MAX_CURRENCY_CODES
+            and all(isinstance(code, str) and re.fullmatch(r"[A-Z]{3}", code) is not None for code in codes), invalid)
+    require(len(set(codes)) == len(codes)
+            and all(item["currency"] in codes for item in expected.get("draft_quantities", [])), invalid)
+    return codes
+
+
+def quantities(text, currency_codes):
+    """Recognize declared case variants and legacy uppercase currency labels."""
+    # Keep the existing uppercase three-letter conflict check. Only declared
+    # labels gain ASCII case variants, so ordinary prose such as "was" is not
+    # a currency. Values stay unchanged; expected tuples remain authoritative.
+    declared = r"(?ai:" + "|".join(re.escape(code) for code in currency_codes) + ")"
+    currency = r"(?:[A-Z]{3}|" + declared + ")"
+    forward = r"(?<!\w)(" + currency + r")\s*(" + PLAIN_NUMBER + r")\s*((?i:" + "|".join(SCALES) + r"))s?\b"
+    reverse = r"(?<![\w.+-])(" + PLAIN_NUMBER + r")\s*((?i:" + "|".join(SCALES) + r"))s?\s*(" + currency + r")(?!\w)"
+    found = {(value, code.upper(), scale.lower()) for code, value, scale in re.findall(forward, text)}
+    found.update((value, code.upper(), scale.lower()) for value, scale, code in re.findall(reverse, text))
     return found
 
 
@@ -95,7 +115,7 @@ def check_draft_quantities(expected, row):
     if not annotations:
         return
     wanted = {(item["value"], item["currency"], item["scale"]) for item in annotations}
-    observed = quantities(row["text"])
+    observed = quantities(row["text"], draft_currency_codes(expected))
     amounts = {(value, scale.lower()) for value, scale in re.findall(
         r"(?<![\w.+-])(" + PLAIN_NUMBER + r")\s*((?i:" + "|".join(SCALES) + r"))s?\b", row["text"])}
     # The canonical row also displays copied request qualifiers. An omitted
@@ -143,7 +163,9 @@ def load_cases(path=CORPUS):
                         and isinstance(item["value"], str) and re.fullmatch(PLAIN_NUMBER, item["value"]) is not None
                         and isinstance(item["currency"], str) and re.fullmatch(r"[A-Z]{3}", item["currency"]) is not None
                         and item["scale"] in SCALES, "Invalid fixture draft quantity")
-                require(any((item["value"], item["currency"], item["scale"]) in quantities(source["quote"])
+            codes = draft_currency_codes(expected) if annotations or "draft_currency_codes" in expected else []
+            for item in annotations:
+                require(any((item["value"], item["currency"], item["scale"]) in quantities(source["quote"], codes)
                             for source in case["sources"]), "Fixture draft quantity lacks source support")
         for source in case["sources"]:
             require(urlsplit(source["url"]).hostname == "reports.example.org", "Only synthetic fixture origins are allowed")

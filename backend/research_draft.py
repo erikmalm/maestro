@@ -41,15 +41,21 @@ _NUMBER_RUN = re.compile(
     r"(?:[+\-\u2212\u00b1\u2213]\s*)?(?:\d+(?:[\s.,'\u066b\u066c/\-]+\d+)*|[.,]\d+)"
     r"(?:[eE][+\-\u2212\u00b1\u2213]?\d+)?")
 # A sign may sit outside a currency symbol/short label rather than directly
-# beside the digits. This small rejection grammar treats symbols and short
-# letter labels conservatively, without identifying currencies or their value.
-_CURRENCY_LABEL = r"[^\W\d_]{1,3}"
-_CURRENCY_ENVELOPE = (r"(?:(?:" + _CURRENCY_LABEL + r"\s*)?\u00a4+(?:\s*" + _CURRENCY_LABEL
+# beside the digits. This structural rejection grammar recognizes short opaque
+# labels, uppercase/dotted codes and labels attached to currency symbols. It
+# does not identify currencies or establish the meaning or unit of an amount.
+_SHORT_LABEL = r"[^\W\d_]{1,3}"
+_CURRENCY_LABEL = (r"(?:[A-Z][A-Z0-9_]*(?:\.[A-Z0-9_]+)*\.?|(?:" + _SHORT_LABEL
+                   + r"\.)+(?:" + _SHORT_LABEL + r")?|" + _SHORT_LABEL + r")")
+_SYMBOL_LABEL = r"(?:[^\W\d_]|\.)+"
+_CURRENCY_ENVELOPE = (r"(?:(?:" + _SYMBOL_LABEL + r"\s*)?\u00a4+(?:\s*" + _SYMBOL_LABEL
                       + r")?|" + _CURRENCY_LABEL + r")")
 _SIGNED_CURRENCY_BEFORE = re.compile(r"[" + re.escape(_SIGNS) + r"]\s*" + _CURRENCY_ENVELOPE + r"\s*\Z")
 # A sign starting another digit run belongs to that run rather than being a
 # postfix sign of the earlier amount (for example, "10 and -12").
 _SIGNED_CURRENCY_AFTER = re.compile(r"\A\s*" + _CURRENCY_ENVELOPE + r"\s*[" + re.escape(_SIGNS) + r"](?!\s*\d)")
+_CURRENCY_BEFORE = re.compile(r"(?<!\w)" + _CURRENCY_ENVELOPE + r"\s*\Z")
+_CURRENCY_AFTER = re.compile(r"\A\s*" + _CURRENCY_ENVELOPE + r"(?!\w)")
 _GAPS = {
     "missing": "No supported fact was recorded for this requirement in the inspected evidence.",
     "stale": "Saved evidence needs checking before this requirement can be drafted as a supported fact.",
@@ -244,7 +250,14 @@ def _numeric_view(text):
     """
     characters, offsets = [], []
     for offset, character in enumerate(text):
-        if unicodedata.category(character) == "Cf":
+        original_category = unicodedata.category(character)
+        if original_category == "Cf":
+            continue
+        if original_category == "Sc":
+            # Some currency symbols (notably U+FDFC) expand into letters under
+            # NFKC. Retain their original monetary role before projecting.
+            characters.append("\u00a4")
+            offsets.append(offset)
             continue
         for projected in unicodedata.normalize("NFKC", character):
             category = unicodedata.category(projected)
@@ -298,11 +311,25 @@ def _numeric_literal(value, support, passage):
         trailing_sign = after < len(text) and text[after] in _SIGNS
         currency_sign = (_SIGNED_CURRENCY_BEFORE.search(text[:match.start()]) is not None
                          or _SIGNED_CURRENCY_AFTER.match(text[match.end():]) is not None)
-        # A dot or whitespace at an unknown packet edge may continue a decimal
-        # or grouped number. Require visible context beyond all such separators.
+        # Include the complete recognized monetary envelope in boundary checks.
+        # A packet starting USD 42 or ending 42 USD cannot show whether a sign
+        # immediately outside that packet belongs to the amount. Ordinary long
+        # lowercase unit words such as million remain lexical stoppers rather
+        # than being mistaken for currency codes.
+        prefix = _CURRENCY_BEFORE.search(text[:match.start()])
+        suffix = _CURRENCY_AFTER.match(text[match.end():])
+        boundary_left = prefix.start() if prefix else match.start()
+        boundary_right = match.end() + suffix.end() if suffix else match.end()
+        if prefix:
+            while boundary_left > 0 and word(text[boundary_left - 1]):
+                boundary_left -= 1
+        if suffix:
+            while boundary_right < len(text) and word(text[boundary_right]):
+                boundary_right += 1
+        # A dot or whitespace at an unknown packet edge may continue a decimal,
+        # grouping separator or signed monetary envelope.
         def connector(character):
             return character.isspace() or character in _SIGNS + ".,'/\u066b\u066c"
-        boundary_left, boundary_right = match.start(), match.end()
         while boundary_left > 0 and connector(text[boundary_left - 1]):
             boundary_left -= 1
         while boundary_right < len(text) and connector(text[boundary_right]):

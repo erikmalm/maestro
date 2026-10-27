@@ -3,7 +3,9 @@ from copy import deepcopy
 from decimal import ROUND_UP, localcontext
 import hashlib
 import json
+import sys
 import unittest
+import unicodedata
 
 from backend.research_draft import (
     INSTRUCTIONS, MAX_NUMBER, MAX_RESPONSE_BYTES, MAX_SAVED_BYTES, MAX_SCHEMA_BYTES, MESSAGE,
@@ -11,7 +13,7 @@ from backend.research_draft import (
     validate_saved_draft, writer_input,
 )
 from backend.research_evidence import unavailable_review, validate_review, validate_saved_review
-from backend.research_passages import evidence_packet_hash
+from backend.research_passages import evidence_packet_hash, select_packet, validate_packet
 from backend.research_requirements import validate_assessment
 
 
@@ -374,13 +376,97 @@ class ResearchDraftTests(unittest.TestCase):
     def test_currency_between_amount_and_sign_cannot_authorize_positive_digits(self):
         amounts = ("-$42", "- $42", "\u2212\u00a342", "-USD 42", "\u2212 USD 42", "\u2212USD42",
                    "-US$ 42", "- USD $42", "-kr 42", "-usd 42", "-eur 42", "-\u5143 42",
-                   "42$-", "42 USD-", "42 USD -", "42 US$ \u2212", "42 usd-", "42 eur -", "42 \u5143 -")
+                   "-XUSD 42", "-U.S.$42", "-Rp. 42",
+                   "42$-", "42 USD-", "42 USD -", "42 US$ \u2212", "42 usd-", "42 eur -", "42 \u5143 -",
+                   "42 XUSD-", "42 U.S.$-", "42 Rp. -")
         for amount in amounts:
             for crop in ("whole", "writer", "review"):
                 with self.subTest(amount=amount, crop=crop):
                     assessment, review, raw = self.formatted_calculation(amount, "42", crop)
                     with self.assertRaises(ValueError):
                         validate_response(raw, assessment, review)
+
+    def test_all_original_currency_symbols_retain_signs_before_compatibility_expansion(self):
+        symbols = [chr(codepoint) for codepoint in range(sys.maxunicode + 1)
+                   if unicodedata.category(chr(codepoint)) == "Sc"]
+        self.assertIn("\ufdfc", symbols)
+        for symbol in symbols:
+            for amount in ("-" + symbol + " 42", "42 " + symbol + "-"):
+                with self.subTest(symbol=ascii(symbol), amount=ascii(amount)):
+                    assessment, review, raw = self.formatted_calculation(amount, "42", "whole")
+                    with self.assertRaises(ValueError):
+                        validate_response(raw, assessment, review)
+
+    def test_currency_compatibility_mapping_preserves_original_support_offsets_and_plain_values(self):
+        for symbol in ("\ufdfc", "\ufe69", "\uff04", "\u20b9"):
+            for amount, value, expected in ((symbol + "42", "42", "42"),
+                                            (symbol + "-42", "-42", "-42")):
+                with self.subTest(symbol=ascii(symbol), value=value):
+                    assessment, review, raw = self.formatted_calculation(amount, value, "writer")
+                    saved = validate_response(raw, assessment, review)
+                    support = saved["items"][0]["supports"][0]
+                    passage = review["passages"][0]
+                    self.assertEqual(support["quote"], value)
+                    self.assertEqual(support["start"] - passage["start"], passage["text"].index(value))
+                    self.assertEqual(passage["text"][support["start"] - passage["start"]:
+                                                         support["end"] - passage["start"]], value)
+                    self.assertEqual(saved["items"][0]["calculation"]["result"], expected)
+                    self.assertEqual(validate_saved_draft(saved, assessment, review), saved)
+
+    def selected_calculation(self, body):
+        assessment, previous = scope(("covered",))
+        candidate = {key: deepcopy(value) for key, value in previous["sources"][0].items() if key != "id"}
+        candidate.update(content=body, content_hash=hashlib.sha256(body.encode()).hexdigest())
+        packet = select_packet([candidate], assessment, {"state": "ready", "search_limited": False, "skipped_count": 0})
+        self.assertEqual(validate_packet(packet, lambda *args: candidate), packet)
+        self.assertEqual([(passage["start"], passage["end"]) for passage in packet["passages"]], [(600, 1800)])
+        passage = packet["passages"][0]
+        review = validate_review({"version": 1, "items": [{
+            "item_id": "i0", "state": "covered", "reason": "The selected saved passage contains this historical amount.",
+            "supports": [{"passage_id": passage["id"], "quote": passage["text"],
+                          "temporal_scope": "historical", "period": "FY2025", "observation_date": None}],
+        }]}, assessment, packet, CHECKED_AT)
+        raw = response(review)
+        raw["items"]["i0"].update(kind="calculation", calculation={
+            "operation": "sum", "precision": 0,
+            "operands": [{"value": "42", "support_index": 0}, {"value": "0", "support_index": 0}],
+        })
+        return assessment, review, raw, packet
+
+    def test_real_selected_packet_cannot_hide_a_sign_before_a_currency_envelope(self):
+        for label in ("USD", "XUSD", "U.S.$"):
+            body = "x" * 599 + "-" + label + " 42 and 0. "
+            body += " " * (1500 - len(body)) + "Testsubject metric0 FY2025."
+            body += " " * (1795 - len(body)) + " End."
+            with self.subTest(label=label):
+                assessment, review, raw, packet = self.selected_calculation(body)
+                self.assertEqual(body[599], "-")
+                self.assertTrue(packet["passages"][0]["text"].startswith(label + " 42"))
+                with self.assertRaises(ValueError):
+                    validate_response(raw, assessment, review)
+
+    def test_real_selected_packet_cannot_hide_a_sign_after_a_currency_envelope(self):
+        for label in ("USD", "XUSD", "U.S.$"):
+            body = " " * 700 + "Testsubject metric0 FY2025. Amount 0 recorded. "
+            body += " " * (1500 - len(body)) + "USD context. "
+            tail = "42 " + label
+            body += " " * (1800 - len(tail) - len(body)) + tail + "-"
+            body += " " * (2795 - len(body)) + " End."
+            with self.subTest(label=label):
+                assessment, review, raw, packet = self.selected_calculation(body)
+                self.assertEqual(body[1800], "-")
+                self.assertTrue(packet["passages"][0]["text"].endswith(tail))
+                with self.assertRaises(ValueError):
+                    validate_response(raw, assessment, review)
+
+    def test_real_selected_packet_preserves_visible_currency_context_at_nonzero_offsets(self):
+        body = "x" * 600 + "Visible boundary. USD 42 and 0. "
+        body += " " * (1500 - len(body)) + "Testsubject metric0 FY2025."
+        body += " " * (1795 - len(body)) + " End."
+        assessment, review, raw, _ = self.selected_calculation(body)
+        saved = validate_response(raw, assessment, review)
+        self.assertEqual(saved["items"][0]["calculation"]["result"], "42")
+        self.assertEqual(validate_saved_draft(saved, assessment, review), saved)
 
     def test_mixed_or_repeated_group_separators_cannot_authorize_numeric_fragments(self):
         amounts = ("1\t234", "1  234", "1, 234", "1,\t234", "1\u2009\u2009234",
@@ -396,7 +482,8 @@ class ResearchDraftTests(unittest.TestCase):
     def test_currency_context_keeps_complete_plain_and_signed_ascii_literals_valid(self):
         controls = (("$42", "42", "42"), ("USD 42", "42", "42"), ("+42", "+42", "42"),
                     ("-42", "-42", "-42"), ("USD -42", "-42", "-42"), ("$-42", "-42", "-42"),
-                    ("US$ -42", "-42", "-42"), ("\u00a342", "42", "42"))
+                    ("US$ -42", "-42", "-42"), ("\u00a342", "42", "42"),
+                    ("XUSD 42", "42", "42"), ("U.S.$42", "42", "42"), ("Rp. 42", "42", "42"))
         for amount, value, expected in controls:
             for crop in ("whole", "writer", "review"):
                 with self.subTest(amount=amount, crop=crop):
