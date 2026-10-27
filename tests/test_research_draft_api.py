@@ -151,6 +151,72 @@ class ResearchDraftApiTests(unittest.TestCase):
         self.assertEqual(self.fixture.fixture.get(run["id"])["draft"], run["draft"])
         self.assert_usage(run)
 
+    def calculation_from_quote(self, quote, operand):
+        self.fixture.review_builder = lambda selected: {"version": 1, "items": [{
+            "item_id": "i1", "state": "covered", "reason": fixtures.REASON,
+            "supports": [self.fixture.support(selected, quote)]}]}
+
+        def calculated(selected):
+            passage = next(row for row in selected["packet"]["passages"] if quote in row["text"])
+            return {"version": 1, "items": {"i1": {
+                "kind": "calculation", "text": "The cited amounts produce a declared sum.",
+                "supports": [{"passage_id": passage["id"], "quote": operand},
+                             {"passage_id": passage["id"], "quote": "and 0."}],
+                "calculation": {"operation": "sum", "operands": [
+                    {"value": operand, "support_index": 0}, {"value": "0", "support_index": 1}], "precision": 2}}}}
+
+        self.writer_builder = calculated
+
+    def assert_rejected_numeric_cases(self, cases):
+        quotes = [f"Case {index}: Acme FY2025 revenue in USD was {amount} and 0. Amounts recorded."
+                  for index, (amount, _) in enumerate(cases)]
+        self.fixture.capture(" ".join(quotes))
+        snapshot = self.fixture.archive_fixture.source_snapshot()
+        for (amount, operand), quote in zip(cases, quotes):
+            with self.subTest(amount=amount):
+                self.calculation_from_quote(quote, operand)
+                run = self.run_now()
+                self.assertEqual(run["state"], "failed")
+                self.assertIsNone(run["draft"])
+                self.assertEqual(run["assessment"]["completion_criterion"], requirements.REQUEST)
+                self.assertEqual(run["evidence_review"]["items"][0]["state"], "covered")
+                self.assertEqual(run["evidence_review"]["items"][0]["supports"][0]["quote"], quote)
+                rows = self.writer_rows(run["id"])
+                self.assertEqual(len(rows), 1)
+                self.assertEqual(rows[0][:2], ("failed", None))
+                reloaded = self.fixture.fixture.get(run["id"])
+                self.assertEqual(reloaded["state"], "failed")
+                self.assertIsNone(reloaded["draft"])
+                self.assertEqual(reloaded["assessment"], run["assessment"])
+                self.assertEqual(reloaded["evidence_review"], run["evidence_review"])
+                self.assertEqual(reloaded["budget"], run["budget"])
+                self.assert_usage(reloaded)
+        self.assertEqual(self.fixture.archive_fixture.source_snapshot(), snapshot)
+
+    def test_currency_envelope_cannot_remove_negative_sign_from_calculation_operand(self):
+        self.assert_rejected_numeric_cases((("-$42", "42"), ("-USD42", "42"), ("-USD 42", "42"),
+                                            ("-usd 42", "42"), ("42 usd-", "42")))
+
+    def test_separated_grouping_cannot_supply_partial_calculation_operand(self):
+        self.assert_rejected_numeric_cases((("1\t234", "234"), ("1  234", "234"), ("1, 234", "234"),
+                                            ("1\u2009\u2009234", "234"), ("1,\u202f234", "234")))
+
+    def test_plain_signed_currency_operand_preserves_sum_and_reload(self):
+        quote = "Acme FY2025 revenue was USD -42 and 0. Amounts recorded."
+        self.fixture.capture(quote)
+        self.calculation_from_quote(quote, "-42")
+        run = self.run_now()
+        self.assertEqual(run["state"], "draft")
+        row = run["draft"]["items"][0]
+        self.assertEqual((row["kind"], row["period"], row["currency"]), ("calculation", "FY2025", "USD"))
+        self.assertEqual([support["quote"] for support in row["supports"]], ["-42", "and 0."])
+        self.assertEqual(row["calculation"]["operands"], [
+            {"value": "-42", "support_index": 0}, {"value": "0", "support_index": 1}])
+        self.assertEqual(row["calculation"]["result"], "-42.00")
+        self.assertEqual(row["calculation"]["rounding"], "ROUND_HALF_EVEN")
+        self.assertEqual(self.fixture.fixture.get(run["id"])["draft"], run["draft"])
+        self.assert_usage(run)
+
     def test_spent_time_preserves_review_capacity_and_exact_packet_without_writer_call(self):
         self.fixture.capture()
         finish = backend.ResearchStore.finish_evidence_review

@@ -346,6 +346,75 @@ class ResearchDraftTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             validate_response(raw, assessment, cropped)
 
+    def formatted_calculation(self, amount, value, crop):
+        quote = "Amount " + amount + " and 0. FY2025 USD. End."
+        assessment, review = scope(("covered",), quotes=[quote])
+        if crop == "review":
+            # The reviewer can accept a unique suffix while the full packet
+            # still exposes the amount's original sign/grouping envelope.
+            packet = {key: review[key] for key in ("version", "offset_unit", "lookup", "selection", "sources", "passages")}
+            review = validate_review({"version": 1, "items": [{
+                "item_id": "i0", "state": "covered", "reason": "Supported.",
+                "supports": [{"passage_id": "p0", "quote": quote[quote.index(value):],
+                              "temporal_scope": "historical", "period": "FY2025", "observation_date": None}],
+            }]}, assessment, packet, CHECKED_AT)
+        raw = response(review)
+        raw["items"]["i0"].update(kind="calculation", calculation={
+            "operation": "sum", "precision": 0,
+            "operands": [{"value": value, "support_index": 0}, {"value": "0", "support_index": 0}],
+        })
+        if crop == "writer":
+            raw["items"]["i0"]["supports"] = [
+                {"passage_id": "p0", "quote": value},
+                {"passage_id": "p0", "quote": "and 0. FY2025 USD. End."},
+            ]
+            raw["items"]["i0"]["calculation"]["operands"][1]["support_index"] = 1
+        return assessment, review, raw
+
+    def test_currency_between_amount_and_sign_cannot_authorize_positive_digits(self):
+        amounts = ("-$42", "- $42", "\u2212\u00a342", "-USD 42", "\u2212 USD 42", "\u2212USD42",
+                   "-US$ 42", "- USD $42", "-kr 42", "-usd 42", "-eur 42", "-\u5143 42",
+                   "42$-", "42 USD-", "42 USD -", "42 US$ \u2212", "42 usd-", "42 eur -", "42 \u5143 -")
+        for amount in amounts:
+            for crop in ("whole", "writer", "review"):
+                with self.subTest(amount=amount, crop=crop):
+                    assessment, review, raw = self.formatted_calculation(amount, "42", crop)
+                    with self.assertRaises(ValueError):
+                        validate_response(raw, assessment, review)
+
+    def test_mixed_or_repeated_group_separators_cannot_authorize_numeric_fragments(self):
+        amounts = ("1\t234", "1  234", "1, 234", "1,\t234", "1\u2009\u2009234",
+                   "1\u00a0\u202f234", "1,\u202f234", "1' 234", "1\u066c\u2009234")
+        for amount in amounts:
+            for value in ("1", "234"):
+                for crop in ("whole", "writer", "review"):
+                    with self.subTest(amount=amount, value=value, crop=crop):
+                        assessment, review, raw = self.formatted_calculation(amount, value, crop)
+                        with self.assertRaises(ValueError):
+                            validate_response(raw, assessment, review)
+
+    def test_currency_context_keeps_complete_plain_and_signed_ascii_literals_valid(self):
+        controls = (("$42", "42", "42"), ("USD 42", "42", "42"), ("+42", "+42", "42"),
+                    ("-42", "-42", "-42"), ("USD -42", "-42", "-42"), ("$-42", "-42", "-42"),
+                    ("US$ -42", "-42", "-42"), ("\u00a342", "42", "42"))
+        for amount, value, expected in controls:
+            for crop in ("whole", "writer", "review"):
+                with self.subTest(amount=amount, crop=crop):
+                    assessment, review, raw = self.formatted_calculation(amount, value, crop)
+                    saved = validate_response(raw, assessment, review)
+                    self.assertEqual(saved["items"][0]["calculation"]["result"], expected)
+                    self.assertEqual(validate_saved_draft(saved, assessment, review), saved)
+        for second, expected in (("-12", "-2"), ("+12", "22")):
+            # "and" is a short letter label, but this sign starts a separate
+            # complete operand rather than being a postfix monetary sign.
+            assessment, review, raw = self.calculation("10 and " + second + ".", "10", second, precision=0)
+            saved = validate_response(raw, assessment, review)
+            self.assertEqual(saved["items"][0]["calculation"]["result"], expected)
+        for amount in ("- 42", "USD - 42", "$- 42"):
+            assessment, review, raw = self.formatted_calculation(amount, "42", "whole")
+            with self.subTest(amount=amount), self.assertRaises(ValueError):
+                validate_response(raw, assessment, review)
+
     def test_unicode_numeric_formats_cannot_supply_ascii_fragments_or_normalized_values(self):
         cases = (("1\u2009234", "234"), ("1\u2007234", "1"), ("1\u200a234", "234"),
                  ("1\u1680234", "234"), ("1\uff0e234", "234"), ("1\u2024234", "234"),

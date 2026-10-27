@@ -16,6 +16,7 @@ import sys
 import tempfile
 from threading import Lock
 import time
+import unicodedata
 from unittest.mock import patch
 from urllib.parse import urlsplit
 import uuid
@@ -39,11 +40,82 @@ from backend.web_search import WebSearch
 
 
 CORPUS = ROOT / "tests" / "fixtures" / "research_evidence_quality.json"
+PLAIN_NUMBER = r"[+-]?[0-9]+(?:\.[0-9]+)?"
+SCALES = ("thousand", "million", "billion", "trillion")
 
 
 def require(condition, message):
     if not condition:
         raise AssertionError(message)
+
+
+def plain_numbers(text):
+    """Conservative lexical checks for this ASCII-number fixture evaluation.
+
+    Do not normalize typography into accepted evidence or discard signs/digits.
+    Parenthesized FY qualifiers and ordinary sentence punctuation remain valid;
+    Accounting amounts, format controls, named Unicode math signs and
+    grouped/scientific forms are conservatively unsupported by this oracle.
+    """
+    unsupported = "Unsupported numeric typography in fixture evaluation"
+    for index, character in enumerate(text):
+        require(not character.isnumeric() or character in "0123456789", unsupported)
+        if not character.isascii():
+            category, name = unicodedata.category(character), unicodedata.name(character, "")
+            require(category != "Cf" and "MINUS" not in name and "PLUS" not in name, unsupported)
+            if category == "Pd":
+                after = text[index + 1:].lstrip()
+                require(not after or not after[0].isdigit(), unsupported)
+    require(re.search(r"[0-9](?:[,/'\u2019\u066b\u066c]\s*[0-9]|[eE][+-]?[0-9]|\s+[0-9])", text) is None,
+            unsupported)
+    symbols = "".join(re.escape(character) for character in set(text) if unicodedata.category(character) == "Sc")
+    symbol = "[" + symbols + "]" if symbols else r"(?!)"
+    currency = r"(?:[^\W\d_]{1,8}|" + symbol + ")"
+    accounting = r"\(\s*(?:(?:[A-Z]{3}|" + symbol + r")\s*)?" + PLAIN_NUMBER + r"(?:\s*(?:" + "|".join(SCALES) + r")s?)?(?:\s*[A-Z]{3})?\s*\)"
+    require(re.search(accounting, text, re.IGNORECASE) is None
+            and re.search(r"[+-]\s*" + currency + r"\s*[0-9]", text) is None, unsupported)
+    postfix = r"[0-9](?:\s*" + currency + r"\s*)?[+-](?![0-9])"
+    require(re.search(postfix, text) is None, unsupported)
+    return set(re.findall(PLAIN_NUMBER, text))
+
+
+def quantities(text):
+    """Recognize adjacent value/scale/currency phrases in the finite corpus."""
+    # Keep currency codes uppercase so prose such as "was 42 million USD"
+    # cannot manufacture a second currency called WAS.
+    forward = r"(?<!\w)([A-Z]{3})\s*(" + PLAIN_NUMBER + r")\s*((?i:" + "|".join(SCALES) + r"))s?\b"
+    reverse = r"(?<![\w.+-])(" + PLAIN_NUMBER + r")\s*((?i:" + "|".join(SCALES) + r"))s?\s+([A-Z]{3})(?!\w)"
+    found = {(value, currency, scale.lower()) for currency, value, scale in re.findall(forward, text)}
+    found.update((value, currency, scale.lower()) for value, scale, currency in re.findall(reverse, text))
+    return found
+
+
+def check_draft_quantities(expected, row):
+    annotations = expected.get("draft_quantities", [])
+    if not annotations:
+        return
+    wanted = {(item["value"], item["currency"], item["scale"]) for item in annotations}
+    observed = quantities(row["text"])
+    amounts = {(value, scale.lower()) for value, scale in re.findall(
+        r"(?<![\w.+-])(" + PLAIN_NUMBER + r")\s*((?i:" + "|".join(SCALES) + r"))s?\b", row["text"])}
+    # The canonical row also displays copied request qualifiers. An omitted
+    # currency in prose can use that row's explicit currency; an explicit
+    # conflicting currency in prose still fails below.
+    qualified = {(value, currency, scale) for value, currency, scale in wanted
+                 if (value, scale) in amounts and re.search(
+                     r"(?<!\w)" + re.escape(currency) + r"(?!\w)", row["currency"] or "")}
+    require(wanted <= observed | qualified, "Draft omitted an expected fixture quantity or changed its currency/scale")
+    allowed = set(wanted)
+    calculation = row["calculation"]
+    if calculation and calculation["operation"] in ("sum", "difference"):
+        # Only these operations preserve a common monetary unit. A server
+        # result does not authorize arbitrary currency/scale changes.
+        for _, currency, scale in wanted:
+            if all((operand["value"], currency, scale) in wanted for operand in calculation["operands"]):
+                allowed.add((calculation["result"], currency, scale))
+    require(observed <= allowed, "Draft introduced a quantity with an unsupported currency/scale")
+    require(amounts <= {(value, scale) for value, _, scale in allowed},
+            "Draft introduced a quantity with an unsupported scale")
 
 
 def source_text(source):
@@ -63,7 +135,16 @@ def load_cases(path=CORPUS):
         require(re.fullmatch(r"[a-z][a-z0-9_]{0,63}", case["id"]) is not None, "Invalid fixture ID")
         require(1 <= len(case["sources"]) <= 3, "Invalid fixture source count")
         require(corpus["version"] == 2 or "items" not in case["expected"], "Multiple expected items require corpus version 2")
-        expected_items(case)
+        for expected in expected_items(case):
+            annotations = expected.get("draft_quantities", [])
+            require(type(annotations) is list and len(annotations) <= 16, "Invalid fixture draft quantities")
+            for item in annotations:
+                require(type(item) is dict and set(item) == {"value", "currency", "scale"}
+                        and isinstance(item["value"], str) and re.fullmatch(PLAIN_NUMBER, item["value"]) is not None
+                        and isinstance(item["currency"], str) and re.fullmatch(r"[A-Z]{3}", item["currency"]) is not None
+                        and item["scale"] in SCALES, "Invalid fixture draft quantity")
+                require(any((item["value"], item["currency"], item["scale"]) in quantities(source["quote"])
+                            for source in case["sources"]), "Fixture draft quantity lacks source support")
         for source in case["sources"]:
             require(urlsplit(source["url"]).hostname == "reports.example.org", "Only synthetic fixture origins are allowed")
             source_text(source)
@@ -182,17 +263,18 @@ def check_run(case, run, captured, loader, *, workflow="evidence_review"):
             for fragments in expected["support_fragments"]:
                 require(all(fragment.casefold() in visible.casefold() for fragment in fragments),
                         "Draft omitted an expected fixture value or qualifier")
-            numbers = set(re.findall(r"[+-]?[0-9]+(?:\.[0-9]+)?", row["text"]))
+            numbers = plain_numbers(row["text"])
             # This is finite numeric provenance, not proof of prose truth.
             # Other packet rows or unrelated request text cannot authorize a
             # figure in this row. Canonical validation already pins citations
             # and copies this requirement's qualifiers from its assessment.
             provenance = " ".join([support["quote"] for support in row["supports"]] +
                                   [row[field] for field in ("period", "unit", "currency", "freshness") if row[field]])
-            allowed = set(re.findall(r"[+-]?[0-9]+(?:\.[0-9]+)?", provenance))
+            allowed = plain_numbers(provenance)
             if row["calculation"]:
                 allowed.add(row["calculation"]["result"])
             require(numbers <= allowed, "Draft introduced an unsupported numeric literal")
+            check_draft_quantities(expected, row)
     require(consumed["model_calls"] == calls, "Unexpected local call count for the populated fixture")
     require(consumed["hosted_searches"] == 0, "Unexpected hosted usage")
     require(all(amount == 0 for amount in run["budget"]["reserved"].values()), "Unreleased allowance")

@@ -26,6 +26,90 @@ class ResearchDraftQualityTests(unittest.TestCase):
         run["budget"]["consumed"]["model_calls"] += int(supported)
         return run, sources, loader
 
+    def replace_fact(self, run, text, *, calculation=None):
+        row = run["draft"]["items"][0]
+        raw = {"version": 1, "items": {row["item_id"]: {
+            "kind": "calculation" if calculation else "fact", "text": text,
+            "supports": [{key: support[key] for key in ("passage_id", "quote")} for support in row["supports"]],
+            "calculation": calculation}}}
+        run["draft"] = validate_response(raw, run["assessment"], run["evidence_review"])
+
+    def test_changed_quantity_scale_cannot_borrow_a_unit_elsewhere_in_the_row(self):
+        case = self.cases["historical_tail"]
+        for text in (
+            "Acme revenue for FY2025 was USD 42 billion.",
+            "Acme revenue for FY2025 was USD 42 thousand.",
+            "Acme revenue for FY2025 was USD 42 billion. The source uses the word million.",
+            "Acme revenue for FY2025 was USD 42 million, also stated as USD 42 billion.",
+            "Acme revenue for FY2025 was USD 42 million, also stated as 42 billion.",
+            "Acme revenue for FY2025 was EUR 42 million.",
+            "Acme revenue for FY2025 was USD 42 million, also stated as EUR 42 million.",
+        ):
+            run, sources, loader = self.draft_run(case)
+            self.replace_fact(run, text)
+            with self.subTest(text=text), self.assertRaisesRegex(AssertionError, "quantity"):
+                check_run(case, run, sources, loader, workflow="research_draft")
+
+    def test_unicode_and_accounting_numbers_cannot_disappear_from_provenance(self):
+        case = self.cases["historical_tail"]
+        for text in (
+            "Acme revenue for FY2025 was USD \u221242 million.",
+            "Acme revenue for FY2025 was USD \u207b42 million.",
+            "Acme revenue for FY2025 was USD (42) million.",
+            "Acme revenue for FY2025 was (USD 42 million).",
+            "Acme revenue for FY2025 was (USD 42 Million).",
+            "Acme revenue for FY2025 was -USD 42 million.",
+            "Acme revenue for FY2025 was -$42 million, in USD.",
+            "Acme revenue for FY2025 was \u2212USD 42 million.",
+            "Acme revenue for FY2025 was USD 42 million. Another amount was 42-.",
+            "Acme revenue for FY2025 was USD 42 million-.",
+            "Acme revenue for FY2025 was USD 42 million. Another amount was -usd 42 million.",
+            "Acme revenue for FY2025 was USD 42 million. Another amount was \u2212eur 42 million.",
+            "Acme revenue for FY2025 was USD 42 million. Another amount was 42usd-.",
+            "Acme revenue for FY2025 was USD 42 million. Another amount was 42 USD\u2212.",
+            "Acme revenue for FY2025 was USD 42 million\u2212.",
+            "Acme revenue for FY2025 was USD 42 million. Another amount was 42$\u2212.",
+            "Acme revenue for FY2025 was USD 42 million. Another amount was \u2212\u20b942 million.",
+            "Acme revenue for FY2025 was USD 42 million. Another amount was -\u20b942 million.",
+            "Acme revenue for FY2025 was USD 42 million. Operating profit was USD \uff19\uff19 million.",
+            "Acme revenue for FY2025 was USD 42 million. Operating profit was USD 9\u200b9 million.",
+            "Acme revenue for FY2025 was USD 42 million. Operating profit was USD 42,2025 million.",
+            "Acme revenue for FY2025 was USD 42 million. Another amount was 42, 2025.",
+            "Acme revenue for FY2025 was USD 42 million. Another amount was 42,\t2025.",
+        ):
+            run, sources, loader = self.draft_run(case)
+            self.replace_fact(run, text)
+            with self.subTest(text=ascii(text)), self.assertRaisesRegex(AssertionError, "numeric"):
+                check_run(case, run, sources, loader, workflow="research_draft")
+
+    def test_plain_punctuation_and_parenthesized_qualifiers_preserve_expected_quantity(self):
+        case = self.cases["historical_tail"]
+        for text in (
+            "Acme revenue (FY2025) was USD 42 million; this is historical evidence.",
+            "Acme revenue for FY2025 - as reported - was USD 42 million.",
+            "Acme revenue for FY2025 was 42 million USD.",
+            "Acme revenue was 42 million.",
+        ):
+            run, sources, loader = self.draft_run(case)
+            self.replace_fact(run, text)
+            with self.subTest(text=text):
+                check_run(case, run, sources, loader, workflow="research_draft")
+
+    def test_server_calculation_retains_scale_and_cannot_authorize_a_different_one(self):
+        case = self.cases["historical_tail"]
+        calculation = {"operation": "sum", "operands": [
+            {"value": "42", "support_index": 0}, {"value": "42", "support_index": 0}], "precision": 2}
+        for scale in ("million", "billion"):
+            run, sources, loader = self.draft_run(case)
+            text = "Acme revenue for FY2025 was USD 42 million; twice that amount is USD 84.00 " + scale + "."
+            self.replace_fact(run, text, calculation=calculation)
+            with self.subTest(scale=scale):
+                if scale == "million":
+                    check_run(case, run, sources, loader, workflow="research_draft")
+                else:
+                    with self.assertRaisesRegex(AssertionError, "quantity"):
+                        check_run(case, run, sources, loader, workflow="research_draft")
+
     def test_all_frozen_cases_preserve_values_and_gaps_with_expected_call_counts(self):
         for case in self.cases.values():
             with self.subTest(case=case["id"]):
