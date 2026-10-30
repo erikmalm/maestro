@@ -319,6 +319,139 @@ function evidenceReviewed(): ResearchRun {
   };
   return run;
 }
+function drafted(): ResearchRun {
+  const run = evidenceReviewed();
+  run.workflow = "research_draft";
+  run.state = "draft";
+  const assessment = run.assessment!;
+  const review = run.evidence_review!;
+  const template = assessment.items[0];
+  assessment.items.push(
+    { ...template, id: "total", criterion: "Combined revenue components" },
+    { ...template, id: "context", criterion: "Revenue context" },
+  );
+  const quote =
+    "FY2025 revenue components were USD 10 million and USD 20 million.";
+  review.passages.push({
+    id: "p5",
+    source_id: "c1",
+    start: 100,
+    end: 100 + quote.length,
+    text: quote,
+    passage_hash: "8".repeat(64),
+  });
+  const support = {
+    ...review.items[0].supports[0],
+    passage_id: "p5",
+    quote,
+    start: 100,
+    end: 100 + quote.length,
+  };
+  review.items.push(
+    {
+      item_id: "total",
+      state: "covered",
+      reason: "Both requested historical components are quoted.",
+      supports: [support],
+    },
+    {
+      item_id: "context",
+      state: "covered",
+      reason: "The quoted reporting period is explicit.",
+      supports: [review.items[0].supports[0]],
+    },
+  );
+  run.draft = {
+    version: 1,
+    state: "unreviewed",
+    reason: "draft_requires_review",
+    packet_hash: "a".repeat(64),
+    coverage_hash: "b".repeat(64),
+    items: assessment.items.map((item) => {
+      const coverage = review.items.find((entry) => entry.item_id === item.id)!;
+      const kind =
+        item.id === "total"
+          ? "calculation"
+          : item.id === "context"
+            ? "interpretation"
+            : coverage.state === "covered"
+              ? "fact"
+              : "gap";
+      return {
+        item_id: item.id,
+        coverage_state: coverage.state,
+        kind,
+        text:
+          kind === "gap"
+            ? "No supported draft statement is available for this requested item."
+            : kind === "calculation"
+              ? "The supplied components can be added using the cited values."
+              : kind === "interpretation"
+                ? "The source describes historical FY2025 revenue, rather than a current market quote."
+                : "Northstar reported FY2025 revenue of USD 10 million.",
+        subject_ids: item.subject_ids,
+        criterion: item.criterion,
+        period: item.period,
+        unit: item.unit,
+        currency: item.currency,
+        freshness: item.freshness,
+        supports:
+          kind === "gap"
+            ? []
+            : coverage.supports.map(
+                ({ passage_id, quote, source_id, start, end }) => ({
+                  passage_id,
+                  quote,
+                  source_id,
+                  start,
+                  end,
+                }),
+              ),
+        calculation:
+          kind === "calculation"
+            ? {
+                operation: "sum",
+                operands: [
+                  { value: "10", support_index: 0 },
+                  { value: "20", support_index: 0 },
+                ],
+                precision: 2,
+                result: "30.00",
+                rounding: "ROUND_HALF_EVEN",
+              }
+            : null,
+      };
+    }),
+  };
+  run.budget.consumed = {
+    ...run.budget.consumed,
+    model_calls: 3,
+    tokens: 144,
+    seconds: 3,
+  };
+  run.budget.remaining = {
+    ...run.budget.total,
+    model_calls: 1,
+    tokens: 99856,
+    seconds: 117,
+  };
+  run.events = [
+    ...run.events!,
+    {
+      sequence: 3,
+      at: "2026-10-23T10:00:00Z",
+      kind: "evidence_recorded",
+      summary: "Saved evidence assessed.",
+    },
+    {
+      sequence: 4,
+      at: "2026-10-23T10:00:01Z",
+      kind: "draft_recorded",
+      summary: "Unreviewed draft recorded. Final review has not run.",
+    },
+  ];
+  return run;
+}
 function deferred() {
   let release!: () => void;
   const promise = new Promise<void>((resolve) => {
@@ -330,7 +463,7 @@ type Submission = {
   submission_id: string;
   request: string;
   query: string;
-  workflow: "evidence_review";
+  workflow: "research_draft";
   chat_id: string | null;
 };
 type MockState = {
@@ -436,19 +569,19 @@ async function open(page: Page, suffix = "") {
 const focus = (page: Page) =>
   page.evaluate(() => window.dispatchEvent(new Event("focus")));
 
-test("Research records requested items and constraints through explicit local evidence review", async ({
+test("Research records requested items and constraints for an explicit cited draft", async ({
   page,
 }) => {
   const state = await fixture(page);
   await open(page);
   await expect(
-    page.getByText(/reviews a bounded selection of saved evidence/),
+    page.getByText(/writes a cited draft with an installed local model/),
   ).toBeVisible();
   await page
     .getByRole("textbox", { name: "Research request", exact: true })
     .fill(assessed().request);
   await page
-    .getByRole("button", { name: "Review saved evidence", exact: true })
+    .getByRole("button", { name: "Write saved-evidence draft", exact: true })
     .click();
   await expect(selected(page).getByRole("status")).toHaveText("Queued");
   expect(state.posts).toHaveLength(1);
@@ -456,7 +589,7 @@ test("Research records requested items and constraints through explicit local ev
     submission_id: expect.stringMatching(/^[a-f0-9]{32}$/),
     request: assessed().request,
     query: "",
-    workflow: "evidence_review",
+    workflow: "research_draft",
     chat_id: chatId,
   });
   const done = { ...assessed(), ...state.posts[0] };
@@ -518,6 +651,233 @@ test("Research records requested items and constraints through explicit local ev
   });
 });
 
+test("writer completion publishes a three-call unreviewed draft and unlocks the submitted field", async ({
+  page,
+}) => {
+  const state = await fixture(page);
+  await open(page);
+  const input = page.getByRole("textbox", {
+    name: "Research request",
+    exact: true,
+  });
+  const submit = page.getByRole("button", {
+    name: "Write saved-evidence draft",
+    exact: true,
+  });
+  await input.fill(drafted().request);
+  await submit.click();
+  await expect(selected(page).getByRole("status")).toHaveText("Queued");
+  expect(state.posts[0].workflow).toBe("research_draft");
+  const writing = {
+    ...evidenceReviewed(),
+    ...state.posts[0],
+    state: "running" as const,
+  };
+  writing.budget.consumed.model_calls = 2;
+  writing.budget.reserved.model_calls = 1;
+  state.runs = [writing];
+  await focus(page);
+  await expect(
+    selected(page).getByRole("region", {
+      name: "Saved-evidence review",
+      exact: true,
+    }),
+  ).toBeVisible();
+  await expect(
+    selected(page).getByRole("region", { name: "Research draft", exact: true }),
+  ).toHaveCount(0);
+  await expect(input).toBeDisabled();
+  await expect(submit).toBeDisabled();
+  state.runs = [{ ...drafted(), ...state.posts[0] }];
+  await focus(page);
+  await expect(selected(page).getByRole("status")).toHaveText(
+    "Draft — not finally reviewed",
+  );
+  const draft = selected(page).getByRole("region", {
+    name: "Research draft",
+    exact: true,
+  });
+  await expect(
+    draft.getByRole("heading", { name: "Unreviewed draft", exact: true }),
+  ).toBeVisible();
+  await expect(draft).toContainText(
+    "Northstar reported FY2025 revenue of USD 10 million.",
+  );
+  expect(
+    await draft.evaluate((node) =>
+      Boolean(
+        node.compareDocumentPosition(
+          document.querySelector('[aria-label="Saved-evidence review"]')!,
+        ) & Node.DOCUMENT_POSITION_FOLLOWING,
+      ),
+    ),
+  ).toBe(true);
+  const calls = selected(page)
+    .getByRole("row")
+    .filter({
+      has: page.getByRole("rowheader", { name: "Model calls", exact: true }),
+    });
+  await expect(calls.getByRole("cell").nth(1)).toHaveText("3");
+  await expect(calls.getByRole("cell").nth(2)).toHaveText("0");
+  await expect(input).toBeEnabled();
+  await expect(input).toHaveValue("");
+  await input.fill("A new draft request after writer completion");
+  await expect(submit).toBeEnabled();
+  expect(state.posts).toHaveLength(1);
+});
+
+test("draft facts, interpretations and computed results retain citations, qualifiers and visible gaps", async ({
+  page,
+}) => {
+  const run = drafted();
+  const plain =
+    "Northstar reported FY2025 revenue of USD 10 million. <em>Unreviewed wording</em>";
+  run.draft!.items[0].text = plain;
+  const state = await fixture(page, [run]);
+  await open(page, "?research_run=" + firstId);
+  const draft = selected(page).getByRole("region", {
+    name: "Research draft",
+    exact: true,
+  });
+  await expect(draft).toContainText("Not finally reviewed.");
+  const fact = draft.getByRole("region", {
+    name: "Draft for requested item 1",
+    exact: true,
+  });
+  await expect(fact).toContainText("Source fact");
+  await expect(fact).toContainText(
+    "Northstar Class A · FY2025 · millions · USD",
+  );
+  await expect(fact).toContainText(plain);
+  await expect(fact.locator("em")).toHaveCount(0);
+  await expect(fact.getByRole("blockquote")).toHaveText(
+    "FY2025 revenue was USD 10.",
+  );
+  await expect(
+    fact.getByRole("link", { name: "Open draft source", exact: true }),
+  ).toHaveAttribute("href", "https://example.org/report");
+  await fact.getByText("Draft citation references", { exact: true }).click();
+  await expect(
+    fact.getByText(candidate.content_hash, { exact: true }),
+  ).toBeVisible();
+  const missing = draft.getByRole("region", {
+    name: "Draft for requested item 2",
+    exact: true,
+  });
+  await expect(missing).toContainText("Boreal · FY2024 · millions · SEK");
+  await expect(missing).toContainText("Evidence gap · Missing");
+  await expect(missing.getByRole("blockquote")).toHaveCount(0);
+  await expect(
+    draft.getByRole("region", {
+      name: "Draft for requested item 3",
+      exact: true,
+    }),
+  ).toContainText("Stale for this request");
+  await expect(
+    draft.getByRole("region", {
+      name: "Draft for requested item 4",
+      exact: true,
+    }),
+  ).toContainText("Conflicting");
+  const calculated = draft.getByRole("region", {
+    name: "Draft for requested item 6",
+    exact: true,
+  });
+  await expect(
+    calculated.getByRole("region", { name: "Calculated result", exact: true }),
+  ).toContainText("Calculated result: 30.00");
+  await expect(calculated).toContainText("10 + 20 = 30.00");
+  await expect(calculated).toContainText(
+    "Rounded to 2 decimal places using half-even rounding",
+  );
+  await expect(calculated.getByRole("blockquote")).toHaveText(
+    "FY2025 revenue components were USD 10 million and USD 20 million.",
+  );
+  await expect(
+    draft.getByRole("region", {
+      name: "Draft for requested item 7",
+      exact: true,
+    }),
+  ).toContainText("Interpretation");
+  expect(state.posts).toHaveLength(0);
+});
+
+test("draft reload persists without resubmission and withdrawn sources withhold prior prose and calculations", async ({
+  page,
+}) => {
+  const run = drafted();
+  const state = await fixture(page, [run]);
+  await open(page, "?research_run=" + firstId);
+  const draft = selected(page).getByRole("region", {
+    name: "Research draft",
+    exact: true,
+  });
+  await expect(draft).toContainText(run.draft!.items[0].text);
+  await page.reload();
+  await expect(draft).toContainText(run.draft!.items[0].text);
+  await expect(selected(page).getByRole("status")).toHaveText(
+    "Draft — not finally reviewed",
+  );
+  const stored = await page.evaluate(() =>
+    JSON.stringify({ ...sessionStorage, ...localStorage }),
+  );
+  expect(stored).not.toContain(run.draft!.items[0].text);
+  expect(stored).not.toContain(run.draft!.items[0].supports[0].quote);
+  const capacity = structuredClone(run);
+  capacity.draft!.state = "unavailable";
+  capacity.draft!.reason = "writer_capacity";
+  for (const item of capacity.draft!.items) {
+    item.kind = "gap";
+    item.text = "The writer could not run within the remaining allowance.";
+    item.supports = [];
+    item.calculation = null;
+  }
+  state.runs = [capacity];
+  await focus(page);
+  await expect(draft).toContainText(
+    "The writer could not run within the remaining allowance",
+  );
+  await expect(
+    draft.getByRole("region", {
+      name: "Draft for requested item 1",
+      exact: true,
+    }),
+  ).toContainText("Draft unavailable · Covered");
+  await expect(draft).not.toContainText("Evidence gap · Covered");
+  const withheld = structuredClone(run);
+  withheld.draft!.state = "unavailable";
+  withheld.draft!.reason = "source_unavailable";
+  for (const item of withheld.draft!.items) {
+    item.kind = "gap";
+    item.text = "Saved evidence is unavailable. Draft text was withheld.";
+    item.supports = [];
+    item.calculation = null;
+  }
+  withheld.evidence_review!.sources = [];
+  withheld.evidence_review!.passages = [];
+  for (const item of withheld.evidence_review!.items) {
+    item.state = "unavailable";
+    item.reason = "Saved evidence is unavailable.";
+    item.supports = [];
+  }
+  state.runs = [withheld];
+  await focus(page);
+  await expect(
+    draft.getByRole("heading", { name: "Draft unavailable", exact: true }),
+  ).toBeVisible();
+  await expect(draft).toContainText("The previous draft text is withheld");
+  await expect(draft).not.toContainText(run.draft!.items[0].text);
+  await expect(draft).not.toContainText("· Covered");
+  await expect(draft.getByRole("blockquote")).toHaveCount(0);
+  await expect(draft.getByRole("link")).toHaveCount(0);
+  await expect(
+    draft.getByRole("region", { name: "Calculated result", exact: true }),
+  ).toHaveCount(0);
+  await page.reload();
+  await expect(draft).not.toContainText(run.draft!.items[0].text);
+  expect(state.posts).toHaveLength(0);
+});
+
 test("queued and running submissions lock the form independently of history selection until completion", async ({
   page,
 }) => {
@@ -537,7 +897,7 @@ test("queued and running submissions lock the form independently of history sele
     exact: true,
   });
   const submit = page.getByRole("button", {
-    name: "Review saved evidence",
+    name: "Write saved-evidence draft",
     exact: true,
   });
   const text = "Assess this request once while its local model is running";
@@ -590,7 +950,7 @@ test("failed reads preserve a known active form lock until a terminal run is con
     exact: true,
   });
   const submit = page.getByRole("button", {
-    name: "Review saved evidence",
+    name: "Write saved-evidence draft",
     exact: true,
   });
   const text = "Keep this submitted text while readback is unavailable";
@@ -631,7 +991,7 @@ test("external deletion unlocks only after complete history confirms absence and
     exact: true,
   });
   const submit = page.getByRole("button", {
-    name: "Review saved evidence",
+    name: "Write saved-evidence draft",
     exact: true,
   });
   const text = "A removed run is not a confirmed completed submission";
@@ -684,7 +1044,7 @@ test("initial history and reloaded active runs lock the form while unrelated com
       exact: true,
     });
     const submit = page.getByRole("button", {
-      name: "Review saved evidence",
+      name: "Write saved-evidence draft",
       exact: true,
     });
     await expect(input).toBeDisabled();
@@ -729,9 +1089,7 @@ test("per-item evidence decisions preserve qualifiers, exact passages and bounde
     name: "Saved-evidence review",
     exact: true,
   });
-  await expect(review).toContainText(
-    "No answer has been written or finally reviewed",
-  );
+  await expect(review).toContainText("Final answer review has not run");
   await expect(review).toContainText(
     "Supporting evidence may exist outside the inspected candidates",
   );
@@ -901,7 +1259,7 @@ test("material ambiguity displays clarification and remains stopped after pollin
     .getByRole("textbox", { name: "Research request", exact: true })
     .fill(assessed("clarify").request);
   await page
-    .getByRole("button", { name: "Review saved evidence", exact: true })
+    .getByRole("button", { name: "Write saved-evidence draft", exact: true })
     .click();
   await expect(selected(page).getByRole("status")).toHaveText("Queued");
   state.runs = [{ ...assessed("clarify"), ...state.posts[0] }];
@@ -970,13 +1328,16 @@ test("failed assessment and rejected submission keep the no-answer boundary", as
     .getByRole("textbox", { name: "Research request", exact: true })
     .fill("Assess a new request");
   await page
-    .getByRole("button", { name: "Review saved evidence", exact: true })
+    .getByRole("button", { name: "Write saved-evidence draft", exact: true })
     .click();
   await expect(page.getByRole("alert")).toContainText(
     "Choose an installed local model before assessing requirements.",
   );
   await expect(
-    page.getByRole("button", { name: "Review saved evidence", exact: true }),
+    page.getByRole("button", {
+      name: "Write saved-evidence draft",
+      exact: true,
+    }),
   ).toBeEnabled();
   await expect(
     page.getByRole("textbox", { name: "Research request", exact: true }),
@@ -1051,7 +1412,7 @@ test("an unknown POST response retries the same identity and a new submission ge
     .getByRole("textbox", { name: "Research request", exact: true })
     .fill(request);
   await page
-    .getByRole("button", { name: "Review saved evidence", exact: true })
+    .getByRole("button", { name: "Write saved-evidence draft", exact: true })
     .click();
   await expect(
     page.getByRole("button", { name: "Retry same submission" }),
@@ -1088,7 +1449,7 @@ test("an unknown POST response retries the same identity and a new submission ge
     .getByRole("textbox", { name: "Research request", exact: true })
     .fill("A new request");
   await page
-    .getByRole("button", { name: "Review saved evidence", exact: true })
+    .getByRole("button", { name: "Write saved-evidence draft", exact: true })
     .click();
   await expect.poll(() => state.posts.length).toBe(3);
   expect(state.posts[2].submission_id).not.toBe(state.posts[0].submission_id);
@@ -1111,7 +1472,7 @@ test("abandoning an unconfirmed submission disarms late completion clearing even
   const text = "An identical new draft is not the abandoned submission";
   await input.fill(text);
   await page
-    .getByRole("button", { name: "Review saved evidence", exact: true })
+    .getByRole("button", { name: "Write saved-evidence draft", exact: true })
     .click();
   await expect(
     page.getByRole("button", { name: "Retry same submission" }),
@@ -1150,7 +1511,7 @@ test("a lost response can be reconciled from its opaque submission identity afte
     .getByRole("textbox", { name: "Research request", exact: true })
     .fill("Reconcile this saved request");
   await page
-    .getByRole("button", { name: "Review saved evidence", exact: true })
+    .getByRole("button", { name: "Write saved-evidence draft", exact: true })
     .click();
   await expect(
     page.getByRole("button", { name: "Retry same submission" }),

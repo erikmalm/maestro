@@ -17,7 +17,9 @@
       "expected": {
         "criterion": "revenue", "period": "FY2025", "currency": "USD", "unit": null,
         "states": ["covered"], "minimum_sources": 1, "minimum_support_offset": 1200,
-        "support_fragments": [["FY2025", "USD", "42"]]
+        "support_fragments": [["FY2025", "USD", "42"]],
+        "draft_quantities": [{"value": "42", "currency": "USD", "scale": "million"}],
+        "draft_currency_codes": ["USD", "EUR"]
       }
     },
     {
@@ -78,7 +80,9 @@
           {
             "criterion": "revenue", "period": "FY2025", "currency": "USD", "unit": null,
             "states": ["covered"], "minimum_sources": 1, "minimum_support_offset": 1200,
-            "support_fragments": [["FY2025", "USD", "42"]]
+            "support_fragments": [["FY2025", "USD", "42"]],
+            "draft_quantities": [{"value": "42", "currency": "USD", "scale": "million"}],
+            "draft_currency_codes": ["USD", "EUR"]
           },
           {
             "criterion": "operating profit", "period": "FY2025", "currency": "USD", "unit": null,

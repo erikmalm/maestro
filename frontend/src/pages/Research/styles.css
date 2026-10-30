@@ -161,6 +161,30 @@
   overflow-wrap: anywhere;
   font: inherit;
 }
+.research-draft-boundary {
+  border-left: 3px solid var(--accent);
+  padding-left: 12px;
+}
+.research-draft-items h4 {
+  margin-top: 0;
+}
+.research-draft-citations {
+  display: grid;
+  gap: 14px;
+  padding-left: 22px;
+}
+.research-draft-citations blockquote {
+  border-left: 3px solid var(--line);
+  margin: 10px 0;
+  padding-left: 12px;
+  white-space: pre-wrap;
+}
+.research-calculation {
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  padding: 12px;
+  margin: 12px 0;
+}
 .research-section > p {
   font-size: 13px;
   line-height: 1.6;

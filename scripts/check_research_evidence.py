@@ -2,7 +2,7 @@
 
 Each case gets a disposable private workspace and sibling archive. No existing
 workspace, configuration, credentials, memory or hosted search is used. A case
-is attempted once, with at most two local inference requests. Unknown completion
+is attempted once, with at most two evidence calls or three draft calls. Unknown completion
 stops the entire run and requires operator recovery of the original server.
 """
 import argparse
@@ -16,6 +16,7 @@ import sys
 import tempfile
 from threading import Lock
 import time
+import unicodedata
 from unittest.mock import patch
 from urllib.parse import urlsplit
 import uuid
@@ -32,17 +33,115 @@ from backend.context_policy import DEFAULT as ARCHIVE_DEFAULT, SOURCE_BYTES
 from backend.memory import MemoryStore
 from backend.provider import DEFAULT, Provider, validate_ollama_url
 from backend.research_evidence import validate_saved_review
+from backend.research_draft import has_support, validate_saved_draft
 from backend.research_passages import validate_packet
 from backend.research_requirements import validate_saved_assessment
 from backend.web_search import WebSearch
 
 
 CORPUS = ROOT / "tests" / "fixtures" / "research_evidence_quality.json"
+PLAIN_NUMBER = r"[+-]?[0-9]+(?:\.[0-9]+)?"
+# Arabic numeric separators stay attached across whitespace. ASCII punctuation
+# needs adjacency here so an ordinary sentence ending ". 42" stays valid.
+NUMBER_CANDIDATE = r"[+-]?(?:[0-9]+(?:\.[0-9]+)?|[.,][0-9]+|[\u066b\u066c]\s*[0-9]+)"
+SCALES = ("thousand", "million", "billion", "trillion")
+MAX_CURRENCY_CODES = 32
 
 
 def require(condition, message):
     if not condition:
         raise AssertionError(message)
+
+
+def plain_numbers(text):
+    """Conservative lexical checks for this ASCII-number fixture evaluation.
+
+    Do not normalize typography into accepted evidence or discard signs/digits.
+    Parenthesized FY qualifiers and ordinary sentence punctuation remain valid;
+    Accounting amounts, currency glyphs, separated signs, format controls,
+    named Unicode math signs and grouped/scientific forms are unsupported.
+    """
+    unsupported = "Unsupported numeric typography in fixture evaluation"
+    for index, character in enumerate(text):
+        category = unicodedata.category(character)
+        require(not character.isnumeric() or character in "0123456789", unsupported)
+        # This finite corpus uses currency codes. A glyph cannot acquire its
+        # identity from a copied qualifier, even for an ambiguous dollar sign.
+        require(category != "Sc", unsupported)
+        if not character.isascii():
+            name = unicodedata.name(character, "")
+            require(category != "Cf" and "MINUS" not in name and "PLUS" not in name, unsupported)
+            if category == "Pd":
+                after = text[index + 1:].lstrip()
+                require(not after or not after[0].isdigit(), unsupported)
+    require(re.search(r"[0-9](?:[,/'\u2019\u066b\u066c]\s*[0-9]|[eE][+-]?[0-9]|\s+[0-9])", text) is None,
+            unsupported)
+    require(re.search(r"[+-]\s+(?=[.,\u066b\u066c]?[0-9])", text) is None, unsupported)
+    # With an explicit sign, an ASCII separator and following whitespace are
+    # ambiguous numeric notation rather than ordinary sentence punctuation.
+    require(re.search(r"[+-]\s*[.,]\s+[0-9]", text) is None, unsupported)
+    currency_label = r"[^\W\d_]{1,8}"
+    accounting = r"\(\s*(?:[A-Z]{3}\s*)?" + PLAIN_NUMBER + r"(?:\s*(?:" + "|".join(SCALES) + r")s?)?(?:\s*[A-Z]{3})?\s*\)"
+    require(re.search(accounting, text, re.IGNORECASE) is None
+            and re.search(r"[+-]\s*" + currency_label + r"\s*[0-9]", text) is None, unsupported)
+    postfix = r"[0-9](?:\s*" + currency_label + r"\s*)?[+-](?![0-9])"
+    require(re.search(postfix, text) is None, unsupported)
+    candidates = re.findall(NUMBER_CANDIDATE, text)
+    require(all(re.fullmatch(PLAIN_NUMBER, value) is not None for value in candidates), unsupported)
+    return set(candidates)
+
+
+def draft_currency_codes(expected):
+    """Validate the fixture's recognition scope, not permission to use a unit."""
+    codes = expected.get("draft_currency_codes")
+    invalid = "Invalid or missing fixture draft currency vocabulary"
+    require(type(codes) is list and 1 <= len(codes) <= MAX_CURRENCY_CODES
+            and all(isinstance(code, str) and re.fullmatch(r"[A-Z]{3}", code) is not None for code in codes), invalid)
+    require(len(set(codes)) == len(codes)
+            and all(item["currency"] in codes for item in expected.get("draft_quantities", [])), invalid)
+    return codes
+
+
+def quantities(text, currency_codes):
+    """Recognize declared case variants and legacy uppercase currency labels."""
+    # Keep the existing uppercase three-letter conflict check. Only declared
+    # labels gain ASCII case variants, so ordinary prose such as "was" is not
+    # a currency. Values stay unchanged; expected tuples remain authoritative.
+    declared = r"(?ai:" + "|".join(re.escape(code) for code in currency_codes) + ")"
+    currency = r"(?:[A-Z]{3}|" + declared + ")"
+    forward = r"(?<!\w)(" + currency + r")\s*(" + PLAIN_NUMBER + r")\s*((?i:" + "|".join(SCALES) + r"))s?\b"
+    reverse = r"(?<![\w.+-])(" + PLAIN_NUMBER + r")\s*((?i:" + "|".join(SCALES) + r"))s?\s*(" + currency + r")(?!\w)"
+    found = {(value, code.upper(), scale.lower()) for code, value, scale in re.findall(forward, text)}
+    found.update((value, code.upper(), scale.lower()) for value, scale, code in re.findall(reverse, text))
+    return found
+
+
+def check_draft_quantities(expected, row):
+    annotations = expected.get("draft_quantities", [])
+    if not annotations:
+        return
+    wanted = {(item["value"], item["currency"], item["scale"]) for item in annotations}
+    observed = quantities(row["text"], draft_currency_codes(expected))
+    amounts = {(value, scale.lower()) for value, scale in re.findall(
+        r"(?<![\w.+-])(" + PLAIN_NUMBER + r")\s*((?i:" + "|".join(SCALES) + r"))s?\b", row["text"])}
+    # The canonical row also displays copied request qualifiers. An omitted
+    # currency in prose can use that row's explicit currency; an explicit
+    # conflicting currency in prose still fails below.
+    qualified = {(value, currency, scale) for value, currency, scale in wanted
+                 if (value, scale) in amounts and re.search(
+                     r"(?<!\w)" + re.escape(currency) + r"(?!\w)", row["currency"] or "")}
+    require(wanted <= observed | qualified, "Draft omitted an expected fixture quantity or changed its currency/scale")
+    allowed = set(wanted)
+    calculation = row["calculation"]
+    if calculation and calculation["operation"] in ("sum", "difference"):
+        # Only these operations preserve a common monetary unit. A server
+        # result does not authorize arbitrary currency/scale changes.
+        for _, currency, scale in wanted:
+            if all((operand["value"], currency, scale) in wanted for operand in calculation["operands"]):
+                allowed.add((calculation["result"], currency, scale))
+    require(observed <= allowed, "Draft introduced a quantity with an unsupported currency/scale")
+    require(amounts <= {(value, scale) for value, _, scale in allowed},
+            "Draft introduced a quantity with an unsupported scale")
 
 
 def source_text(source):
@@ -62,7 +161,18 @@ def load_cases(path=CORPUS):
         require(re.fullmatch(r"[a-z][a-z0-9_]{0,63}", case["id"]) is not None, "Invalid fixture ID")
         require(1 <= len(case["sources"]) <= 3, "Invalid fixture source count")
         require(corpus["version"] == 2 or "items" not in case["expected"], "Multiple expected items require corpus version 2")
-        expected_items(case)
+        for expected in expected_items(case):
+            annotations = expected.get("draft_quantities", [])
+            require(type(annotations) is list and len(annotations) <= 16, "Invalid fixture draft quantities")
+            for item in annotations:
+                require(type(item) is dict and set(item) == {"value", "currency", "scale"}
+                        and isinstance(item["value"], str) and re.fullmatch(PLAIN_NUMBER, item["value"]) is not None
+                        and isinstance(item["currency"], str) and re.fullmatch(r"[A-Z]{3}", item["currency"]) is not None
+                        and item["scale"] in SCALES, "Invalid fixture draft quantity")
+            codes = draft_currency_codes(expected) if annotations or "draft_currency_codes" in expected else []
+            for item in annotations:
+                require(any((item["value"], item["currency"], item["scale"]) in quantities(source["quote"], codes)
+                            for source in case["sources"]), "Fixture draft quantity lacks source support")
         for source in case["sources"]:
             require(urlsplit(source["url"]).hostname == "reports.example.org", "Only synthetic fixture origins are allowed")
             source_text(source)
@@ -115,9 +225,14 @@ def check_qualifiers(case, assessment):
     return matched
 
 
-def check_run(case, run, captured, loader):
+def check_run(case, run, captured, loader, *, workflow="evidence_review"):
     """Typed/pin checks plus narrow semantic expectations for this versioned corpus."""
-    require(run["workflow"] == "evidence_review" and run["state"] == "partial", "Expected terminal partial evidence review")
+    require(workflow in ("evidence_review", "research_draft") and run["workflow"] == workflow,
+            "Unexpected research workflow")
+    if workflow == "research_draft":
+        require(type(run.get("draft")) is dict, "Missing or noncanonical draft")
+    require(run["state"] == ("draft" if workflow == "research_draft" and run["draft"].get("state") == "unreviewed"
+                              else "partial"), "Expected a terminal partial review or unreviewed draft")
     try:
         assessment = validate_saved_assessment(run.get("assessment"), case["request"])
         review = validate_saved_review(run.get("evidence_review"), assessment)
@@ -154,7 +269,41 @@ def check_run(case, run, captured, loader):
             require(all(support["suitability"] != "suitable" and support["best_before"] is None for support in supports),
                     "Fresh origin verification was fabricated")
     consumed = run["budget"]["consumed"]
-    require(consumed["model_calls"] == 2, "Expected exactly two local calls for the populated fixture")
+    calls = 2
+    if workflow == "research_draft":
+        try:
+            draft = validate_saved_draft(run.get("draft"), assessment, review)
+        except (ValueError, TypeError, KeyError):
+            raise AssertionError("Missing or noncanonical draft") from None
+        supported = has_support(review)
+        require(draft["state"] == ("unreviewed" if supported else "unavailable"),
+                "A supported fixture did not produce an unreviewed draft")
+        calls += int(supported)
+        drafted = {row["item_id"]: row for row in draft["items"]}
+        for expected, item in matched:
+            row = drafted[item["id"]]
+            require(row["coverage_state"] == reviewed[item["id"]]["state"], "Draft coverage changed")
+            if row["coverage_state"] != "covered":
+                require(row["kind"] == "gap" and not row["supports"], "Unsupported requirement became factual prose")
+                continue
+            require(row["kind"] != "gap", "Covered fixture was not drafted")
+            visible = " ".join(str(value) for value in (row["text"], row["period"], row["unit"], row["currency"]) if value)
+            for fragments in expected["support_fragments"]:
+                require(all(fragment.casefold() in visible.casefold() for fragment in fragments),
+                        "Draft omitted an expected fixture value or qualifier")
+            numbers = plain_numbers(row["text"])
+            # This is finite numeric provenance, not proof of prose truth.
+            # Other packet rows or unrelated request text cannot authorize a
+            # figure in this row. Canonical validation already pins citations
+            # and copies this requirement's qualifiers from its assessment.
+            provenance = " ".join([support["quote"] for support in row["supports"]] +
+                                  [row[field] for field in ("period", "unit", "currency", "freshness") if row[field]])
+            allowed = plain_numbers(provenance)
+            if row["calculation"]:
+                allowed.add(row["calculation"]["result"])
+            require(numbers <= allowed, "Draft introduced an unsupported numeric literal")
+            check_draft_quantities(expected, row)
+    require(consumed["model_calls"] == calls, "Unexpected local call count for the populated fixture")
     require(consumed["hosted_searches"] == 0, "Unexpected hosted usage")
     require(all(amount == 0 for amount in run["budget"]["reserved"].values()), "Unreleased allowance")
     require(run["result"] is None, "An ordinary answer or lookup result was produced")
@@ -167,6 +316,8 @@ def main(argv=None):
     parser.add_argument("--context-tokens", type=int, default=16384)
     parser.add_argument("--output-tokens", type=int, default=1024)
     parser.add_argument("--timezone", default="UTC", help="Explicit server timezone for this isolated trial")
+    parser.add_argument("--workflow", choices=("evidence_review", "research_draft"), default="evidence_review",
+                        help="Check coverage alone or add an unreviewed saved-evidence draft")
     parser.add_argument("--case", action="append", dest="case_ids", help="Run this fixture once; repeatable")
     parser.add_argument("--report", type=Path, help="Write a new JSON report containing only synthetic records")
     args = parser.parse_args(argv)
@@ -203,7 +354,8 @@ def main(argv=None):
                 "Credentials must not be sent")
         if request.url.path == "/api/chat":
             with lock:
-                require(active["chats"] < 2, "A fixture cannot make more than two inference requests")
+                require(active["chats"] < (3 if args.workflow == "research_draft" else 2),
+                        "A fixture exceeded its explicit inference request limit")
                 active["chats"] += 1
 
     def guarded_sync(transport, request):
@@ -259,7 +411,7 @@ def main(argv=None):
                     active["chats"] = 0
                     started = time.monotonic()
                     response = client.post("/api/research/runs", json={"submission_id": uuid.uuid4().hex,
-                        "request": case["request"], "query": "", "chat_id": None, "workflow": "evidence_review"}, headers=headers)
+                        "request": case["request"], "query": "", "chat_id": None, "workflow": args.workflow}, headers=headers)
                     response.raise_for_status()
                     detail = client.get("/api/research/runs/" + response.json()["run"]["id"])
                     detail.raise_for_status()
@@ -267,21 +419,21 @@ def main(argv=None):
                     result = {"case": case["id"], "state": run["state"], "seconds": round(time.monotonic() - started, 2),
                         "consumed": run["budget"]["consumed"], "reserved": run["budget"]["reserved"],
                         "network_chat_requests": active["chats"], "assessment": run.get("assessment"),
-                        "evidence_review": run.get("evidence_review"), "passed": False}
+                        "evidence_review": run.get("evidence_review"), "draft": run.get("draft"), "passed": False}
                     try:
-                        check_run(case, run, captured, store.get_capture)
-                        require(active["chats"] == 2, "Unexpected local inference request count")
+                        check_run(case, run, captured, store.get_capture, workflow=args.workflow)
+                        require(active["chats"] == run["budget"]["consumed"]["model_calls"], "Unexpected local inference request count")
                         result["passed"] = True
                     except AssertionError as error:
                         result["failure"] = str(error)
                     results.append(result)
-                    print(json.dumps({key: value for key, value in result.items() if key not in ("assessment", "evidence_review")}), flush=True)
+                    print(json.dumps({key: value for key, value in result.items() if key not in ("assessment", "evidence_review", "draft")}), flush=True)
                     recovery_required = (any(run["budget"]["reserved"].values()) or
                                          any(entry["status"] in ("reserved", "uncertain") for entry in service.read_state()["ledger"]))
             if recovery_required:
                 break
     report = {"model": args.model, "context_tokens": args.context_tokens, "output_tokens": args.output_tokens,
-              "timezone": args.timezone,
+              "timezone": args.timezone, "workflow": args.workflow,
               "results": results, "passed": len(results) == len(cases) and all(result["passed"] for result in results),
               "recovery_required": recovery_required}
     if args.report:
