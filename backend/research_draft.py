@@ -37,8 +37,14 @@ _SIGNS = "+-\u2212\u00b1\u2213"
 # we deliberately do not support. A suffix of a grouped/scientific number must
 # never become an apparently exact plain-decimal operand. Mixed/repeated
 # separators can also join distinct unlabelled values; refuse that ambiguity.
+# Leading Arabic decimal/grouping marks likewise belong to the unsupported
+# candidate. Quotation apostrophes are not numeric prefixes.
+# Arabic marks may be separated from their digits. For ASCII sentence
+# punctuation, consume such whitespace only when an explicit sign precedes it.
 _NUMBER_RUN = re.compile(
-    r"(?:[+\-\u2212\u00b1\u2213]\s*)?(?:\d+(?:[\s.,'\u066b\u066c/\-]+\d+)*|[.,]\d+)"
+    r"(?:(?:[+\-\u2212\u00b1\u2213]\s*)?(?:\d+|[.,]\d+|[\u066b\u066c]\s*\d+)"
+    r"|[+\-\u2212\u00b1\u2213]\s*[.,]\s+\d+)"
+    r"(?:[\s.,'\u066b\u066c/\-]+\d+)*"
     r"(?:[eE][+\-\u2212\u00b1\u2213]?\d+)?")
 # A sign may sit outside a currency symbol/short label rather than directly
 # beside the digits. This structural rejection grammar recognizes short opaque

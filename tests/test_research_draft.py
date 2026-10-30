@@ -479,6 +479,44 @@ class ResearchDraftTests(unittest.TestCase):
                         with self.assertRaises(ValueError):
                             validate_response(raw, assessment, review)
 
+    def test_leading_arabic_numeric_separators_cannot_authorize_ascii_digit_suffixes(self):
+        for separator in ("\u066b", "\u066c"):
+            for sign in ("", "+", "-", "\u2212"):
+                for crop in ("whole", "writer", "review"):
+                    amount = "USD" + sign + separator + "42"
+                    with self.subTest(amount=ascii(amount), crop=crop):
+                        assessment, review, raw = self.formatted_calculation(amount, "42", crop)
+                        with self.assertRaises(ValueError):
+                            validate_response(raw, assessment, review)
+
+    def test_whitespace_in_unsupported_leading_numeric_clusters_cannot_expose_digit_suffixes(self):
+        amounts = ["USD" + prefix + separator + spacing + "42"
+                   for separator in ("\u066b", "\u066c")
+                   for prefix, spacing in (("", " "), ("", "\t"), ("-", " "),
+                                           ("- ", ""), ("+", "\t"), ("\u2212 ", " "))]
+        amounts += ["USD" + prefix + "42" for prefix in ("-. ", "-, ", "+. ", "+, ", "- .\t", "\u2212, ")]
+        for amount in amounts:
+            for crop in ("whole", "writer", "review"):
+                with self.subTest(amount=ascii(amount), crop=crop):
+                    assessment, review, raw = self.formatted_calculation(amount, "42", crop)
+                    with self.assertRaises(ValueError):
+                        validate_response(raw, assessment, review)
+
+    def test_leading_separator_refusal_keeps_plain_decimals_and_quoted_operands_valid(self):
+        controls = (("USD 42", "42", "42"), ("USD +42", "+42", "42"),
+                    ("USD -42", "-42", "-42"), ("USD 0.42", "0.42", "0.42"),
+                    ("'42'", "42", "42"), ("\u201842\u2019", "42", "42"),
+                    ("'0.42'", "0.42", "0.42"), ("Sentence. 42", "42", "42"),
+                    ("Amount, 42", "42", "42"))
+        for amount, value, expected in controls:
+            for crop in ("whole", "writer", "review"):
+                with self.subTest(amount=ascii(amount), crop=crop):
+                    assessment, review, raw = self.formatted_calculation(amount, value, crop)
+                    raw["items"]["i0"]["calculation"]["precision"] = 2 if "." in value else 0
+                    saved = validate_response(raw, assessment, review)
+                    self.assertEqual(saved["items"][0]["calculation"]["result"], expected)
+                    self.assertEqual(validate_saved_draft(saved, assessment, review), saved)
+
     def test_currency_context_keeps_complete_plain_and_signed_ascii_literals_valid(self):
         controls = (("$42", "42", "42"), ("USD 42", "42", "42"), ("+42", "+42", "42"),
                     ("-42", "-42", "-42"), ("USD -42", "-42", "-42"), ("$-42", "-42", "-42"),

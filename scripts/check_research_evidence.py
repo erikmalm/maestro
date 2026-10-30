@@ -41,9 +41,9 @@ from backend.web_search import WebSearch
 
 CORPUS = ROOT / "tests" / "fixtures" / "research_evidence_quality.json"
 PLAIN_NUMBER = r"[+-]?[0-9]+(?:\.[0-9]+)?"
-# Recognize a leading decimal separator as part of its candidate, then refuse
-# that unsupported spelling rather than authorizing its integer suffix.
-NUMBER_CANDIDATE = r"[+-]?(?:[0-9]+(?:\.[0-9]+)?|[.,][0-9]+)"
+# Arabic numeric separators stay attached across whitespace. ASCII punctuation
+# needs adjacency here so an ordinary sentence ending ". 42" stays valid.
+NUMBER_CANDIDATE = r"[+-]?(?:[0-9]+(?:\.[0-9]+)?|[.,][0-9]+|[\u066b\u066c]\s*[0-9]+)"
 SCALES = ("thousand", "million", "billion", "trillion")
 MAX_CURRENCY_CODES = 32
 
@@ -58,27 +58,33 @@ def plain_numbers(text):
 
     Do not normalize typography into accepted evidence or discard signs/digits.
     Parenthesized FY qualifiers and ordinary sentence punctuation remain valid;
-    Accounting amounts, format controls, named Unicode math signs and
-    grouped/scientific forms are conservatively unsupported by this oracle.
+    Accounting amounts, currency glyphs, separated signs, format controls,
+    named Unicode math signs and grouped/scientific forms are unsupported.
     """
     unsupported = "Unsupported numeric typography in fixture evaluation"
     for index, character in enumerate(text):
+        category = unicodedata.category(character)
         require(not character.isnumeric() or character in "0123456789", unsupported)
+        # This finite corpus uses currency codes. A glyph cannot acquire its
+        # identity from a copied qualifier, even for an ambiguous dollar sign.
+        require(category != "Sc", unsupported)
         if not character.isascii():
-            category, name = unicodedata.category(character), unicodedata.name(character, "")
+            name = unicodedata.name(character, "")
             require(category != "Cf" and "MINUS" not in name and "PLUS" not in name, unsupported)
             if category == "Pd":
                 after = text[index + 1:].lstrip()
                 require(not after or not after[0].isdigit(), unsupported)
     require(re.search(r"[0-9](?:[,/'\u2019\u066b\u066c]\s*[0-9]|[eE][+-]?[0-9]|\s+[0-9])", text) is None,
             unsupported)
-    symbols = "".join(re.escape(character) for character in set(text) if unicodedata.category(character) == "Sc")
-    symbol = "[" + symbols + "]" if symbols else r"(?!)"
-    currency = r"(?:[^\W\d_]{1,8}|" + symbol + ")"
-    accounting = r"\(\s*(?:(?:[A-Z]{3}|" + symbol + r")\s*)?" + PLAIN_NUMBER + r"(?:\s*(?:" + "|".join(SCALES) + r")s?)?(?:\s*[A-Z]{3})?\s*\)"
+    require(re.search(r"[+-]\s+(?=[.,\u066b\u066c]?[0-9])", text) is None, unsupported)
+    # With an explicit sign, an ASCII separator and following whitespace are
+    # ambiguous numeric notation rather than ordinary sentence punctuation.
+    require(re.search(r"[+-]\s*[.,]\s+[0-9]", text) is None, unsupported)
+    currency_label = r"[^\W\d_]{1,8}"
+    accounting = r"\(\s*(?:[A-Z]{3}\s*)?" + PLAIN_NUMBER + r"(?:\s*(?:" + "|".join(SCALES) + r")s?)?(?:\s*[A-Z]{3})?\s*\)"
     require(re.search(accounting, text, re.IGNORECASE) is None
-            and re.search(r"[+-]\s*" + currency + r"\s*[0-9]", text) is None, unsupported)
-    postfix = r"[0-9](?:\s*" + currency + r"\s*)?[+-](?![0-9])"
+            and re.search(r"[+-]\s*" + currency_label + r"\s*[0-9]", text) is None, unsupported)
+    postfix = r"[0-9](?:\s*" + currency_label + r"\s*)?[+-](?![0-9])"
     require(re.search(postfix, text) is None, unsupported)
     candidates = re.findall(NUMBER_CANDIDATE, text)
     require(all(re.fullmatch(PLAIN_NUMBER, value) is not None for value in candidates), unsupported)

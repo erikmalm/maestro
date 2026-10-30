@@ -3,6 +3,7 @@ from copy import deepcopy
 import json
 from pathlib import Path
 import tempfile
+import unicodedata
 import unittest
 
 from backend.research_draft import gap_draft, has_support, validate_response
@@ -36,6 +37,79 @@ class ResearchDraftQualityTests(unittest.TestCase):
             "supports": [{key: support[key] for key in ("passage_id", "quote")} for support in row["supports"]],
             "calculation": calculation}}}
         run["draft"] = validate_response(raw, run["assessment"], run["evidence_review"])
+
+    def case_with_value(self, value):
+        case = deepcopy(self.cases["historical_tail"])
+        case["sources"][0]["quote"] = "Acme revenue for FY2025 was USD " + value + " million."
+        case["expected"]["support_fragments"] = [["FY2025", "USD", value]]
+        case["expected"]["draft_quantities"][0]["value"] = value
+        return case
+
+    def test_leading_arabic_separator_cannot_authorize_its_integer_suffix(self):
+        case = self.cases["historical_tail"]
+        for separator in ("\u066b", "\u066c"):
+            for sign in ("", "-", "+", "- ", "+\t", "-\u00a0"):
+                for spacing in ("", " ", "\t", "\u00a0", "\u202f"):
+                    amount = sign + separator + spacing + "42"
+                    run, sources, loader = self.draft_run(case)
+                    self.replace_fact(run, "Acme revenue for FY2025 was USD 42 million. "
+                                      "Another amount was USD " + amount + " million.")
+                    with self.subTest(amount=ascii(amount)), self.assertRaisesRegex(AssertionError, "numeric"):
+                        check_run(case, run, sources, loader, workflow="research_draft")
+
+    def test_signed_ascii_decimal_separator_cannot_hide_before_whitespace(self):
+        case = self.cases["historical_tail"]
+        for sign in ("-", "+"):
+            for separator in (".", ","):
+                for sign_spacing in ("", " "):
+                    for spacing in (" ", "\t", "\u00a0", "\u202f"):
+                        amount = sign + sign_spacing + separator + spacing + "42"
+                        run, sources, loader = self.draft_run(case)
+                        self.replace_fact(run, "Acme revenue for FY2025 was USD 42 million. "
+                                          "Another amount was USD " + amount + " million.")
+                        with self.subTest(amount=ascii(amount)), self.assertRaisesRegex(AssertionError, "numeric"):
+                            check_run(case, run, sources, loader, workflow="research_draft")
+
+    def test_plain_prose_period_and_comma_before_supported_number_remain_valid(self):
+        case = self.cases["historical_tail"]
+        for text in ("Acme revenue for FY2025 was reported. 42 million USD was the amount.",
+                     "Acme revenue for FY2025 was the reported amount, 42 million USD."):
+            run, sources, loader = self.draft_run(case)
+            self.replace_fact(run, text)
+            with self.subTest(text=text):
+                check_run(case, run, sources, loader, workflow="research_draft")
+
+    def test_whitespace_separated_sign_cannot_borrow_a_supported_unsigned_value(self):
+        for value in ("42", "0.42"):
+            case = self.case_with_value(value)
+            for sign in ("-", "+"):
+                for spacing in (" ", "\t", "\u00a0", "\u202f"):
+                    amount = sign + spacing + value
+                    run, sources, loader = self.draft_run(case)
+                    self.replace_fact(run, case["sources"][0]["quote"] +
+                                      " Another amount was USD " + amount + " million.")
+                    with self.subTest(amount=ascii(amount)), self.assertRaisesRegex(AssertionError, "numeric"):
+                        check_run(case, run, sources, loader, workflow="research_draft")
+
+    def test_currency_glyphs_cannot_inherit_the_copied_usd_qualifier(self):
+        case = self.cases["historical_tail"]
+        symbols = [chr(point) for point in range(0x110000) if unicodedata.category(chr(point)) == "Sc"]
+        self.assertTrue({"$", "\u20ac", "\u00a3", "\u20b9", "\ufdfc"} <= set(symbols))
+        for symbol in symbols:
+            for side, amount in (("prefix", symbol + "42 million"), ("suffix", "42 million " + symbol)):
+                run, sources, loader = self.draft_run(case)
+                self.replace_fact(run, "Acme revenue for FY2025 was USD 42 million. "
+                                  "Another amount was " + amount + ".")
+                with self.subTest(symbol=f"U+{ord(symbol):04X}", side=side), self.assertRaisesRegex(AssertionError, "numeric"):
+                    check_run(case, run, sources, loader, workflow="research_draft")
+
+    def test_source_backed_plain_signed_values_and_prose_punctuation_remain_valid(self):
+        for value in ("42", "+42", "-42", "0.42", "+0.42", "-0.42"):
+            case = self.case_with_value(value)
+            run, sources, loader = self.draft_run(case)
+            self.replace_fact(run, "Acme revenue (FY2025) - as reported - was USD " + value + " million.")
+            with self.subTest(value=value):
+                check_run(case, run, sources, loader, workflow="research_draft")
 
     def test_changed_quantity_scale_cannot_borrow_a_unit_elsewhere_in_the_row(self):
         case = self.cases["historical_tail"]

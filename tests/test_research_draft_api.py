@@ -202,6 +202,47 @@ class ResearchDraftApiTests(unittest.TestCase):
         self.assert_rejected_numeric_cases((("1\t234", "234"), ("1  234", "234"), ("1, 234", "234"),
                                             ("1\u2009\u2009234", "234"), ("1,\u202f234", "234")))
 
+    def test_leading_separator_cannot_detach_sign_from_calculation_operand(self):
+        amounts = tuple("-" + separator + spacing + "42" for separator in ("\u066b", "\u066c")
+                        for spacing in ("", " ", "\t")) + ("-. 42", "-, 42")
+        quotes = [f"Case {index}: Acme FY2025 revenue was USD{amount} and 0. Amounts recorded."
+                  for index, amount in enumerate(amounts)]
+        self.fixture.capture(" ".join(quotes))
+        snapshot = self.fixture.archive_fixture.source_snapshot()
+        for quote in quotes:
+            with self.subTest(quote=ascii(quote)):
+                self.calculation_from_quote(quote, "42")
+                run = self.run_now()
+                self.assertEqual(run["assessment"]["completion_criterion"], requirements.REQUEST)
+                support = run["evidence_review"]["items"][0]
+                self.assertEqual(support["state"], "covered")
+                self.assertEqual(support["supports"][0]["quote"], quote)
+                self.assert_usage(run)
+                self.assertEqual(run["state"], "failed")
+                self.assertIsNone(run["draft"])
+                self.assertEqual(self.writer_rows(run["id"])[0][:2], ("failed", None))
+                reloaded = self.fixture.fixture.get(run["id"])
+                for field in ("state", "draft", "assessment", "evidence_review", "budget"):
+                    self.assertEqual(reloaded[field], run[field])
+        self.assertEqual(self.fixture.archive_fixture.source_snapshot(), snapshot)
+
+    def test_complete_ascii_decimal_keeps_its_value_and_saved_provenance(self):
+        quote = "Acme FY2025 revenue was USD 0.42 and 0. Amounts recorded."
+        self.fixture.capture(quote)
+        self.calculation_from_quote(quote, "0.42")
+        run = self.run_now()
+        self.assertEqual(run["state"], "draft")
+        row = run["draft"]["items"][0]
+        self.assertEqual((row["kind"], row["period"], row["currency"]), ("calculation", "FY2025", "USD"))
+        self.assertEqual(row["calculation"]["operands"], [
+            {"value": "0.42", "support_index": 0}, {"value": "0", "support_index": 1}])
+        self.assertEqual(row["calculation"]["result"], "0.42")
+        self.assertEqual([support["quote"] for support in row["supports"]], ["0.42", "and 0."])
+        for support in row["supports"]:
+            self.assertEqual(quote[support["start"]:support["end"]], support["quote"])
+        self.assertEqual(self.fixture.fixture.get(run["id"])["draft"], run["draft"])
+        self.assert_usage(run)
+
     def test_original_currency_symbol_cannot_lose_sign_after_compatibility_expansion(self):
         # U+FDFC is a currency symbol whose NFKC spelling has four letters.
         self.assert_rejected_numeric_cases((("-\ufdfc 42", "42"),))
