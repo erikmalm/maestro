@@ -127,6 +127,8 @@ def plain_numbers(text, currency_codes=()):
     require(re.search(r"[0-9][\s.,/'_\u2019\u066b\u066c]*[eE]\s*[+-]?\s*[0-9]",
                       "".join(numeric_boundaries)) is None, unsupported)
     require(re.search(r"[+-]\s+(?=[.,\u066b\u066c]?[0-9])", text) is None, unsupported)
+    # Repeated signs cannot borrow an otherwise supported signed suffix.
+    require(re.search(r"[+-]\s*[+-]\s*(?=[.,\u066b\u066c]?[0-9])", text) is None, unsupported)
     # With an explicit sign, an ASCII separator and following whitespace are
     # ambiguous numeric notation rather than ordinary sentence punctuation.
     require(re.search(r"[+-]\s*[.,]\s+[0-9]", text) is None, unsupported)
@@ -142,13 +144,13 @@ def plain_numbers(text, currency_codes=()):
     accounting = (r"\(\s*(?:" + accounting_label + r"\s*){0,2}" + PLAIN_NUMBER
                   + r"(?:\s*" + accounting_label + r"){0,2}\s*\)")
     require(re.search(accounting, envelope, re.IGNORECASE) is None
-            and re.search(r"[+-]\s*" + currency_label + r"\s*[0-9]", envelope) is None, unsupported)
+            and re.search(r"[+-]\s*" + currency_label + r"\s*[+-]?[0-9]", envelope) is None, unsupported)
     # The same finite units can appear before the number in any token order.
     # Use declared code variants here so ordinary prose such as "- was USD"
     # is not mistaken for two monetary labels preceding a value.
     currency = currency_pattern(currency_codes) if currency_codes else r"[A-Z]{3}"
     prefix_label = r"(?:" + SCALE_CAPTURE + r"|(?:(?i:in)\s+)?" + currency + r")"
-    prefix = r"[+-]\s*(?:" + prefix_label + r"\s*){1,2}[0-9]"
+    prefix = r"[+-]\s*(?:" + prefix_label + r"\s*){1,2}[+-]?[0-9]"
     require(re.search(prefix, envelope) is None, unsupported)
     # Both a scale and currency label can intervene before a postfix sign.
     postfix_label = r"(?:" + SCALE_CAPTURE + r"|(?:(?i:in)\s+)?" + currency_label + r")"
@@ -223,11 +225,8 @@ def quantities(text, currency_codes):
         r"(?<!\w)" + scale + r"\s*" + value + code_join + currency + r"(?!\w)",
     )
     text = currency_text(text, currency_codes)
-    found = set()
-    for pattern in patterns:
-        found.update((match["value"], match["currency"].upper(), match["scale"].lower())
-                     for match in re.finditer(pattern, text))
-    return found
+    return {(match["value"], match["currency"].upper(), match["scale"].lower())
+            for pattern in patterns for match in re.finditer(pattern, text)}
 
 
 def currency_values(text, currency_codes):
@@ -255,6 +254,8 @@ def check_draft_quantities(expected, row):
     amounts = {(value, scale) for value, _, scale in observed}
     amounts.update((value, scale.lower()) for value, scale in re.findall(
         r"(?<![\w.+-])(" + PLAIN_NUMBER + r")\s*" + SCALE_CAPTURE + r"\b", row["text"]))
+    amounts.update((value, scale.lower()) for scale, value in re.findall(
+        r"(?<!\w)" + SCALE_CAPTURE + r"\s*(" + PLAIN_NUMBER + r")(?!\w|\.[0-9])", row["text"]))
     # The canonical row also displays copied request qualifiers. An omitted
     # currency in prose can use that row's explicit currency; an explicit
     # conflicting currency in prose still fails below.

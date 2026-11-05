@@ -1,5 +1,6 @@
 """The opt-in draft oracle rejects typed but unsupported fixture prose offline."""
 from copy import deepcopy
+from itertools import product
 import json
 from pathlib import Path
 import tempfile
@@ -35,17 +36,14 @@ class ResearchDraftQualityTests(unittest.TestCase):
         run["budget"]["consumed"]["model_calls"] += int(supported)
         return run, sources, loader
 
-    def replace_fact(self, run, text, *, calculation=None):
+    def check_text(self, case, text, *, error=None, calculation=None):
+        run, sources, loader = self.draft_run(case)
         row = run["draft"]["items"][0]
         raw = {"version": 1, "items": {row["item_id"]: {
             "kind": "calculation" if calculation else "fact", "text": text,
             "supports": [{key: support[key] for key in ("passage_id", "quote")} for support in row["supports"]],
             "calculation": calculation}}}
         run["draft"] = validate_response(raw, run["assessment"], run["evidence_review"])
-
-    def check_text(self, case, text, *, error=None, calculation=None):
-        run, sources, loader = self.draft_run(case)
-        self.replace_fact(run, text, calculation=calculation)
         if error is None:
             check_run(case, run, sources, loader, workflow="research_draft")
         else:
@@ -84,14 +82,12 @@ class ResearchDraftQualityTests(unittest.TestCase):
                     ("EUR", "million", False), ("eur", "MillionS", False),
                     ("GBP", "million", False), ("USD", "billion", False),
                     ("USD", "BILLIONS", False), ("EUR", "trillion", False))
-        for code, scale, supported in variants:
-            for wrapper in ("{}", "({})", "( {} )", "(({}))", "( ( {} ) )"):
-                for order in orders:
-                    amount = order.format(code=wrapper.format(code), value="42", scale=scale)
-                    for appended in (False, True):
-                        prefix = case["sources"][0]["quote"] + " Another amount was " if appended else "Acme revenue for FY2025 was "
-                        with self.subTest(amount=amount, appended=appended, supported=supported):
-                            self.check_text(case, prefix + amount + ".", error=None if supported else "quantity|currency|scale")
+        for (code, scale, supported), wrapper, order, appended in product(
+                variants, ("{}", "({})", "( {} )", "(({}))", "( ( {} ) )"), orders, (False, True)):
+            amount = order.format(code=wrapper.format(code), value="42", scale=scale)
+            prefix = case["sources"][0]["quote"] + " Another amount was " if appended else "Acme revenue for FY2025 was "
+            with self.subTest(amount=amount, appended=appended, supported=supported):
+                self.check_text(case, prefix + amount + ".", error=None if supported else "quantity|currency|scale")
 
     def test_wrapped_unscaled_currency_pairs_are_checked_before_row_fallback(self):
         case = self.cases["historical_tail"]
@@ -119,14 +115,12 @@ class ResearchDraftQualityTests(unittest.TestCase):
     def test_all_quantity_orders_keep_accounting_amount_parentheses_unsupported(self):
         case = self.cases["historical_tail"]
         orders = QUANTITY_ORDERS + ("{value} {scale} in {code}",)
-        for code in ("USD", "(USD)", "((USD))"):
-            for scale in ("million", "MILLIONS"):
-                for order in orders:
-                    amount = order.format(code=code, value="42", scale=scale)
-                    for wrapper in ("({})", "( {} )", "(({}))"):
-                        with self.subTest(amount=wrapper.format(amount)):
-                            self.check_text(case, case["sources"][0]["quote"] + " Another amount was " + wrapper.format(amount) + ".",
-                                            error="numeric")
+        for code, scale, order, wrapper in product(("USD", "(USD)", "((USD))"), ("million", "MILLIONS"),
+                                                   orders, ("({})", "( {} )", "(({}))")):
+            amount = order.format(code=code, value="42", scale=scale)
+            with self.subTest(amount=wrapper.format(amount)):
+                self.check_text(case, case["sources"][0]["quote"] + " Another amount was " + wrapper.format(amount) + ".",
+                                error="numeric")
 
     def test_code_only_wrappers_cannot_hide_prefix_or_postfix_amount_signs(self):
         case = self.cases["historical_tail"]
@@ -135,37 +129,30 @@ class ResearchDraftQualityTests(unittest.TestCase):
                   "42 {code} + million", "42 million in {code}-", "- {code} million 42",
                   "- million {code} 42", "- in {code} 42 million", "- {code} MILLIONS 42",
                   "+ million {code} 42")
-        for code in ("USD", "usd", "uSd"):
-            for wrapper in ("({})", "( {} )", "(({}))", "( ( {} ) )"):
-                for order in orders:
-                    amount = order.format(code=wrapper.format(code))
-                    with self.subTest(amount=amount):
-                        self.check_text(case, case["sources"][0]["quote"] + " Another amount was " + amount + ".", error="numeric")
+        for code, wrapper, order in product(("USD", "usd", "uSd"), ("({})", "( {} )", "(({}))", "( ( {} ) )"), orders):
+            amount = order.format(code=wrapper.format(code))
+            with self.subTest(amount=amount):
+                self.check_text(case, case["sources"][0]["quote"] + " Another amount was " + amount + ".", error="numeric")
 
     def test_known_scales_in_unsupported_wrappers_cannot_disappear_from_extra_quantities(self):
         case = self.cases["historical_tail"]
         orders = QUANTITY_ORDERS + ("{code}{value} {scale}", "{value} {scale}")
         wrappers = ("({})", "( {} )", "(({}))", "[{}]", "{{{}}}",
                     "\uff08{}\uff09", "\uff3b{}\uff3d", "\u3010{}\u3011")
-        for scale in ("million", "billion", "BILLIONS"):
-            for wrapper in wrappers:
-                for code in ("USD", "(USD)"):
-                    for order in orders:
-                        amount = order.format(code=code, value="42", scale=wrapper.format(scale))
-                        with self.subTest(amount=ascii(amount)):
-                            self.check_text(case, case["sources"][0]["quote"] + " Another amount was " + amount + ".",
-                                            error="currency|scale|numeric")
+        for scale, wrapper, code, order in product(("million", "billion", "BILLIONS"), wrappers, ("USD", "(USD)"), orders):
+            amount = order.format(code=code, value="42", scale=wrapper.format(scale))
+            with self.subTest(amount=ascii(amount)):
+                self.check_text(case, case["sources"][0]["quote"] + " Another amount was " + amount + ".",
+                                error="currency|scale|numeric")
 
     def test_separated_postfix_sign_cannot_hide_when_units_precede_the_value(self):
         case = self.cases["historical_tail"]
         orders = QUANTITY_ORDERS + ("{code} {scale}{value}", "{scale} {code}{value}", "{value}")
-        for code in ("USD", "uSd"):
-            for wrapper in ("{}", "({})", "(({}))"):
-                for order in orders:
-                    for spacing, sign in ((" ", "-"), ("\t", "+"), ("\n", "-")):
-                        amount = order.format(code=wrapper.format(code), value="42", scale="MillionS") + spacing + sign
-                        with self.subTest(amount=ascii(amount)):
-                            self.check_text(case, case["sources"][0]["quote"] + " Another amount was " + amount + ".", error="numeric")
+        for code, wrapper, order, (spacing, sign) in product(
+                ("USD", "uSd"), ("{}", "({})", "(({}))"), orders, ((" ", "-"), ("\t", "+"), ("\n", "-"))):
+            amount = order.format(code=wrapper.format(code), value="42", scale="MillionS") + spacing + sign
+            with self.subTest(amount=ascii(amount)):
+                self.check_text(case, case["sources"][0]["quote"] + " Another amount was " + amount + ".", error="numeric")
 
     def test_whole_signed_literals_keep_all_quantity_orders_without_trailing_signs(self):
         for value in ("42", "-42", "+42", "42.5"):
@@ -176,6 +163,26 @@ class ResearchDraftQualityTests(unittest.TestCase):
                     with self.subTest(amount=amount):
                         self.check_text(case, "Acme revenue (FY2025) was " + amount + ".")
 
+    def test_repeated_signs_cannot_borrow_a_supported_signed_suffix(self):
+        for value in ("-42", "+42", "-0.42", "+0.42"):
+            case = self.case_with_value(value)
+            for sign, spacing in product(("-", "+"), ("", " ", "\t")):
+                for amount in (f"USD {sign}{spacing}{value} million", f"{sign}{spacing}{value} million (USD)",
+                               f"{sign}{spacing}(USD){value} million"):
+                    with self.subTest(amount=ascii(amount)):
+                        self.check_text(case, case["sources"][0]["quote"] + " Another amount was " + amount + ".", error="numeric")
+
+    def test_bare_scale_orders_cannot_hide_conflicting_units(self):
+        scales = (("million", True), ("MillionS", True), ("billion", False), ("BILLIONS", False), ("thousands", False))
+        orders = ("{scale} {value}", "{scale}{value}", "{value} {scale}")
+        for value in ("42", "-42", "+42", "42.5"):
+            case = self.case_with_value(value)
+            for (scale, supported), order, appended in product(scales, orders, (False, True)):
+                amount = order.format(scale=scale, value=value)
+                prefix = case["sources"][0]["quote"] + " Another amount was " if appended else "Acme revenue for FY2025 was "
+                with self.subTest(amount=amount, appended=appended):
+                    self.check_text(case, prefix + amount + ".", error=None if supported else "scale")
+
     def test_unicode_and_mixed_currency_wrappers_cannot_hide_explicit_units(self):
         case = self.cases["historical_tail"]
         orders = QUANTITY_ORDERS + ("{value} {scale} in {code}", "{code} {value}",
@@ -183,12 +190,10 @@ class ResearchDraftQualityTests(unittest.TestCase):
         wrappers = ("\uff08{}\uff09", "\uff3b{}\uff3d", "\uff5b{}\uff5d", "\u3010{}\u3011",
                     "\u2768{}\u2769", "(\uff08{}\uff09)", "\uff08({})\uff09",
                     "\uff08{})", "({}\uff09")
-        for code in ("USD", "usd", "EUR", "eur"):
-            for wrapper in wrappers:
-                for order in orders:
-                    amount = order.format(code=wrapper.format(code), value="42", scale="million")
-                    with self.subTest(amount=ascii(amount)):
-                        self.check_text(case, case["sources"][0]["quote"] + " Another amount was " + amount + ".", error="currency|numeric")
+        for code, wrapper, order in product(("USD", "usd", "EUR", "eur"), wrappers, orders):
+            amount = order.format(code=wrapper.format(code), value="42", scale="million")
+            with self.subTest(amount=ascii(amount)):
+                self.check_text(case, case["sources"][0]["quote"] + " Another amount was " + amount + ".", error="currency|numeric")
 
     def test_unicode_amount_wrappers_remain_accounting_not_positive_plain_values(self):
         case = self.cases["historical_tail"]
@@ -300,24 +305,21 @@ class ResearchDraftQualityTests(unittest.TestCase):
 
     def test_leading_arabic_separator_cannot_authorize_its_integer_suffix(self):
         case = self.cases["historical_tail"]
-        for separator in ("\u066b", "\u066c"):
-            for sign in ("", "-", "+", "- ", "+\t", "-\u00a0"):
-                for spacing in ("", " ", "\t", "\u00a0", "\u202f"):
-                    amount = sign + separator + spacing + "42"
-                    with self.subTest(amount=ascii(amount)):
-                        self.check_text(case, "Acme revenue for FY2025 was USD 42 million. "
-                                      "Another amount was USD " + amount + " million.", error="numeric")
+        for separator, sign, spacing in product(("\u066b", "\u066c"), ("", "-", "+", "- ", "+\t", "-\u00a0"),
+                                                ("", " ", "\t", "\u00a0", "\u202f")):
+            amount = sign + separator + spacing + "42"
+            with self.subTest(amount=ascii(amount)):
+                self.check_text(case, "Acme revenue for FY2025 was USD 42 million. "
+                                "Another amount was USD " + amount + " million.", error="numeric")
 
     def test_signed_ascii_decimal_separator_cannot_hide_before_whitespace(self):
         case = self.cases["historical_tail"]
-        for sign in ("-", "+"):
-            for separator in (".", ","):
-                for sign_spacing in ("", " "):
-                    for spacing in (" ", "\t", "\u00a0", "\u202f"):
-                        amount = sign + sign_spacing + separator + spacing + "42"
-                        with self.subTest(amount=ascii(amount)):
-                            self.check_text(case, "Acme revenue for FY2025 was USD 42 million. "
-                                          "Another amount was USD " + amount + " million.", error="numeric")
+        for sign, separator, sign_spacing, spacing in product(
+                ("-", "+"), (".", ","), ("", " "), (" ", "\t", "\u00a0", "\u202f")):
+            amount = sign + sign_spacing + separator + spacing + "42"
+            with self.subTest(amount=ascii(amount)):
+                self.check_text(case, "Acme revenue for FY2025 was USD 42 million. "
+                                "Another amount was USD " + amount + " million.", error="numeric")
 
     def test_plain_prose_period_and_comma_before_supported_number_remain_valid(self):
         case = self.cases["historical_tail"]
