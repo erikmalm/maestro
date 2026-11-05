@@ -544,6 +544,41 @@ class ResearchDraftTests(unittest.TestCase):
         for amount in amounts:
             self.assert_formatted_rejected(amount)
 
+    def test_connected_sign_pairs_cannot_supply_a_single_signed_operand(self):
+        for first in "+-\u2212\u00b1\u2213":
+            for second in "+-":
+                for spacing in ("", " ", "\t", "\n", "\u202f", "\x01\u200b "):
+                    for envelope in ("", "USD ", "million USD ", "(USD) (million) "):
+                        amount = "USD " + first + spacing + envelope + second + "42 million"
+                        value = second + "42"
+                        for crop in ("whole", "writer", "review"):
+                            with self.subTest(amount=ascii(amount), crop=crop):
+                                assessment, review, raw = self.formatted_calculation(
+                                    amount, value, crop, zero_quote="Separate operand 0.")
+                                with self.assertRaisesRegex(ValueError, "research draft"):
+                                    validate_response(raw, assessment, review)
+                                self.assert_saved_calculation_rejected(raw, assessment, review, str(int(value)))
+        # Compatibility signs, dashes, and discarded controls stay attached to
+        # the same rejected cluster without repairing the exact ASCII suffix.
+        for amount, value in (("USD \uff0b -42 million", "-42"),
+                              ("USD \u2014 +42 million", "+42"),
+                              ("USD \u207b\x01 +42 million", "+42")):
+            self.assert_formatted_rejected(amount, value, zero_quote="Separate operand 0.")
+
+    def test_sign_cluster_refusal_preserves_separate_values_and_prose(self):
+        for amount, value in (("Recorded \u2014 amount USD -42 million", "-42"),
+                              ("USD +42 million. Details \u2014 recorded", "+42"),
+                              ("USD -42 million. End of sentence", "-42"),
+                              ("42 widgets", "42")):
+            for crop in ("whole", "writer", "review"):
+                self.assert_formatted_value(amount, value, str(int(value)), crop,
+                                            zero_quote="Separate operand 0.")
+        for quote in ("10 and -12.", "10 Euros and -12.", "10 recorded; USD -12."):
+            assessment, review, raw = self.calculation(quote, "10", "-12", precision=0)
+            saved = validate_response(raw, assessment, review)
+            self.assertEqual(saved["items"][0]["calculation"]["result"], "-2")
+            self.assertEqual(validate_saved_draft(saved, assessment, review), saved)
+
     def test_wrapped_currency_scale_envelopes_cannot_detach_explicit_signs(self):
         wrappers = (("(", ")"), ("[", "]"), ("{", "}"), ("\u27e6", "\u27e7"),
                     ("\u3010", "\u3011"), ("\uff08", "\uff09"))
@@ -675,6 +710,59 @@ class ResearchDraftTests(unittest.TestCase):
                     self.assertTrue(packet["passages"][0]["text"].endswith(tail))
                     with self.assertRaises(ValueError):
                         validate_response(raw, assessment, review)
+
+    def test_real_selected_packet_refuses_partial_scale_words_and_saved_replay(self):
+        for value, left_fragment, right_fragment in (
+            ("42", "ion", "millio"), ("-42", "ion", "millio"), ("+42", "ion", "millio"),
+            ("42", "\uff49\uff4f\uff4e", "\uff4d\uff49\uff4c\uff4c\uff49\uff4f"),
+            ("42", "i\u200bon", "milli\x01o"),
+        ):
+            for side in ("left", "right"):
+                if side == "left":
+                    body = "x" * 595 + "-mill" + left_fragment + " EUR " + value + " and 0. "
+                    body = (body.ljust(1500) + "Testsubject metric0 FY2025.").ljust(1795) + " End."
+                else:
+                    tail = value + " EUR " + right_fragment
+                    body = " " * 700 + "Testsubject metric0 FY2025. Amount 0 recorded. "
+                    body = body.ljust(1500) + "USD context. "
+                    body = (body.ljust(1800 - len(tail)) + tail + "n-").ljust(2795) + " End."
+                with self.subTest(side=side, value=value, fragment=(left_fragment, right_fragment)):
+                    assessment, review, raw, packet = self.selected_calculation(body)
+                    raw["items"]["i0"]["calculation"]["operands"][0]["value"] = value
+                    self.assertEqual(packet["passages"][0]["text"], body[600:1800])
+                    with self.assertRaisesRegex(ValueError, "research draft"):
+                        validate_response(raw, assessment, review)
+                    self.assert_saved_calculation_rejected(raw, assessment, review, str(int(value)))
+
+    def test_every_scale_currency_envelope_cut_refuses_raw_and_saved_operands(self):
+        scales = ("thousand", "thousands", "million", "millions",
+                  "billion", "billions", "trillion", "trillions")
+        for scale in scales:
+            labels = {scale}
+            for currency in ("EUR", "U.S.$"):
+                labels.update((scale + " " + currency, currency + " " + scale,
+                               scale + " in " + currency, "in " + currency + " " + scale,
+                               scale + currency, currency + scale))
+            for label in sorted(labels):
+                for side in ("left", "right"):
+                    # Every cut preserving 42 is derived from a source with an
+                    # unsupported outer sign. No production token grammar is
+                    # used to choose expected refusals or fragment lengths.
+                    envelope = "-" + label + " " if side == "left" else "42 " + label
+                    cuts = range(1, len(envelope) + 1) if side == "left" else range(2, len(envelope) + 1)
+                    for cut in cuts:
+                        if side == "left":
+                            body = "x" * (600 - cut) + envelope + "42 and 0. "
+                            body = (body.ljust(1500) + "Testsubject metric0 FY2025.").ljust(1795) + " End."
+                        else:
+                            body = " " * 700 + "Testsubject metric0 FY2025. Amount 0 recorded. "
+                            body = body.ljust(1500) + "USD context. "
+                            body = (body.ljust(1800 - cut) + envelope + "-").ljust(2795) + " End."
+                        with self.subTest(label=label, side=side, cut=cut):
+                            assessment, review, raw, _ = self.selected_calculation(body)
+                            with self.assertRaisesRegex(ValueError, "research draft"):
+                                validate_response(raw, assessment, review)
+                            self.assert_saved_calculation_rejected(raw, assessment, review, "42")
 
     def test_real_selected_packet_preserves_visible_currency_context_at_nonzero_offsets(self):
         body = "x" * 600 + "Visible boundary. USD 42 and 0. "

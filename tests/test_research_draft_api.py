@@ -279,6 +279,11 @@ class ResearchDraftApiTests(unittest.TestCase):
                  ("-[USD]42", "42"), ("42 million\u27e6USD\u27e7-.", "42"))
         self.assert_rejected_numeric_cases(cases, zero_quote="Separate operand 0.")
 
+    def test_whitespace_between_source_signs_cannot_publish_a_signed_suffix(self):
+        cases = tuple((f"USD {outer}{spacing}{inner}42 million", inner + "42")
+                      for outer in "+-" for inner in "+-" for spacing in (" ", "\t"))
+        self.assert_rejected_numeric_cases(cases, zero_quote="Separate operand 0.")
+
     def test_separated_grouping_cannot_supply_partial_calculation_operand(self):
         self.assert_rejected_numeric_cases((("1\t234", "234"), ("1  234", "234"), ("1, 234", "234"),
                                             ("1\u2009\u2009234", "234"), ("1,\u202f234", "234"),
@@ -442,6 +447,21 @@ class ResearchDraftApiTests(unittest.TestCase):
         self.assertEqual(content[1801], "-")
         self.assert_natural_currency_edge_rejected(
             content.ljust(2795) + " End.", "right", edge_text=amount, outside_character=")")
+
+    def test_real_left_passage_crop_inside_scale_cannot_hide_sign(self):
+        hidden, visible = "-mill", "ion USD 42 and 0. "
+        content = ("x" * (600 - len(hidden)) + hidden + visible).ljust(1500) + "Acme revenue FY2025."
+        self.assertEqual(content[600 - len(hidden)], "-")
+        self.assert_natural_currency_edge_rejected(
+            content.ljust(1795) + " End.", "left", edge_text=visible, outside_character="l")
+
+    def test_real_right_passage_crop_inside_scale_cannot_hide_sign(self):
+        visible = "42 millio"
+        content = (" " * 700 + "Acme revenue FY2025. Amount 0 recorded. ").ljust(1500) + "USD context. "
+        content = content.ljust(1800 - len(visible)) + visible + "n-"
+        self.assertEqual(content[1801], "-")
+        self.assert_natural_currency_edge_rejected(
+            content.ljust(2795) + " End.", "right", edge_text=visible, outside_character="n")
 
     def test_balanced_currency_annotations_preserve_plain_and_signed_calculations(self):
         cases = (("(USD) 42", "42", "42.00"), ("((USD)) 42", "42", "42.00"),

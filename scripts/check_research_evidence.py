@@ -431,9 +431,11 @@ def check_run(case, run, captured, loader, *, workflow="evidence_review"):
             # Other packet rows or unrelated request text cannot authorize a
             # figure in this row. Canonical validation already pins citations
             # and copies this requirement's qualifiers from its assessment.
-            provenance = " ".join([support["quote"] for support in row["supports"]] +
-                                  [row[field] for field in ("period", "unit", "currency", "freshness") if row[field]])
-            allowed = plain_numbers(provenance, codes)
+            # Independent fragments cannot form one numeric envelope across
+            # a citation or qualifier boundary. Validate each before unioning.
+            provenance = [support["quote"] for support in row["supports"]] + [
+                row[field] for field in ("period", "unit", "currency", "freshness") if row[field]]
+            allowed = set().union(*(plain_numbers(fragment, codes) for fragment in provenance))
             if row["calculation"]:
                 allowed.add(row["calculation"]["result"])
             require(numbers <= allowed, "Draft introduced an unsupported numeric literal")

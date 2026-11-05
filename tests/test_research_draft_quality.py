@@ -36,12 +36,14 @@ class ResearchDraftQualityTests(unittest.TestCase):
         run["budget"]["consumed"]["model_calls"] += int(supported)
         return run, sources, loader
 
-    def check_text(self, case, text, *, error=None, calculation=None):
+    def check_text(self, case, text, *, error=None, calculation=None, quotes=None):
         run, sources, loader = self.draft_run(case)
         row = run["draft"]["items"][0]
+        supports = row["supports"] if quotes is None else [
+            {"passage_id": row["supports"][0]["passage_id"], "quote": quote} for quote in quotes]
         raw = {"version": 1, "items": {row["item_id"]: {
             "kind": "calculation" if calculation else "fact", "text": text,
-            "supports": [{key: support[key] for key in ("passage_id", "quote")} for support in row["supports"]],
+            "supports": [{key: support[key] for key in ("passage_id", "quote")} for support in supports],
             "calculation": calculation}}}
         run["draft"] = validate_response(raw, run["assessment"], run["evidence_review"])
         if error is None:
@@ -558,6 +560,53 @@ class ResearchDraftQualityTests(unittest.TestCase):
                 if calculated:
                     self.assertEqual(run["draft"]["items"][0]["calculation"]["result"], "84.00")
                 check_run(case, run, sources, loader, workflow="research_draft")
+
+    def test_numeric_provenance_preserves_independent_citations_in_either_order(self):
+        for amount, quotes in (("USD 42 million.", ("USD 42", "42 million.")),
+                               ("USD42million.", ("USD42", "42million."))):
+            case = deepcopy(self.cases["historical_tail"])
+            case["sources"][0]["quote"] = "Acme revenue for FY2025 was " + amount
+            for ordered in (quotes, quotes[::-1]):
+                with self.subTest(quotes=ordered):
+                    self.check_text(case, "Acme revenue for FY2025 was USD 42 million.", quotes=ordered)
+
+    def test_numeric_provenance_preserves_independent_numeric_qualifiers(self):
+        case = deepcopy(self.cases["historical_tail"])
+        case["request"] = case["request"].replace("FY2025", "2025")
+        case["sources"][0]["quote"] = case["sources"][0]["quote"].replace("FY2025", "2025")
+        case["expected"]["period"] = "2025"
+        case["expected"]["support_fragments"] = [["2025", "USD", "42"]]
+        self.check_text(case, case["sources"][0]["quote"], quotes=("USD 42",))
+
+    def test_numeric_provenance_does_not_join_exponent_sign_or_accounting_context(self):
+        variants = ((" Marker e2025 identifies this record.", ("USD 42", "e2025")),
+                    (" Historical record - as filed.", ("-", "USD 42 million.")),
+                    (" Historical record - as filed.", ("USD 42", "-")),
+                    (" Notes (archived).", ("(", "USD 42", ")")))
+        for tail, quotes in variants:
+            case = deepcopy(self.cases["historical_tail"])
+            text = case["sources"][0]["quote"]
+            case["sources"][0]["quote"] += tail
+            with self.subTest(quotes=quotes):
+                self.check_text(case, text, quotes=quotes)
+
+    def test_numeric_provenance_cannot_assemble_a_number_from_cited_digits(self):
+        case = deepcopy(self.cases["historical_tail"])
+        # Keep the individual digit citations unique in the accepted range.
+        case["request"] = case["request"].replace("FY2025", "FY1999")
+        case["sources"][0]["quote"] = case["sources"][0]["quote"].replace("FY2025", "FY1999")
+        case["expected"]["period"] = "FY1999"
+        case["expected"]["support_fragments"] = [["FY1999", "USD", "42"]]
+        self.check_text(case, case["sources"][0]["quote"], quotes=("4", "2"),
+                        error="unsupported numeric literal")
+
+    def test_numeric_provenance_still_rejects_malformed_typography_within_a_citation(self):
+        for amount in ("4 2", "42 e2025", "- 42", "--42", "(USD 42)"):
+            case = deepcopy(self.cases["historical_tail"])
+            text = case["sources"][0]["quote"]
+            case["sources"][0]["quote"] += " Another recorded amount was " + amount + "."
+            with self.subTest(amount=amount):
+                self.check_text(case, text, quotes=("USD 42 million.", amount), error="numeric typography")
 
     def test_malformed_draft_shapes_fail_with_controlled_non_echoing_assertion(self):
         case = self.cases["historical_tail"]
