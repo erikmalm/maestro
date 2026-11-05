@@ -335,6 +335,25 @@ class ResearchDraftTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     validate_response(raw, assessment, review)
 
+    def test_whitespace_in_exponents_cannot_authorize_mantissa_or_exponent_fragments(self):
+        cases = (("42 e-3", "42"), ("42 E - 3", "42"), ("42\te\t+\t3", "42"),
+                 ("42\ne -\n3", "42"), ("0.42 e-3", "0.42"), ("42 e-3", "-3"),
+                 ("42 E +3", "+3"), ("42 e 3", "3"), ("42 e\u22123", "42"),
+                 ("42e-3", "42"), ("42 e3 7", "7"), ("42 e-3 7", "7"),
+                 ("42 e3\t7", "7"), ("42 E - 3\n7", "7"), ("42e3 7", "7"))
+        for amount, value in cases:
+            for crop in ("whole", "writer", "review"):
+                with self.subTest(amount=ascii(amount), value=value, crop=crop):
+                    assessment, review, raw = self.formatted_calculation(amount, value, crop)
+                    with self.assertRaises(ValueError):
+                        validate_response(raw, assessment, review)
+        # A separately labelled signed operand and ordinary prose beginning
+        # with E remain independent of scientific notation.
+        for quote in ("10 and -12.", "10 Euros and -12."):
+            assessment, review, raw = self.calculation(quote, "10", "-12")
+            saved = validate_response(raw, assessment, review)
+            self.assertEqual(saved["items"][0]["calculation"]["result"], "-2.00")
+
     def test_even_accepted_coverage_crops_cannot_remove_packet_numeric_context(self):
         assessment, review = scope(("covered",), quotes=["Amount -42 and 0. FY2025 USD."])
         packet = {key: review[key] for key in ("version", "offset_unit", "lookup", "selection", "sources", "passages")}
@@ -348,8 +367,8 @@ class ResearchDraftTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             validate_response(raw, assessment, cropped)
 
-    def formatted_calculation(self, amount, value, crop):
-        quote = "Amount " + amount + " and 0. FY2025 USD. End."
+    def formatted_calculation(self, amount, value, crop, *, zero_quote="and 0."):
+        quote = "Amount " + amount + " " + zero_quote + " FY2025 USD. End."
         assessment, review = scope(("covered",), quotes=[quote])
         if crop == "review":
             # The reviewer can accept a unique suffix while the full packet
@@ -368,7 +387,7 @@ class ResearchDraftTests(unittest.TestCase):
         if crop == "writer":
             raw["items"]["i0"]["supports"] = [
                 {"passage_id": "p0", "quote": value},
-                {"passage_id": "p0", "quote": "and 0. FY2025 USD. End."},
+                {"passage_id": "p0", "quote": zero_quote + " FY2025 USD. End."},
             ]
             raw["items"]["i0"]["calculation"]["operands"][1]["support_index"] = 1
         return assessment, review, raw
@@ -446,7 +465,8 @@ class ResearchDraftTests(unittest.TestCase):
                     validate_response(raw, assessment, review)
 
     def test_real_selected_packet_cannot_hide_a_sign_after_a_currency_envelope(self):
-        for label in ("USD", "XUSD", "U.S.$"):
+        for label in ("USD", "XUSD", "U.S.$", "million", "million USD", "USD million", "billion EUR",
+                      "millions USD", "millionUSD", "USDmillion"):
             body = " " * 700 + "Testsubject metric0 FY2025. Amount 0 recorded. "
             body += " " * (1500 - len(body)) + "USD context. "
             tail = "42 " + label
@@ -478,6 +498,33 @@ class ResearchDraftTests(unittest.TestCase):
                         assessment, review, raw = self.formatted_calculation(amount, value, crop)
                         with self.assertRaises(ValueError):
                             validate_response(raw, assessment, review)
+
+    def test_underscore_groups_cannot_authorize_numeric_fragments(self):
+        for amount in ("42_3", "42 _ 3", "42 _ _ 3", "42\t_\t3", "42 e1 _ 3",
+                       "42 _\u0301_ 3", "42 e1 _\u0301_ 3"):
+            for value in ("42", "3"):
+                for crop in ("whole", "writer", "review"):
+                    with self.subTest(amount=ascii(amount), value=value, crop=crop):
+                        assessment, review, raw = self.formatted_calculation(amount, value, crop)
+                        with self.assertRaises(ValueError):
+                            validate_response(raw, assessment, review)
+
+    def test_scaled_postfix_signs_cannot_become_positive_operands(self):
+        for label in ("thousand", "million", "billion", "trillion", "million USD", "USD million", "Billion EUR",
+                      "thousands USD", "millions USD", "billions EUR", "trillions USD", "millionUSD", "USDmillion"):
+            for sign in ("-", "\u2212"):
+                for crop in ("whole", "writer", "review"):
+                    with self.subTest(label=label, sign=ascii(sign), crop=crop):
+                        assessment, review, raw = self.formatted_calculation(
+                            "42 " + label + sign + ".", "42", crop, zero_quote="Separate operand 0.")
+                        with self.assertRaises(ValueError):
+                            validate_response(raw, assessment, review)
+        for label in ("thousand", "million", "billion", "trillion", "million USD", "USD million",
+                      "millions USD", "millionUSD"):
+            assessment, review, raw = self.formatted_calculation(
+                "42 " + label + ".", "42", "whole", zero_quote="Separate operand 0.")
+            saved = validate_response(raw, assessment, review)
+            self.assertEqual(saved["items"][0]["calculation"]["result"], "42")
 
     def test_leading_arabic_numeric_separators_cannot_authorize_ascii_digit_suffixes(self):
         for separator in ("\u066b", "\u066c"):
@@ -605,7 +652,7 @@ class ResearchDraftTests(unittest.TestCase):
                 "operands": [{"value": "42", "support_index": 0}, {"value": "0", "support_index": 0}]})
             with self.subTest(ending=ending), self.assertRaises(ValueError):
                 validate_response(raw, assessment, review)
-        for prefix in (" ", ". ", "\u2009"):
+        for prefix in (" ", ". ", "\u2009", "_ ", "_\u0301_ "):
             assessment, review = scope(("covered",), quotes=["42 and 0. FY2025 USD. End."])
             passage = review["passages"][0]
             passage["text"] = prefix + passage["text"][2:]

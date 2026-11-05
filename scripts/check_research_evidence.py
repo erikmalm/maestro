@@ -62,8 +62,12 @@ def plain_numbers(text):
     named Unicode math signs and grouped/scientific forms are unsupported.
     """
     unsupported = "Unsupported numeric typography in fixture evaluation"
+    numeric_boundaries = []
     for index, character in enumerate(text):
         category = unicodedata.category(character)
+        # This view is used only to reject joined numeric fragments. Original
+        # spelling remains authoritative for every accepted number below.
+        numeric_boundaries.append("_" if category.startswith("M") else character)
         require(not character.isnumeric() or character in "0123456789", unsupported)
         # This finite corpus uses currency codes. A glyph cannot acquire its
         # identity from a copied qualifier, even for an ambiguous dollar sign.
@@ -71,10 +75,22 @@ def plain_numbers(text):
         if not character.isascii():
             name = unicodedata.name(character, "")
             require(category != "Cf" and "MINUS" not in name and "PLUS" not in name, unsupported)
+            if category.startswith("M"):
+                before, after = text[:index].rstrip(), text[index + 1:].lstrip()
+                base = index - 1
+                while base >= 0 and unicodedata.category(text[base]).startswith("M"):
+                    base -= 1
+                word_mark = base >= 0 and text[base].isalpha()
+                require(not (before and before[-1] in "0123456789"
+                             or after and after[0] in "0123456789" and not word_mark), unsupported)
             if category == "Pd":
                 after = text[index + 1:].lstrip()
                 require(not after or not after[0].isdigit(), unsupported)
-    require(re.search(r"[0-9](?:[,/'\u2019\u066b\u066c]\s*[0-9]|[eE][+-]?[0-9]|\s+[0-9])", text) is None,
+    # Consume unsupported grouping/exponent spellings as a whole. A suffix
+    # that also occurs in a copied reporting period cannot authorize it.
+    require(re.search(r"[0-9][\s_]*_[\s_]*[0-9]", "".join(numeric_boundaries)) is None, unsupported)
+    require(re.search(r"[0-9](?:[,/'\u2019\u066b\u066c]\s*[0-9]"
+                      r"|\s*[eE]\s*[+-]?\s*[0-9]|\s+[0-9])", text) is None,
             unsupported)
     require(re.search(r"[+-]\s+(?=[.,\u066b\u066c]?[0-9])", text) is None, unsupported)
     # With an explicit sign, an ASCII separator and following whitespace are
@@ -84,7 +100,9 @@ def plain_numbers(text):
     accounting = r"\(\s*(?:[A-Z]{3}\s*)?" + PLAIN_NUMBER + r"(?:\s*(?:" + "|".join(SCALES) + r")s?)?(?:\s*[A-Z]{3})?\s*\)"
     require(re.search(accounting, text, re.IGNORECASE) is None
             and re.search(r"[+-]\s*" + currency_label + r"\s*[0-9]", text) is None, unsupported)
-    postfix = r"[0-9](?:\s*" + currency_label + r"\s*)?[+-](?![0-9])"
+    # Both a scale and currency label can intervene before a postfix sign.
+    postfix_label = r"(?:(?i:" + "|".join(SCALES) + r")s?|" + currency_label + r")"
+    postfix = r"[0-9](?:\s*" + postfix_label + r"\s*){0,2}[+-](?![0-9])"
     require(re.search(postfix, text) is None, unsupported)
     candidates = re.findall(NUMBER_CANDIDATE, text)
     require(all(re.fullmatch(PLAIN_NUMBER, value) is not None for value in candidates), unsupported)

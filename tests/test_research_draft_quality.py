@@ -45,6 +45,58 @@ class ResearchDraftQualityTests(unittest.TestCase):
         case["expected"]["draft_quantities"][0]["value"] = value
         return case
 
+    def test_grouped_and_spaced_exponent_candidates_cannot_borrow_supported_digits(self):
+        case = self.cases["historical_tail"]
+        amounts = ["42" + separator + "2025" for separator in
+                   ("_", "__", "_ _", "_ ", " _", " _ ", "\t_\t", "\u00a0_\u00a0")]
+        amounts += ["42" + spacing + exponent + gap + "2025"
+                    for spacing, gap in (("", " "), (" ", ""), (" ", " "), ("\t", "\t"))
+                    for exponent in ("e", "E")]
+        for amount in amounts:
+            run, sources, loader = self.draft_run(case)
+            self.replace_fact(run, case["sources"][0]["quote"] + " Another amount was USD " + amount + ".")
+            with self.subTest(amount=ascii(amount)), self.assertRaisesRegex(AssertionError, "numeric"):
+                check_run(case, run, sources, loader, workflow="research_draft")
+
+    def test_numeric_combining_marks_cannot_join_supported_digit_fragments(self):
+        case = self.cases["historical_tail"]
+        for mark in ("\ufe0f", "\u0338", "\u0301", "\u20e3"):
+            for spacing in ("", " ", "\t", "\u00a0"):
+                for separator in (mark, "_" + mark + "_"):
+                    amount = "42" + spacing + separator + spacing + "2025"
+                    run, sources, loader = self.draft_run(case)
+                    self.replace_fact(run, case["sources"][0]["quote"] + " Another amount was USD " + amount + ".")
+                    with self.subTest(amount=ascii(amount)), self.assertRaisesRegex(AssertionError, "numeric"):
+                        check_run(case, run, sources, loader, workflow="research_draft")
+        for prose in ("The cafe\u0301 note is prose.", "The cafe\u0301 42 note is prose.",
+                      "The cafe\u0301\u0327 42 note is prose.", "The cafe\u0301\t42 note is prose."):
+            run, sources, loader = self.draft_run(case)
+            self.replace_fact(run, case["sources"][0]["quote"] + " " + prose)
+            with self.subTest(prose=ascii(prose)):
+                check_run(case, run, sources, loader, workflow="research_draft")
+
+    def test_postfix_sign_cannot_hide_after_scale_and_currency_labels(self):
+        case = self.cases["historical_tail"]
+        for amount in ("42 million USD-", "42 million USD -", "42 million usd-",
+                       "42 millionUSD-", "42millionUSD-", "42 million USD+",
+                       "42 billion USD-", "42 million\tUSD\t-"):
+            run, sources, loader = self.draft_run(case)
+            self.replace_fact(run, case["sources"][0]["quote"] + " Another amount was " + amount + ".")
+            with self.subTest(amount=amount), self.assertRaisesRegex(AssertionError, "numeric"):
+                check_run(case, run, sources, loader, workflow="research_draft")
+
+    def test_plural_scale_and_currency_cannot_hide_a_postfix_sign(self):
+        for scale in ("thousand", "million", "billion", "trillion"):
+            case = deepcopy(self.cases["historical_tail"])
+            case["sources"][0]["quote"] = "Acme revenue for FY2025 was USD 42 " + scale + "."
+            case["expected"]["draft_quantities"][0]["scale"] = scale
+            for separator in (" ", "", "\t"):
+                amount = "42 " + scale + "s" + separator + "USD-"
+                run, sources, loader = self.draft_run(case)
+                self.replace_fact(run, case["sources"][0]["quote"] + " Another amount was " + amount + ".")
+                with self.subTest(amount=amount), self.assertRaisesRegex(AssertionError, "numeric"):
+                    check_run(case, run, sources, loader, workflow="research_draft")
+
     def test_leading_arabic_separator_cannot_authorize_its_integer_suffix(self):
         case = self.cases["historical_tail"]
         for separator in ("\u066b", "\u066c"):
@@ -248,7 +300,8 @@ class ResearchDraftQualityTests(unittest.TestCase):
                 load_cases(path)
 
     def test_server_calculation_retains_scale_and_cannot_authorize_a_different_one(self):
-        case = self.cases["historical_tail"]
+        case = deepcopy(self.cases["historical_tail"])
+        case["sources"][0]["quote"] += " Amounts recorded."
         calculation = {"operation": "sum", "operands": [
             {"value": "42", "support_index": 0}, {"value": "42", "support_index": 0}], "precision": 2}
         for scale in ("million", "billion"):
@@ -324,7 +377,8 @@ class ResearchDraftQualityTests(unittest.TestCase):
                 check_run(case, run, sources, loader, workflow="research_draft")
 
     def test_same_row_citations_qualifiers_and_server_calculation_remain_allowed(self):
-        case = self.cases["historical_tail"]
+        case = deepcopy(self.cases["historical_tail"])
+        case["sources"][0]["quote"] += " Amounts recorded."
         for calculated in (False, True):
             run, sources, loader = self.draft_run(case)
             support = run["draft"]["items"][0]["supports"][0]

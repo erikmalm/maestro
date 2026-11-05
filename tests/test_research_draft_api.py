@@ -125,6 +125,77 @@ class ResearchDraftApiTests(unittest.TestCase):
         self.assertEqual(len(self.writer_inputs[0]["coverage"]["items"]), 2)
         self.assert_usage(run)
 
+    def test_omitted_historical_period_withholds_writer_without_repair_or_lost_usage(self):
+        # Captured native failure: the right quote was labelled unspecified,
+        # despite the requested FY2025 appearing verbatim in that quote.
+        request = "Assess Acme revenue and operating profit in USD for FY2025."
+        quote = "Acme revenue for FY2025 was USD 42 million."
+        content = "Unrelated public synthetic background. " * 70 + quote
+        source = self.fixture.capture(content)
+        snapshot = self.fixture.archive_fixture.source_snapshot()
+        self.fixture.raw["items"].append({**deepcopy(self.fixture.raw["items"][0]),
+                                           "id": "i2", "criterion": "operating profit"})
+
+        def coverage(selected, *, historical=False):
+            support = self.fixture.support(selected, quote, scope="historical" if historical else "unspecified",
+                                           period="FY2025" if historical else None)
+            return {"version": 2, "items": {
+                "i1": {"state": "covered", "reason": "Evidence found for Acme revenue FY2025.",
+                       "supports": [support]},
+                "i2": {"state": "missing", "reason": "No evidence found for Acme operating profit FY2025.",
+                       "supports": []}}}
+
+        self.fixture.review_builder = coverage
+        run = self.run_now(request=request)
+        self.assertEqual(run["state"], "partial")
+        self.assertEqual(run["assessment"]["completion_criterion"], request)
+        self.assertEqual([(item["criterion"], item["period"], item["currency"])
+                          for item in run["assessment"]["items"]],
+                         [("revenue", "FY2025", "USD"), ("operating profit", "FY2025", "USD")])
+        revenue, profit = run["evidence_review"]["items"]
+        self.assertEqual((revenue["model_state"], revenue["state"], profit["state"]),
+                         ("covered", "unavailable", "missing"))
+        support = revenue["supports"][0]
+        self.assertEqual((support["quote"], support["temporal_scope"], support["period"]),
+                         (quote, "unspecified", None))
+        self.assertEqual(support["freshness_basis"], "requested_period_not_established")
+        self.assertEqual(support["start"], 2730)
+        self.assertEqual(content[support["start"]:support["end"]], quote)
+        self.assertEqual(run["evidence_review"]["sources"][0]["capture_id"], source["capture_id"])
+        self.assertEqual(run["draft"]["state"], "unavailable")
+        self.assertEqual(run["draft"]["reason"], "no_supported_facts")
+        self.assertEqual([item["kind"] for item in run["draft"]["items"]], ["gap", "gap"])
+        self.assertTrue(all(not item["supports"] and item["calculation"] is None
+                            for item in run["draft"]["items"]))
+        self.assertEqual(self.writer_inputs, [])
+        self.assertEqual(self.writer_rows(run["id"]), [])
+        self.assert_usage(run, calls=2)
+
+        # A separate correctly annotated response can fund the writer. It
+        # cannot silently repair or resume the earlier stopped run.
+        self.fixture.review_builder = lambda selected: coverage(selected, historical=True)
+
+        def draft(selected):
+            passage = next(row for row in selected["packet"]["passages"] if quote in row["text"])
+            return {"version": 1, "items": {"i1": {
+                "kind": "fact", "text": "Acme reported FY2025 revenue of USD 42 million.",
+                "supports": [{"passage_id": passage["id"], "quote": quote}], "calculation": None}}}
+
+        self.writer_builder = draft
+        corrected = self.run_now(request=request)
+        self.assertNotEqual(corrected["id"], run["id"])
+        self.assertEqual(corrected["state"], "draft")
+        self.assertEqual(corrected["draft"]["state"], "unreviewed")
+        self.assertEqual([item["kind"] for item in corrected["draft"]["items"]], ["fact", "gap"])
+        self.assertEqual(corrected["draft"]["items"][1]["coverage_state"], "missing")
+        self.assertEqual(corrected["draft"]["items"][0]["supports"][0]["quote"], quote)
+        self.assert_usage(corrected)
+        for expected in (run, corrected):
+            reloaded = self.fixture.fixture.get(expected["id"])
+            for field in ("state", "assessment", "evidence_review", "draft", "budget"):
+                self.assertEqual(reloaded[field], expected[field])
+        self.assertEqual(self.fixture.archive_fixture.source_snapshot(), snapshot)
+
     def test_declared_calculation_derives_result_from_supplied_numeric_inputs(self):
         quote = "Acme FY2025 revenue in USD was 10. Acme FY2025 costs in USD were 8. Amounts recorded."
         self.fixture.capture(quote)
@@ -152,7 +223,7 @@ class ResearchDraftApiTests(unittest.TestCase):
         self.assertEqual(self.fixture.fixture.get(run["id"])["draft"], run["draft"])
         self.assert_usage(run)
 
-    def calculation_from_quote(self, quote, operand):
+    def calculation_from_quote(self, quote, operand, *, zero_quote="and 0."):
         self.fixture.review_builder = lambda selected: {"version": 1, "items": [{
             "item_id": "i1", "state": "covered", "reason": fixtures.REASON,
             "supports": [self.fixture.support(selected, quote)]}]}
@@ -162,20 +233,20 @@ class ResearchDraftApiTests(unittest.TestCase):
             return {"version": 1, "items": {"i1": {
                 "kind": "calculation", "text": "The cited amounts produce a declared sum.",
                 "supports": [{"passage_id": passage["id"], "quote": operand},
-                             {"passage_id": passage["id"], "quote": "and 0."}],
+                             {"passage_id": passage["id"], "quote": zero_quote}],
                 "calculation": {"operation": "sum", "operands": [
                     {"value": operand, "support_index": 0}, {"value": "0", "support_index": 1}], "precision": 2}}}}
 
         self.writer_builder = calculated
 
-    def assert_rejected_numeric_cases(self, cases):
-        quotes = [f"Case {index}: Acme FY2025 revenue in USD was {amount} and 0. Amounts recorded."
+    def assert_rejected_numeric_cases(self, cases, *, zero_quote="and 0."):
+        quotes = [f"Case {index}: Acme FY2025 revenue in USD was {amount} {zero_quote} Amounts recorded."
                   for index, (amount, _) in enumerate(cases)]
         self.fixture.capture(" ".join(quotes))
         snapshot = self.fixture.archive_fixture.source_snapshot()
         for (amount, operand), quote in zip(cases, quotes):
             with self.subTest(amount=amount):
-                self.calculation_from_quote(quote, operand)
+                self.calculation_from_quote(quote, operand, zero_quote=zero_quote)
                 run = self.run_now()
                 self.assertEqual(run["state"], "failed")
                 self.assertIsNone(run["draft"])
@@ -200,7 +271,20 @@ class ResearchDraftApiTests(unittest.TestCase):
 
     def test_separated_grouping_cannot_supply_partial_calculation_operand(self):
         self.assert_rejected_numeric_cases((("1\t234", "234"), ("1  234", "234"), ("1, 234", "234"),
-                                            ("1\u2009\u2009234", "234"), ("1,\u202f234", "234")))
+                                            ("1\u2009\u2009234", "234"), ("1,\u202f234", "234"),
+                                            ("42 _ 3", "42"), ("42 _ _ 3", "3"), ("42 e1 _ 3", "3"),
+                                            ("42 _\u0301_ 3", "42")))
+
+    def test_scaled_postfix_sign_cannot_supply_positive_calculation_operand(self):
+        self.assert_rejected_numeric_cases((("42 million USD-.", "42"), ("42 million-.", "42"),
+                                            ("42 USD billion-.", "42"), ("42 millions USD-.", "42"),
+                                            ("42 millionUSD-.", "42")), zero_quote="Separate operand 0.")
+
+    def test_separated_exponent_cannot_supply_partial_calculation_operand(self):
+        self.assert_rejected_numeric_cases((("42 e-3", "42"), ("42 E - 3", "42"),
+                                            ("42\te\t+\t3", "42"), ("0.42 e-3", "0.42"),
+                                            ("42 e-3", "-3"), ("42 E +3", "+3"),
+                                            ("42 e3 7", "7"), ("42 e-3 8", "8")))
 
     def test_leading_separator_cannot_detach_sign_from_calculation_operand(self):
         amounts = tuple("-" + separator + spacing + "42" for separator in ("\u066b", "\u066c")

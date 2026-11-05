@@ -41,11 +41,14 @@ _SIGNS = "+-\u2212\u00b1\u2213"
 # candidate. Quotation apostrophes are not numeric prefixes.
 # Arabic marks may be separated from their digits. For ASCII sentence
 # punctuation, consume such whitespace only when an explicit sign precedes it.
+# Keep whitespace around an exponent marker/sign in the same rejected run;
+# neither its mantissa nor a grouped exponent suffix is an independent operand.
 _NUMBER_RUN = re.compile(
     r"(?:(?:[+\-\u2212\u00b1\u2213]\s*)?(?:\d+|[.,]\d+|[\u066b\u066c]\s*\d+)"
     r"|[+\-\u2212\u00b1\u2213]\s*[.,]\s+\d+)"
-    r"(?:[\s.,'\u066b\u066c/\-]+\d+)*"
-    r"(?:[eE][+\-\u2212\u00b1\u2213]?\d+)?")
+    r"(?:[\s.,'_\u0300\u066b\u066c/\-]+\d+)*"
+    r"(?:\s*[eE]\s*[+\-\u2212\u00b1\u2213]?\s*\d+"
+    r"(?:[\s.,'_\u0300\u066b\u066c/\-]+\d+)*)?")
 # A sign may sit outside a currency symbol/short label rather than directly
 # beside the digits. This structural rejection grammar recognizes short opaque
 # labels, uppercase/dotted codes and labels attached to currency symbols. It
@@ -56,12 +59,18 @@ _CURRENCY_LABEL = (r"(?:[A-Z][A-Z0-9_]*(?:\.[A-Z0-9_]+)*\.?|(?:" + _SHORT_LABEL
 _SYMBOL_LABEL = r"(?:[^\W\d_]|\.)+"
 _CURRENCY_ENVELOPE = (r"(?:(?:" + _SYMBOL_LABEL + r"\s*)?\u00a4+(?:\s*" + _SYMBOL_LABEL
                       + r")?|" + _CURRENCY_LABEL + r")")
+# A postfix sign still belongs to a scaled amount. Recognize only these
+# explicit scale words with the existing opaque currency labels/symbols;
+# this neither converts the scale nor interprets arbitrary surrounding prose.
+_SCALE_LABEL = r"(?i:thousands?|millions?|billions?|trillions?)"
+_AMOUNT_SUFFIX = (r"(?:" + _SCALE_LABEL + r"(?:\s*" + _CURRENCY_ENVELOPE + r")?|"
+                  + _CURRENCY_ENVELOPE + r"(?:\s*" + _SCALE_LABEL + r")?)")
 _SIGNED_CURRENCY_BEFORE = re.compile(r"[" + re.escape(_SIGNS) + r"]\s*" + _CURRENCY_ENVELOPE + r"\s*\Z")
 # A sign starting another digit run belongs to that run rather than being a
 # postfix sign of the earlier amount (for example, "10 and -12").
-_SIGNED_CURRENCY_AFTER = re.compile(r"\A\s*" + _CURRENCY_ENVELOPE + r"\s*[" + re.escape(_SIGNS) + r"](?!\s*\d)")
+_SIGNED_AMOUNT_AFTER = re.compile(r"\A\s*" + _AMOUNT_SUFFIX + r"\s*[" + re.escape(_SIGNS) + r"](?!\s*\d)")
 _CURRENCY_BEFORE = re.compile(r"(?<!\w)" + _CURRENCY_ENVELOPE + r"\s*\Z")
-_CURRENCY_AFTER = re.compile(r"\A\s*" + _CURRENCY_ENVELOPE + r"(?!\w)")
+_AMOUNT_AFTER = re.compile(r"\A\s*" + _AMOUNT_SUFFIX + r"(?!\w)")
 _GAPS = {
     "missing": "No supported fact was recorded for this requirement in the inspected evidence.",
     "stale": "Saved evidence needs checking before this requirement can be drafted as a supported fact.",
@@ -249,7 +258,7 @@ def _support(raw, accepted):
 def _numeric_view(text):
     """A rejection-only lexical view mapped back to original codepoints.
 
-    Compatibility digits/punctuation, spacing, signs and invisible formatting
+    Compatibility digits/punctuation, marks, spacing, signs and invisible formatting
     must not split one unsupported number into apparently plain ASCII pieces.
     A view match is accepted only if its complete original span equals the
     model's unchanged ASCII literal; this never converts an evidence value.
@@ -268,7 +277,11 @@ def _numeric_view(text):
         for projected in unicodedata.normalize("NFKC", character):
             category = unicodedata.category(projected)
             name = unicodedata.name(projected, "")
-            if category == "Zs":
+            if category.startswith("M"):
+                # Retain combining marks as a rejection-only separator, so
+                # mixed underscore/mark grouping cannot expose a digit suffix.
+                projected = "\u0300"
+            elif category == "Zs":
                 projected = " "
             elif category == "Sc":
                 projected = "\u00a4"
@@ -316,14 +329,13 @@ def _numeric_literal(value, support, passage):
         accounting = depth > 0
         trailing_sign = after < len(text) and text[after] in _SIGNS
         currency_sign = (_SIGNED_CURRENCY_BEFORE.search(text[:match.start()]) is not None
-                         or _SIGNED_CURRENCY_AFTER.match(text[match.end():]) is not None)
-        # Include the complete recognized monetary envelope in boundary checks.
-        # A packet starting USD 42 or ending 42 USD cannot show whether a sign
-        # immediately outside that packet belongs to the amount. Ordinary long
-        # lowercase unit words such as million remain lexical stoppers rather
-        # than being mistaken for currency codes.
+                         or _SIGNED_AMOUNT_AFTER.match(text[match.end():]) is not None)
+        # Include the complete recognized currency/scale suffix in boundary
+        # checks. A packet starting USD 42 or ending 42 million USD cannot show
+        # whether an adjacent unseen sign belongs to that amount. Other long
+        # lowercase unit words remain lexical stoppers, not currency codes.
         prefix = _CURRENCY_BEFORE.search(text[:match.start()])
-        suffix = _CURRENCY_AFTER.match(text[match.end():])
+        suffix = _AMOUNT_AFTER.match(text[match.end():])
         boundary_left = prefix.start() if prefix else match.start()
         boundary_right = match.end() + suffix.end() if suffix else match.end()
         if prefix:
@@ -335,7 +347,7 @@ def _numeric_literal(value, support, passage):
         # A dot or whitespace at an unknown packet edge may continue a decimal,
         # grouping separator or signed monetary envelope.
         def connector(character):
-            return character.isspace() or character in _SIGNS + ".,'/\u066b\u066c"
+            return character.isspace() or character in _SIGNS + ".,'_/\u0300\u066b\u066c"
         while boundary_left > 0 and connector(text[boundary_left - 1]):
             boundary_left -= 1
         while boundary_right < len(text) and connector(text[boundary_right]):
