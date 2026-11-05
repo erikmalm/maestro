@@ -58,6 +58,67 @@ class ResearchDraftQualityTests(unittest.TestCase):
             with self.subTest(amount=ascii(amount)), self.assertRaisesRegex(AssertionError, "numeric"):
                 check_run(case, run, sources, loader, workflow="research_draft")
 
+    def test_separator_clusters_cannot_borrow_revenue_and_reporting_period_digits(self):
+        case = self.cases["historical_tail"]
+        separators = (" / ", " , ", " /, ", ", /", " / / ", " . ", "\t/\t",
+                      "\u00a0,\u00a0", "\uff0e", "\u2024", "\uff0c", "\uff0f", "\u2044")
+        for separator in separators:
+            run, sources, loader = self.draft_run(case)
+            self.replace_fact(run, case["sources"][0]["quote"] + " Another amount was 42" + separator + "2025.")
+            with self.subTest(separator=ascii(separator)), self.assertRaisesRegex(AssertionError, "numeric"):
+                check_run(case, run, sources, loader, workflow="research_draft")
+        for whitespace in (" ", "\n", "\r\n", "\t"):
+            run, sources, loader = self.draft_run(case)
+            self.replace_fact(run, case["sources"][0]["quote"] + " The amount was 42." + whitespace
+                              + "2025 was the reporting year.")
+            with self.subTest(sentence=ascii(whitespace)):
+                check_run(case, run, sources, loader, workflow="research_draft")
+
+    def test_nonwhitespace_controls_cannot_hide_a_numeric_sign(self):
+        case = self.cases["historical_tail"]
+        for control in ("\x01", "\x08", "\x1b", "\x7f", "\x80", "\x9f"):
+            run, sources, loader = self.draft_run(case)
+            self.replace_fact(run, case["sources"][0]["quote"] + " Another amount was USD -" + control + "42 million.")
+            with self.subTest(control=ascii(control)), self.assertRaisesRegex(AssertionError, "numeric"):
+                check_run(case, run, sources, loader, workflow="research_draft")
+        for whitespace in ("\t", "\n", "\r\n"):
+            run, sources, loader = self.draft_run(case)
+            self.replace_fact(run, "Acme revenue for FY2025 was USD" + whitespace + "42 million.")
+            with self.subTest(control=ascii(whitespace)):
+                check_run(case, run, sources, loader, workflow="research_draft")
+
+    def test_case_varied_plural_scales_cannot_disappear_from_quantity_checks(self):
+        case = self.cases["historical_tail"]
+        for scale in ("BILLIONS", "BillionS", "billionS", "THOUSANDS", "TRILLIONS"):
+            for amount in ("USD 42 " + scale, "42 " + scale + " USD", "42 " + scale):
+                run, sources, loader = self.draft_run(case)
+                self.replace_fact(run, case["sources"][0]["quote"] + " Another amount was " + amount + ".")
+                with self.subTest(amount=amount), self.assertRaisesRegex(AssertionError, "quantity|scale"):
+                    check_run(case, run, sources, loader, workflow="research_draft")
+        for amount in ("USD 42 MILLIONS", "42 MillionS USD", "42 millionS"):
+            run, sources, loader = self.draft_run(case)
+            self.replace_fact(run, "Acme revenue for FY2025 was " + amount + ".")
+            with self.subTest(control=amount):
+                check_run(case, run, sources, loader, workflow="research_draft")
+
+    def test_explicit_currencies_cannot_be_replaced_by_copied_row_currency(self):
+        case = self.cases["historical_tail"]
+        for label in ("EUR", "eur", "eUr", "GBP"):
+            for amount in ("42 million in " + label, label + " 42", "42 " + label, "42 in " + label):
+                for prefix in ("", case["sources"][0]["quote"] + " Another amount was "):
+                    run, sources, loader = self.draft_run(case)
+                    self.replace_fact(run, prefix + "Acme revenue for FY2025 was " + amount + ".")
+                    with self.subTest(amount=amount, appended=bool(prefix)), self.assertRaisesRegex(AssertionError, "quantity|currency"):
+                        check_run(case, run, sources, loader, workflow="research_draft")
+        for text in ("Acme revenue for FY2025 was 42 million in USD.",
+                     "Acme revenue for FY2025 was 42 million in usd.",
+                     case["sources"][0]["quote"] + " The amount was USD 42.",
+                     case["sources"][0]["quote"] + " The amount was 42 USD."):
+            run, sources, loader = self.draft_run(case)
+            self.replace_fact(run, text)
+            with self.subTest(control=text):
+                check_run(case, run, sources, loader, workflow="research_draft")
+
     def test_numeric_combining_marks_cannot_join_supported_digit_fragments(self):
         case = self.cases["historical_tail"]
         for mark in ("\ufe0f", "\u0338", "\u0301", "\u20e3"):

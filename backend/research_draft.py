@@ -266,7 +266,10 @@ def _numeric_view(text):
     characters, offsets = [], []
     for offset, character in enumerate(text):
         original_category = unicodedata.category(character)
-        if original_category == "Cf":
+        # Invisible non-whitespace controls can separate a sign or digit run
+        # just like format controls. Remove them only from this rejection
+        # view; original-span comparison still forbids repairing a value.
+        if original_category == "Cf" or original_category == "Cc" and not character.isspace():
             continue
         if original_category == "Sc":
             # Some currency symbols (notably U+FDFC) expand into letters under

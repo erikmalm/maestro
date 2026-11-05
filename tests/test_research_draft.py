@@ -367,6 +367,66 @@ class ResearchDraftTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             validate_response(raw, assessment, cropped)
 
+    def control_calculation(self, amount, value, *, crop):
+        # Archived source text permits controls; accepted model quotes do not
+        # permit NUL. Keep the complete original packet while accepting only
+        # the clean suffix containing the requested historical qualifiers.
+        assessment, review = scope(("covered",), quotes=["Amount -42 and 0. FY2025 USD. End."])
+        packet = {key: deepcopy(review[key]) for key in
+                  ("version", "offset_unit", "lookup", "selection", "sources", "passages")}
+        passage = packet["passages"][0]
+        passage["text"] = "\U0001f680 Amount " + amount + " and 0. FY2025 USD. End."
+        passage["end"] = passage["start"] + len(passage["text"])
+        passage["passage_hash"] = hashlib.sha256(passage["text"].encode()).hexdigest()
+        packet["passages"] = [passage]
+        packet["sources"][0]["content_hash"] = hashlib.sha256(
+            ("x" * passage["start"] + passage["text"]).encode()).hexdigest()
+        quote = value + " and 0. FY2025 USD. End."
+        review = validate_review({"version": 1, "items": [{
+            "item_id": "i0", "state": "covered", "reason": "Historical quote.",
+            "supports": [{"passage_id": "p0", "quote": quote, "temporal_scope": "historical",
+                          "period": "FY2025", "observation_date": None}]}]}, assessment, packet, CHECKED_AT)
+        raw = response(review)
+        raw["items"]["i0"].update(kind="calculation", calculation={
+            "operation": "sum", "precision": 2,
+            "operands": [{"value": value, "support_index": 0}, {"value": "0", "support_index": 0}]})
+        if crop == "writer":
+            raw["items"]["i0"]["supports"] = [{"passage_id": "p0", "quote": value + " and 0."}]
+        return assessment, review, raw
+
+    def test_nonwhitespace_controls_cannot_hide_signs_or_grouped_digits(self):
+        controls = [chr(codepoint) for codepoint in range(160)
+                    if unicodedata.category(chr(codepoint)) == "Cc" and not chr(codepoint).isspace()]
+        for control in controls:
+            for amount, value in (("-" + control + "42", "42"),
+                                  ("-USD" + control + " 42", "42"),
+                                  ("1" + control + "234", "234"),
+                                  ("4" + control + "2", "2")):
+                for crop in ("review", "writer"):
+                    with self.subTest(control=ascii(control), amount=ascii(amount), crop=crop):
+                        assessment, review, raw = self.control_calculation(amount, value, crop=crop)
+                        with self.assertRaises(ValueError):
+                            validate_response(raw, assessment, review)
+
+    def test_control_rejection_view_preserves_whitespace_and_original_literal_offsets(self):
+        whitespace = [chr(codepoint) for codepoint in range(160)
+                      if unicodedata.category(chr(codepoint)) == "Cc" and chr(codepoint).isspace()]
+        for control in whitespace:
+            with self.subTest(whitespace=ascii(control)):
+                assessment, review, raw = self.calculation("10 and " + control + "-12.", "10", "-12")
+                saved = validate_response(raw, assessment, review)
+                self.assertEqual(saved["items"][0]["calculation"]["result"], "-2.00")
+                self.assertEqual(validate_saved_draft(saved, assessment, review), saved)
+        for control in ("\x00", "\x01", "\x1b", "\x7f", "\x9f"):
+            assessment, review, raw = self.control_calculation("Note" + control + ". Amount 42", "42", crop="writer")
+            saved = validate_response(raw, assessment, review)
+            self.assertEqual(saved["items"][0]["calculation"]["result"], "42.00")
+            passage = review["passages"][0]
+            support = saved["items"][0]["supports"][0]
+            self.assertEqual(passage["text"][support["start"] - passage["start"]:
+                                            support["end"] - passage["start"]], support["quote"])
+            self.assertEqual(validate_saved_draft(saved, assessment, review), saved)
+
     def formatted_calculation(self, amount, value, crop, *, zero_quote="and 0."):
         quote = "Amount " + amount + " " + zero_quote + " FY2025 USD. End."
         assessment, review = scope(("covered",), quotes=[quote])

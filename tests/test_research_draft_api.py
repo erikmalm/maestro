@@ -286,6 +286,33 @@ class ResearchDraftApiTests(unittest.TestCase):
                                             ("42 e-3", "-3"), ("42 E +3", "+3"),
                                             ("42 e3 7", "7"), ("42 e-3 8", "8")))
 
+    def test_archived_nonwhitespace_controls_cannot_hide_signs_from_cropped_quotes(self):
+        controls = ("\x00", "\x01", "\x08", "\x1b", "\x7f", "\x9f")
+        quotes = [f"42 and 0. FY2025 USD. Case {index} End." for index in range(len(controls))]
+        content = " ".join("Acme FY2025 revenue in USD was -" + control + quote
+                           for control, quote in zip(controls, quotes))
+        source = self.fixture.capture(content)
+        snapshot = self.fixture.archive_fixture.source_snapshot()
+        for control, quote in zip(controls, quotes):
+            with self.subTest(control=ascii(control)):
+                self.calculation_from_quote(quote, "42")
+                run = self.run_now()
+                self.assertEqual(run["state"], "failed")
+                self.assertIsNone(run["draft"])
+                review = run["evidence_review"]
+                self.assertEqual(review["items"][0]["state"], "covered")
+                support = review["items"][0]["supports"][0]
+                self.assertEqual(support["quote"], quote)
+                self.assertEqual(content[support["start"]:support["end"]], quote)
+                self.assertEqual(review["sources"][0]["capture_id"], source["capture_id"])
+                self.assertTrue(any(control in passage["text"] for passage in self.writer_inputs[-1]["packet"]["passages"]))
+                self.assertEqual(self.writer_rows(run["id"])[0][:2], ("failed", None))
+                reloaded = self.fixture.fixture.get(run["id"])
+                for field in ("state", "assessment", "evidence_review", "draft", "budget"):
+                    self.assertEqual(reloaded[field], run[field])
+                self.assert_usage(run)
+        self.assertEqual(self.fixture.archive_fixture.source_snapshot(), snapshot)
+
     def test_leading_separator_cannot_detach_sign_from_calculation_operand(self):
         amounts = tuple("-" + separator + spacing + "42" for separator in ("\u066b", "\u066c")
                         for spacing in ("", " ", "\t")) + ("-. 42", "-, 42")

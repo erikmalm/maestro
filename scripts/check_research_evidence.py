@@ -45,6 +45,7 @@ PLAIN_NUMBER = r"[+-]?[0-9]+(?:\.[0-9]+)?"
 # needs adjacency here so an ordinary sentence ending ". 42" stays valid.
 NUMBER_CANDIDATE = r"[+-]?(?:[0-9]+(?:\.[0-9]+)?|[.,][0-9]+|[\u066b\u066c]\s*[0-9]+)"
 SCALES = ("thousand", "million", "billion", "trillion")
+SCALE_CAPTURE = r"(?i:(" + "|".join(SCALES) + r")s?)"
 MAX_CURRENCY_CODES = 32
 
 
@@ -67,7 +68,15 @@ def plain_numbers(text):
         category = unicodedata.category(character)
         # This view is used only to reject joined numeric fragments. Original
         # spelling remains authoritative for every accepted number below.
-        numeric_boundaries.append("_" if category.startswith("M") else character)
+        projected = unicodedata.normalize("NFKC", character)
+        if category.startswith("M"):
+            projected = "_"
+        elif any(part in unicodedata.name(character, "") for part in ("SLASH", "SOLIDUS", "DIVISION")):
+            projected = "/"
+        elif len(projected) != 1 or projected not in ".,/'_":
+            projected = character
+        numeric_boundaries.append(projected)
+        require(category != "Cc" or character.isspace(), unsupported)
         require(not character.isnumeric() or character in "0123456789", unsupported)
         # This finite corpus uses currency codes. A glyph cannot acquire its
         # identity from a copied qualifier, even for an ambiguous dollar sign.
@@ -88,9 +97,16 @@ def plain_numbers(text):
                 require(not after or not after[0].isdigit(), unsupported)
     # Consume unsupported grouping/exponent spellings as a whole. A suffix
     # that also occurs in a copied reporting period cannot authorize it.
-    require(re.search(r"[0-9][\s_]*_[\s_]*[0-9]", "".join(numeric_boundaries)) is None, unsupported)
-    require(re.search(r"[0-9](?:[,/'\u2019\u066b\u066c]\s*[0-9]"
-                      r"|\s*[eE]\s*[+-]?\s*[0-9]|\s+[0-9])", text) is None,
+    for match in re.finditer(r"[0-9]([\s.,/'_\u2019\u066b\u066c]+)(?=[0-9])", "".join(numeric_boundaries)):
+        # Only a single original ASCII decimal point can join digits. The
+        # rejection view must not turn Unicode punctuation into a decimal.
+        original = text[match.start(1):match.end(1)]
+        decimal = match[1] == "." and original == "."
+        # An immediate ASCII full stop followed only by whitespace remains a
+        # sentence boundary. A detached, repeated or Unicode dot does not.
+        sentence = original == match[1] and original.startswith(".") and original[1:].isspace()
+        require(decimal or sentence, unsupported)
+    require(re.search(r"[0-9]\s*[eE]\s*[+-]?\s*[0-9]", text) is None,
             unsupported)
     require(re.search(r"[+-]\s+(?=[.,\u066b\u066c]?[0-9])", text) is None, unsupported)
     # With an explicit sign, an ASCII separator and following whitespace are
@@ -101,7 +117,7 @@ def plain_numbers(text):
     require(re.search(accounting, text, re.IGNORECASE) is None
             and re.search(r"[+-]\s*" + currency_label + r"\s*[0-9]", text) is None, unsupported)
     # Both a scale and currency label can intervene before a postfix sign.
-    postfix_label = r"(?:(?i:" + "|".join(SCALES) + r")s?|" + currency_label + r")"
+    postfix_label = r"(?:" + SCALE_CAPTURE + r"|" + currency_label + r")"
     postfix = r"[0-9](?:\s*" + postfix_label + r"\s*){0,2}[+-](?![0-9])"
     require(re.search(postfix, text) is None, unsupported)
     candidates = re.findall(NUMBER_CANDIDATE, text)
@@ -120,17 +136,35 @@ def draft_currency_codes(expected):
     return codes
 
 
-def quantities(text, currency_codes):
-    """Recognize declared case variants and legacy uppercase currency labels."""
+def currency_pattern(currency_codes):
+    """Declared case variants plus the existing uppercase-code guard."""
     # Keep the existing uppercase three-letter conflict check. Only declared
     # labels gain ASCII case variants, so ordinary prose such as "was" is not
     # a currency. Values stay unchanged; expected tuples remain authoritative.
     declared = r"(?ai:" + "|".join(re.escape(code) for code in currency_codes) + ")"
-    currency = r"(?:[A-Z]{3}|" + declared + ")"
-    forward = r"(?<!\w)(" + currency + r")\s*(" + PLAIN_NUMBER + r")\s*((?i:" + "|".join(SCALES) + r"))s?\b"
-    reverse = r"(?<![\w.+-])(" + PLAIN_NUMBER + r")\s*((?i:" + "|".join(SCALES) + r"))s?\s*(" + currency + r")(?!\w)"
+    return r"(?:[A-Z]{3}|" + declared + ")"
+
+
+def quantities(text, currency_codes):
+    """Recognize explicit scaled amounts, including a trailing 'in CODE'."""
+    currency = currency_pattern(currency_codes)
+    forward = r"(?<!\w)(" + currency + r")\s*(" + PLAIN_NUMBER + r")\s*" + SCALE_CAPTURE + r"\b"
+    reverse = (r"(?<![\w.+-])(" + PLAIN_NUMBER + r")\s*" + SCALE_CAPTURE
+               + r"(?:\s+(?i:in)\s+|\s*)(" + currency + r")(?!\w)")
     found = {(value, code.upper(), scale.lower()) for code, value, scale in re.findall(forward, text)}
     found.update((value, code.upper(), scale.lower()) for value, scale, code in re.findall(reverse, text))
+    return found
+
+
+def currency_values(text, currency_codes):
+    """Do not let unscaled explicit currencies inherit a copied row currency."""
+    currency = currency_pattern(currency_codes)
+    found = {(value, code) for value, code, _ in quantities(text, currency_codes)}
+    forward = r"(?<!\w)(" + currency + r")\s*(" + PLAIN_NUMBER + r")(?!\w|\.[0-9])"
+    reverse = (r"(?<![\w.+-])(" + PLAIN_NUMBER + r")(?:\s+(?i:in)\s+|\s*)("
+               + currency + r")(?!\w)")
+    found.update((value, code.upper()) for code, value in re.findall(forward, text))
+    found.update((value, code.upper()) for value, code in re.findall(reverse, text))
     return found
 
 
@@ -139,16 +173,16 @@ def check_draft_quantities(expected, row):
     if not annotations:
         return
     wanted = {(item["value"], item["currency"], item["scale"]) for item in annotations}
-    observed = quantities(row["text"], draft_currency_codes(expected))
+    codes = draft_currency_codes(expected)
+    observed = quantities(row["text"], codes)
     amounts = {(value, scale.lower()) for value, scale in re.findall(
-        r"(?<![\w.+-])(" + PLAIN_NUMBER + r")\s*((?i:" + "|".join(SCALES) + r"))s?\b", row["text"])}
+        r"(?<![\w.+-])(" + PLAIN_NUMBER + r")\s*" + SCALE_CAPTURE + r"\b", row["text"])}
     # The canonical row also displays copied request qualifiers. An omitted
     # currency in prose can use that row's explicit currency; an explicit
     # conflicting currency in prose still fails below.
     qualified = {(value, currency, scale) for value, currency, scale in wanted
                  if (value, scale) in amounts and re.search(
                      r"(?<!\w)" + re.escape(currency) + r"(?!\w)", row["currency"] or "")}
-    require(wanted <= observed | qualified, "Draft omitted an expected fixture quantity or changed its currency/scale")
     allowed = set(wanted)
     calculation = row["calculation"]
     if calculation and calculation["operation"] in ("sum", "difference"):
@@ -157,6 +191,9 @@ def check_draft_quantities(expected, row):
         for _, currency, scale in wanted:
             if all((operand["value"], currency, scale) in wanted for operand in calculation["operands"]):
                 allowed.add((calculation["result"], currency, scale))
+    require(currency_values(row["text"], codes) <= {(value, currency) for value, currency, _ in allowed},
+            "Draft introduced a quantity with an unsupported currency")
+    require(wanted <= observed | qualified, "Draft omitted an expected fixture quantity or changed its currency/scale")
     require(observed <= allowed, "Draft introduced a quantity with an unsupported currency/scale")
     require(amounts <= {(value, scale) for value, _, scale in allowed},
             "Draft introduced a quantity with an unsupported scale")
