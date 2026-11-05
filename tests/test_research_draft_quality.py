@@ -45,6 +45,100 @@ class ResearchDraftQualityTests(unittest.TestCase):
         case["expected"]["draft_quantities"][0]["value"] = value
         return case
 
+    def test_exponent_mantissa_separators_cannot_split_into_supported_numbers(self):
+        case = self.cases["historical_tail"]
+        separators = (".", " .", ". ", " . ", "..", ". .", ".,", ",.", "_", "/",
+                      "\uff0e", "\u2024", "\u0338")
+        for separator in separators:
+            for exponent, spacing, sign in (("e", "", ""), ("E", "", "+"),
+                                             ("e", " ", "-"), ("E", "\t", ""),
+                                             ("\uff45", " ", "")):
+                amount = "42" + separator + exponent + spacing + sign + spacing + "2025"
+                run, sources, loader = self.draft_run(case)
+                self.replace_fact(run, case["sources"][0]["quote"] + " Another amount was USD " + amount + ".")
+                with self.subTest(amount=ascii(amount)), self.assertRaisesRegex(AssertionError, "numeric"):
+                    check_run(case, run, sources, loader, workflow="research_draft")
+        for sentence in ("The amount was 42. 2025 was the reporting year.",
+                         "The amount was 42.\n2025 was the reporting year."):
+            run, sources, loader = self.draft_run(case)
+            self.replace_fact(run, case["sources"][0]["quote"] + " " + sentence)
+            with self.subTest(control=sentence):
+                check_run(case, run, sources, loader, workflow="research_draft")
+
+    def test_explicit_quantity_orders_and_currency_wrappers_keep_whole_units(self):
+        case = self.cases["historical_tail"]
+        orders = ("{code} 42 {scale}", "42 {code} {scale}", "42 {scale} {code}",
+                  "{code} {scale} 42", "{scale} {code} 42", "{scale} 42 {code}",
+                  "42 {scale} in {code}")
+        # These expected outcomes are independent of the candidate grammar:
+        # the only supported fixture tuple is (42, USD, million).
+        variants = (("USD", "million", True), ("uSd", "MillionS", True),
+                    ("EUR", "million", False), ("eur", "MillionS", False),
+                    ("GBP", "million", False), ("USD", "billion", False),
+                    ("USD", "BILLIONS", False), ("EUR", "trillion", False))
+        for code, scale, supported in variants:
+            for wrapper in ("{}", "({})", "( {} )", "(({}))", "( ( {} ) )"):
+                for order in orders:
+                    amount = order.format(code=wrapper.format(code), scale=scale)
+                    for appended in (False, True):
+                        prefix = case["sources"][0]["quote"] + " Another amount was " if appended else "Acme revenue for FY2025 was "
+                        run, sources, loader = self.draft_run(case)
+                        self.replace_fact(run, prefix + amount + ".")
+                        with self.subTest(amount=amount, appended=appended, supported=supported):
+                            if supported:
+                                check_run(case, run, sources, loader, workflow="research_draft")
+                            else:
+                                with self.assertRaisesRegex(AssertionError, "quantity|currency|scale"):
+                                    check_run(case, run, sources, loader, workflow="research_draft")
+
+    def test_wrapped_unscaled_currency_pairs_are_checked_before_row_fallback(self):
+        case = self.cases["historical_tail"]
+        for code, supported in (("USD", True), ("usd", True), ("EUR", False),
+                                ("eUr", False), ("GBP", False)):
+            for wrapper in ("({})", "( {} )", "(({}))"):
+                for order in ("{code} 42", "42 {code}", "42 in {code}"):
+                    amount = order.format(code=wrapper.format(code))
+                    run, sources, loader = self.draft_run(case)
+                    self.replace_fact(run, case["sources"][0]["quote"] + " Another amount was " + amount + ".")
+                    with self.subTest(amount=amount, supported=supported):
+                        if supported:
+                            check_run(case, run, sources, loader, workflow="research_draft")
+                        else:
+                            with self.assertRaisesRegex(AssertionError, "currency"):
+                                check_run(case, run, sources, loader, workflow="research_draft")
+
+    def test_currency_wrapper_matrix_refuses_malformed_or_unsupported_wrappers(self):
+        case = self.cases["historical_tail"]
+        wrappers = (("{}", True), ("({})", True), ("( {} )", True), ("(({}))", True),
+                    ("({}", False), ("{})", False), ("(({})", False), ("({}))", False),
+                    ("[{}]", False), ("{{{}}}", False))
+        for code in ("USD", "EUR"):
+            for wrapper, valid in wrappers:
+                amount = "42 million " + wrapper.format(code)
+                run, sources, loader = self.draft_run(case)
+                self.replace_fact(run, "Acme revenue for FY2025 was " + amount + ".")
+                with self.subTest(amount=amount, valid=valid):
+                    if valid and code == "USD":
+                        check_run(case, run, sources, loader, workflow="research_draft")
+                    else:
+                        with self.assertRaisesRegex(AssertionError, "currency|quantity"):
+                            check_run(case, run, sources, loader, workflow="research_draft")
+
+    def test_all_quantity_orders_keep_accounting_amount_parentheses_unsupported(self):
+        case = self.cases["historical_tail"]
+        orders = ("{code} 42 {scale}", "42 {code} {scale}", "42 {scale} {code}",
+                  "{code} {scale} 42", "{scale} {code} 42", "{scale} 42 {code}",
+                  "42 {scale} in {code}")
+        for code in ("USD", "(USD)", "((USD))"):
+            for scale in ("million", "MILLIONS"):
+                for order in orders:
+                    amount = order.format(code=code, scale=scale)
+                    for wrapper in ("({})", "( {} )", "(({}))"):
+                        run, sources, loader = self.draft_run(case)
+                        self.replace_fact(run, case["sources"][0]["quote"] + " Another amount was " + wrapper.format(amount) + ".")
+                        with self.subTest(amount=wrapper.format(amount)), self.assertRaisesRegex(AssertionError, "numeric"):
+                            check_run(case, run, sources, loader, workflow="research_draft")
+
     def test_grouped_and_spaced_exponent_candidates_cannot_borrow_supported_digits(self):
         case = self.cases["historical_tail"]
         amounts = ["42" + separator + "2025" for separator in

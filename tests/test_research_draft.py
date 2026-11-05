@@ -354,6 +354,82 @@ class ResearchDraftTests(unittest.TestCase):
             saved = validate_response(raw, assessment, review)
             self.assertEqual(saved["items"][0]["calculation"]["result"], "-2.00")
 
+    def test_trailing_mantissa_separators_keep_complete_exponents_in_one_rejected_candidate(self):
+        # These unsupported spellings must not yield either a mantissa or an
+        # exponent operand. Expectations come from the plain-literal contract,
+        # independently of the production candidate grammar.
+        mantissas = (("42.", "42"), ("42 .", "42"), ("42..", "42"),
+                     ("42. .", "42"), ("42.,", "42"), ("0.42.", "0.42"))
+        spacing = (("", "", ""), (" ", " ", ""), ("\t", "\n", "\t"))
+        for mantissa, value in mantissas:
+            for marker in ("e", "E"):
+                for sign in ("", "+", "-"):
+                    for before_marker, before_sign, after_sign in spacing:
+                        amount = mantissa + before_marker + marker + before_sign + sign + after_sign + "3"
+                        exponent = sign + "3" if not after_sign else "3"
+                        for fragment in (value, exponent):
+                            for crop in ("whole", "writer", "review"):
+                                with self.subTest(amount=ascii(amount), fragment=fragment, crop=crop):
+                                    assessment, review, raw = self.formatted_calculation(amount, fragment, crop)
+                                    with self.assertRaisesRegex(ValueError, "research draft"):
+                                        validate_response(raw, assessment, review)
+
+    def test_trailing_point_exponents_keep_control_and_compatibility_context(self):
+        cases = (("42.\x01e +3", "42"), ("42.\x01e +3", "+3"),
+                 ("42.\u200bE -3", "42"), ("42.\u200bE -3", "-3"),
+                 ("42\uff0e\uff45 +3", "42"), ("42\uff0e\uff45 +3", "+3"),
+                 ("42\u2024 E \u22123", "42"), ("42\u2024 E \u22123", "3"),
+                 ("42.\u0301 e +3", "42"), ("42.\u066c e +3", "+3"))
+        for amount, value in cases:
+            for crop in ("whole", "writer", "review"):
+                with self.subTest(amount=ascii(amount), value=value, crop=crop):
+                    assessment, review, raw = self.formatted_calculation(amount, value, crop)
+                    with self.assertRaisesRegex(ValueError, "research draft"):
+                        validate_response(raw, assessment, review)
+        # Even NUL may exist in the archived packet outside the clean accepted
+        # quote. It must not detach a signed exponent suffix from its mantissa.
+        for control in ("\x00", "\x01", "\x1b", "\x7f", "\x9f", "\u200b"):
+            for crop in ("review", "writer"):
+                with self.subTest(control=ascii(control), crop=crop):
+                    assessment, review, raw = self.control_calculation("42." + control + "e -3", "-3", crop=crop)
+                    with self.assertRaisesRegex(ValueError, "research draft"):
+                        validate_response(raw, assessment, review)
+
+    def test_saved_draft_cannot_replay_a_trailing_point_exponent_fragment(self):
+        for amount, value in (("42.e3", "42"), ("42.E+3", "42"),
+                              ("42. e -3", "-3"), ("42.,e +3", "+3")):
+            with self.subTest(amount=amount, value=value):
+                assessment, review, raw = self.formatted_calculation(amount, value, "writer")
+                raw["items"]["i0"]["calculation"]["precision"] = 2
+                # Construct an otherwise canonical saved artifact from a fact
+                # so this regression does not need the invalid calculation to
+                # pass initial validation before checking saved revalidation.
+                fact = deepcopy(raw)
+                fact["items"]["i0"].update(kind="fact", calculation=None)
+                saved = validate_response(fact, assessment, review)
+                saved["items"][0].update(kind="calculation", calculation={
+                    **deepcopy(raw["items"]["i0"]["calculation"]),
+                    "result": {"42": "42.00", "-3": "-3.00", "+3": "3.00"}[value],
+                    "rounding": "ROUND_HALF_EVEN",
+                })
+                with self.assertRaisesRegex(ValueError, "research draft"):
+                    validate_saved_draft(saved, assessment, review)
+
+    def test_exponent_candidate_refusal_preserves_plain_values_and_sentence_periods(self):
+        cases = (("42.", "42", "42.00"), ("42.5.", "42.5", "42.50"),
+                 ("0.42. Examples follow.", "0.42", "0.42"),
+                 ("-42. Earnings recorded.", "-42", "-42.00"),
+                 ("+42. e.g. reported revenue.", "+42", "42.00"),
+                 ("42. End of sentence.", "42", "42.00"))
+        for amount, value, expected in cases:
+            for crop in ("whole", "writer", "review"):
+                with self.subTest(amount=amount, value=value, crop=crop):
+                    assessment, review, raw = self.formatted_calculation(amount, value, crop)
+                    raw["items"]["i0"]["calculation"]["precision"] = 2
+                    saved = validate_response(raw, assessment, review)
+                    self.assertEqual(saved["items"][0]["calculation"]["result"], expected)
+                    self.assertEqual(validate_saved_draft(saved, assessment, review), saved)
+
     def test_even_accepted_coverage_crops_cannot_remove_packet_numeric_context(self):
         assessment, review = scope(("covered",), quotes=["Amount -42 and 0. FY2025 USD."])
         packet = {key: review[key] for key in ("version", "offset_unit", "lookup", "selection", "sources", "passages")}

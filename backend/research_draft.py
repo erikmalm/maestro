@@ -43,11 +43,14 @@ _SIGNS = "+-\u2212\u00b1\u2213"
 # punctuation, consume such whitespace only when an explicit sign precedes it.
 # Keep whitespace around an exponent marker/sign in the same rejected run;
 # neither its mantissa nor a grouped exponent suffix is an independent operand.
+# A trailing decimal point or ambiguous separator cluster also belongs to an
+# exponent when the complete exponent follows. Consume it only in that branch,
+# so an ordinary sentence period still leaves a plain literal unchanged.
 _NUMBER_RUN = re.compile(
     r"(?:(?:[+\-\u2212\u00b1\u2213]\s*)?(?:\d+|[.,]\d+|[\u066b\u066c]\s*\d+)"
     r"|[+\-\u2212\u00b1\u2213]\s*[.,]\s+\d+)"
     r"(?:[\s.,'_\u0300\u066b\u066c/\-]+\d+)*"
-    r"(?:\s*[eE]\s*[+\-\u2212\u00b1\u2213]?\s*\d+"
+    r"(?:[\s.,'_\u0300\u066b\u066c/\-]*[eE]\s*[+\-\u2212\u00b1\u2213]?\s*\d+"
     r"(?:[\s.,'_\u0300\u066b\u066c/\-]+\d+)*)?")
 # A sign may sit outside a currency symbol/short label rather than directly
 # beside the digits. This structural rejection grammar recognizes short opaque

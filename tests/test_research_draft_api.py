@@ -286,6 +286,13 @@ class ResearchDraftApiTests(unittest.TestCase):
                                             ("42 e-3", "-3"), ("42 E +3", "+3"),
                                             ("42 e3 7", "7"), ("42 e-3 8", "8")))
 
+    def test_trailing_point_exponent_fragments_fail_without_losing_evidence_usage_or_persistence(self):
+        cases = (("42.e3", "42"), ("42.E+3", "42"), ("42. e -3", "42"),
+                 ("42 .e3", "42"), ("42..e +3", "+3"), ("42., E -3", "-3"),
+                 ("42.\te\t+\t3", "3"), ("42.\u200be +3", "+3"),
+                 ("42\uff0e\uff25 +3", "42"))
+        self.assert_rejected_numeric_cases(cases)
+
     def test_archived_nonwhitespace_controls_cannot_hide_signs_from_cropped_quotes(self):
         controls = ("\x00", "\x01", "\x08", "\x1b", "\x7f", "\x9f")
         quotes = [f"42 and 0. FY2025 USD. Case {index} End." for index in range(len(controls))]

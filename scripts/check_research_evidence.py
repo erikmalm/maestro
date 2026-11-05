@@ -73,7 +73,7 @@ def plain_numbers(text):
             projected = "_"
         elif any(part in unicodedata.name(character, "") for part in ("SLASH", "SOLIDUS", "DIVISION")):
             projected = "/"
-        elif len(projected) != 1 or projected not in ".,/'_":
+        elif len(projected) != 1 or projected not in ".,/'_eE":
             projected = character
         numeric_boundaries.append(projected)
         require(category != "Cc" or character.isspace(), unsupported)
@@ -106,14 +106,23 @@ def plain_numbers(text):
         # sentence boundary. A detached, repeated or Unicode dot does not.
         sentence = original == match[1] and original.startswith(".") and original[1:].isspace()
         require(decimal or sentence, unsupported)
-    require(re.search(r"[0-9]\s*[eE]\s*[+-]?\s*[0-9]", text) is None,
-            unsupported)
+    # Include a trailing-point mantissa and separator clusters before the
+    # exponent. Otherwise its two fragments can borrow an amount and year
+    # that happen to be supported independently. Compatibility punctuation
+    # and exponent letters are projected only in this rejection view.
+    require(re.search(r"[0-9][\s.,/'_\u2019\u066b\u066c]*[eE]\s*[+-]?\s*[0-9]",
+                      "".join(numeric_boundaries)) is None, unsupported)
     require(re.search(r"[+-]\s+(?=[.,\u066b\u066c]?[0-9])", text) is None, unsupported)
     # With an explicit sign, an ASCII separator and following whitespace are
     # ambiguous numeric notation rather than ordinary sentence punctuation.
     require(re.search(r"[+-]\s*[.,]\s+[0-9]", text) is None, unsupported)
     currency_label = r"[^\W\d_]{1,8}"
-    accounting = r"\(\s*(?:[A-Z]{3}\s*)?" + PLAIN_NUMBER + r"(?:\s*(?:" + "|".join(SCALES) + r")s?)?(?:\s*[A-Z]{3})?\s*\)"
+    accounting_code = r"(?:\(\s*)*[A-Z]{3}(?:\s*\))*"
+    accounting_label = r"(?:(?:in\s+)?" + accounting_code + r"|(?:" + "|".join(SCALES) + r")s?)"
+    # Reject an amount inside accounting parentheses in every token order,
+    # including code-only wrappers inside the amount's outer parentheses.
+    accounting = (r"\(\s*(?:" + accounting_label + r"\s*){0,2}" + PLAIN_NUMBER
+                  + r"(?:\s*" + accounting_label + r"){0,2}\s*\)")
     require(re.search(accounting, text, re.IGNORECASE) is None
             and re.search(r"[+-]\s*" + currency_label + r"\s*[0-9]", text) is None, unsupported)
     # Both a scale and currency label can intervene before a postfix sign.
@@ -145,14 +154,45 @@ def currency_pattern(currency_codes):
     return r"(?:[A-Z]{3}|" + declared + ")"
 
 
-def quantities(text, currency_codes):
-    """Recognize explicit scaled amounts, including a trailing 'in CODE'."""
+def currency_text(text, currency_codes):
+    """Recognize balanced wrappers around a code, never around an amount."""
+    wrapped = r"\(\s*(" + currency_pattern(currency_codes) + r")\s*\)"
+    # Each pass removes one pair of parentheses, including nested code-only
+    # wrappers. Digits and their spelling are never changed. Accounting
+    # parentheses around a value remain unsupported by plain_numbers.
+    while True:
+        unwrapped = re.sub(wrapped, r" \1 ", text)
+        if unwrapped == text:
+            break
+        text = unwrapped
+    # A recognized explicit code must not disappear into copied qualifiers
+    # because a code-only wrapper is malformed or unsupported. Only balanced
+    # parentheses are accepted; residual bracket adjacency is refused.
     currency = currency_pattern(currency_codes)
-    forward = r"(?<!\w)(" + currency + r")\s*(" + PLAIN_NUMBER + r")\s*" + SCALE_CAPTURE + r"\b"
-    reverse = (r"(?<![\w.+-])(" + PLAIN_NUMBER + r")\s*" + SCALE_CAPTURE
-               + r"(?:\s+(?i:in)\s+|\s*)(" + currency + r")(?!\w)")
-    found = {(value, code.upper(), scale.lower()) for code, value, scale in re.findall(forward, text)}
-    found.update((value, code.upper(), scale.lower()) for value, scale, code in re.findall(reverse, text))
+    malformed = r"[\(\[\{]\s*" + currency + r"(?!\w)|(?<!\w)" + currency + r"\s*[\)\]\}]"
+    require(re.search(malformed, text) is None, "Unsupported currency wrapper in fixture evaluation")
+    return text
+
+
+def quantities(text, currency_codes):
+    """Recognize all six finite currency/value/scale token orders."""
+    currency = r"(?P<currency>" + currency_pattern(currency_codes) + ")"
+    value = r"(?P<value>" + PLAIN_NUMBER + ")"
+    scale = r"(?i:(?P<scale>" + "|".join(SCALES) + r")s?)"
+    code_join = r"(?:\s+(?i:in)\s+|\s*)"
+    patterns = (
+        r"(?<!\w)" + currency + r"\s*" + value + r"\s*" + scale + r"\b",
+        r"(?<![\w.+-])" + value + code_join + currency + r"\s*" + scale + r"\b",
+        r"(?<![\w.+-])" + value + r"\s*" + scale + code_join + currency + r"(?!\w)",
+        r"(?<!\w)" + currency + r"\s*" + scale + r"\s*" + value + r"(?!\w|\.[0-9])",
+        r"(?<!\w)" + scale + code_join + currency + r"\s*" + value + r"(?!\w|\.[0-9])",
+        r"(?<!\w)" + scale + r"\s*" + value + code_join + currency + r"(?!\w)",
+    )
+    text = currency_text(text, currency_codes)
+    found = set()
+    for pattern in patterns:
+        found.update((match["value"], match["currency"].upper(), match["scale"].lower())
+                     for match in re.finditer(pattern, text))
     return found
 
 
@@ -160,6 +200,7 @@ def currency_values(text, currency_codes):
     """Do not let unscaled explicit currencies inherit a copied row currency."""
     currency = currency_pattern(currency_codes)
     found = {(value, code) for value, code, _ in quantities(text, currency_codes)}
+    text = currency_text(text, currency_codes)
     forward = r"(?<!\w)(" + currency + r")\s*(" + PLAIN_NUMBER + r")(?!\w|\.[0-9])"
     reverse = (r"(?<![\w.+-])(" + PLAIN_NUMBER + r")(?:\s+(?i:in)\s+|\s*)("
                + currency + r")(?!\w)")
@@ -175,8 +216,11 @@ def check_draft_quantities(expected, row):
     wanted = {(item["value"], item["currency"], item["scale"]) for item in annotations}
     codes = draft_currency_codes(expected)
     observed = quantities(row["text"], codes)
-    amounts = {(value, scale.lower()) for value, scale in re.findall(
-        r"(?<![\w.+-])(" + PLAIN_NUMBER + r")\s*" + SCALE_CAPTURE + r"\b", row["text"])}
+    # Derive units from the same complete tuples for every explicit ordering;
+    # a currency between the value and scale cannot hide a scale change.
+    amounts = {(value, scale) for value, _, scale in observed}
+    amounts.update((value, scale.lower()) for value, scale in re.findall(
+        r"(?<![\w.+-])(" + PLAIN_NUMBER + r")\s*" + SCALE_CAPTURE + r"\b", row["text"]))
     # The canonical row also displays copied request qualifiers. An omitted
     # currency in prose can use that row's explicit currency; an explicit
     # conflicting currency in prose still fails below.
