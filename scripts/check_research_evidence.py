@@ -54,7 +54,17 @@ def require(condition, message):
         raise AssertionError(message)
 
 
-def plain_numbers(text):
+def unwrap_code_parentheses(text, currency):
+    """Remove only balanced ASCII parentheses containing one code."""
+    wrapped = r"\(\s*(" + currency + r")\s*\)"
+    while True:
+        unwrapped = re.sub(wrapped, r" \1 ", text)
+        if unwrapped == text:
+            return text
+        text = unwrapped
+
+
+def plain_numbers(text, currency_codes=()):
     """Conservative lexical checks for this ASCII-number fixture evaluation.
 
     Do not normalize typography into accepted evidence or discard signs/digits.
@@ -66,11 +76,15 @@ def plain_numbers(text):
     numeric_boundaries = []
     for index, character in enumerate(text):
         category = unicodedata.category(character)
-        # This view is used only to reject joined numeric fragments. Original
-        # spelling remains authoritative for every accepted number below.
+        # This view is used only to reject ambiguous numeric envelopes.
+        # Original spelling remains authoritative for accepted numbers below.
         projected = unicodedata.normalize("NFKC", character)
         if category.startswith("M"):
             projected = "_"
+        elif category == "Ps":
+            projected = "("
+        elif category == "Pe":
+            projected = ")"
         elif any(part in unicodedata.name(character, "") for part in ("SLASH", "SOLIDUS", "DIVISION")):
             projected = "/"
         elif len(projected) != 1 or projected not in ".,/'_eE":
@@ -116,6 +130,10 @@ def plain_numbers(text):
     # With an explicit sign, an ASCII separator and following whitespace are
     # ambiguous numeric notation rather than ordinary sentence punctuation.
     require(re.search(r"[+-]\s*[.,]\s+[0-9]", text) is None, unsupported)
+    # A permitted code-only wrapper does not separate a sign from its amount.
+    # Use this rejection-only view for all sign/accounting checks together;
+    # Unicode amount brackets must not turn a negative into a positive either.
+    envelope = unwrap_code_parentheses("".join(numeric_boundaries), r"(?ai:[A-Z]{3})")
     currency_label = r"[^\W\d_]{1,8}"
     accounting_code = r"(?:\(\s*)*[A-Z]{3}(?:\s*\))*"
     accounting_label = r"(?:(?:in\s+)?" + accounting_code + r"|(?:" + "|".join(SCALES) + r")s?)"
@@ -123,12 +141,24 @@ def plain_numbers(text):
     # including code-only wrappers inside the amount's outer parentheses.
     accounting = (r"\(\s*(?:" + accounting_label + r"\s*){0,2}" + PLAIN_NUMBER
                   + r"(?:\s*" + accounting_label + r"){0,2}\s*\)")
-    require(re.search(accounting, text, re.IGNORECASE) is None
-            and re.search(r"[+-]\s*" + currency_label + r"\s*[0-9]", text) is None, unsupported)
+    require(re.search(accounting, envelope, re.IGNORECASE) is None
+            and re.search(r"[+-]\s*" + currency_label + r"\s*[0-9]", envelope) is None, unsupported)
+    # The same finite units can appear before the number in any token order.
+    # Use declared code variants here so ordinary prose such as "- was USD"
+    # is not mistaken for two monetary labels preceding a value.
+    currency = currency_pattern(currency_codes) if currency_codes else r"[A-Z]{3}"
+    prefix_label = r"(?:" + SCALE_CAPTURE + r"|(?:(?i:in)\s+)?" + currency + r")"
+    prefix = r"[+-]\s*(?:" + prefix_label + r"\s*){1,2}[0-9]"
+    require(re.search(prefix, envelope) is None, unsupported)
     # Both a scale and currency label can intervene before a postfix sign.
-    postfix_label = r"(?:" + SCALE_CAPTURE + r"|" + currency_label + r")"
+    postfix_label = r"(?:" + SCALE_CAPTURE + r"|(?:(?i:in)\s+)?" + currency_label + r")"
     postfix = r"[0-9](?:\s*" + postfix_label + r"\s*){0,2}[+-](?![0-9])"
-    require(re.search(postfix, text) is None, unsupported)
+    # If the units precede the value, no intervening label absorbs whitespace
+    # before a trailing sign. Bind the whole numeric token (and finite unit
+    # prefixes) so prose dashes after an embedded FY2025 qualifier stay valid.
+    bare_postfix = (r"(?<!\w)(?:" + prefix_label + r"\s*){0,2}" + PLAIN_NUMBER
+                    + r"\s+[+-](?![0-9])")
+    require(re.search(postfix, envelope) is None and re.search(bare_postfix, envelope) is None, unsupported)
     candidates = re.findall(NUMBER_CANDIDATE, text)
     require(all(re.fullmatch(PLAIN_NUMBER, value) is not None for value in candidates), unsupported)
     return set(candidates)
@@ -156,21 +186,25 @@ def currency_pattern(currency_codes):
 
 def currency_text(text, currency_codes):
     """Recognize balanced wrappers around a code, never around an amount."""
-    wrapped = r"\(\s*(" + currency_pattern(currency_codes) + r")\s*\)"
     # Each pass removes one pair of parentheses, including nested code-only
     # wrappers. Digits and their spelling are never changed. Accounting
     # parentheses around a value remain unsupported by plain_numbers.
-    while True:
-        unwrapped = re.sub(wrapped, r" \1 ", text)
-        if unwrapped == text:
-            break
-        text = unwrapped
-    # A recognized explicit code must not disappear into copied qualifiers
-    # because a code-only wrapper is malformed or unsupported. Only balanced
-    # parentheses are accepted; residual bracket adjacency is refused.
+    text = unwrap_code_parentheses(text, currency_pattern(currency_codes))
+    # A known code or scale must not disappear from tuple extraction because
+    # an unsupported wrapper separates it from its amount. Only balanced
+    # ASCII code-only parentheses were accepted above. Refuse other brackets,
+    # including Unicode or mixed wrappers, without accepting normalized units.
     currency = currency_pattern(currency_codes)
-    malformed = r"[\(\[\{]\s*" + currency + r"(?!\w)|(?<!\w)" + currency + r"\s*[\)\]\}]"
-    require(re.search(malformed, text) is None, "Unsupported currency wrapper in fixture evaluation")
+    unit = r"(?:" + currency + r"|(?i:(?:" + "|".join(SCALES) + r")s?))"
+    opening = "".join(sorted({character for character in text if unicodedata.category(character) == "Ps"}))
+    closing = "".join(sorted({character for character in text if unicodedata.category(character) == "Pe"}))
+    malformed = []
+    if opening:
+        malformed.append("[" + re.escape(opening) + r"]\s*" + unit + r"(?!\w)")
+    if closing:
+        malformed.append(r"(?<!\w)" + unit + r"\s*[" + re.escape(closing) + "]")
+    require(not malformed or re.search("|".join(malformed), text) is None,
+            "Unsupported currency or scale wrapper in fixture evaluation")
     return text
 
 
@@ -390,14 +424,15 @@ def check_run(case, run, captured, loader, *, workflow="evidence_review"):
             for fragments in expected["support_fragments"]:
                 require(all(fragment.casefold() in visible.casefold() for fragment in fragments),
                         "Draft omitted an expected fixture value or qualifier")
-            numbers = plain_numbers(row["text"])
+            codes = draft_currency_codes(expected) if expected.get("draft_quantities") or "draft_currency_codes" in expected else ()
+            numbers = plain_numbers(row["text"], codes)
             # This is finite numeric provenance, not proof of prose truth.
             # Other packet rows or unrelated request text cannot authorize a
             # figure in this row. Canonical validation already pins citations
             # and copies this requirement's qualifiers from its assessment.
             provenance = " ".join([support["quote"] for support in row["supports"]] +
                                   [row[field] for field in ("period", "unit", "currency", "freshness") if row[field]])
-            allowed = plain_numbers(provenance)
+            allowed = plain_numbers(provenance, codes)
             if row["calculation"]:
                 allowed.add(row["calculation"]["result"])
             require(numbers <= allowed, "Draft introduced an unsupported numeric literal")

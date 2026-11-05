@@ -62,18 +62,19 @@ _CURRENCY_LABEL = (r"(?:[A-Z][A-Z0-9_]*(?:\.[A-Z0-9_]+)*\.?|(?:" + _SHORT_LABEL
 _SYMBOL_LABEL = r"(?:[^\W\d_]|\.)+"
 _CURRENCY_ENVELOPE = (r"(?:(?:" + _SYMBOL_LABEL + r"\s*)?\u00a4+(?:\s*" + _SYMBOL_LABEL
                       + r")?|" + _CURRENCY_LABEL + r")")
-# A postfix sign still belongs to a scaled amount. Recognize only these
+# An outer sign still belongs to a scaled amount. Recognize only these
 # explicit scale words with the existing opaque currency labels/symbols;
 # this neither converts the scale nor interprets arbitrary surrounding prose.
 _SCALE_LABEL = r"(?i:thousands?|millions?|billions?|trillions?)"
-_AMOUNT_SUFFIX = (r"(?:" + _SCALE_LABEL + r"(?:\s*" + _CURRENCY_ENVELOPE + r")?|"
-                  + _CURRENCY_ENVELOPE + r"(?:\s*" + _SCALE_LABEL + r")?)")
-_SIGNED_CURRENCY_BEFORE = re.compile(r"[" + re.escape(_SIGNS) + r"]\s*" + _CURRENCY_ENVELOPE + r"\s*\Z")
+_CURRENCY_JOIN = r"(?:(?i:in)\s+)?" + _CURRENCY_ENVELOPE
+_AMOUNT_LABEL = (r"(?:" + _SCALE_LABEL + r"(?:\s*" + _CURRENCY_JOIN + r")?|"
+                 + _CURRENCY_JOIN + r"(?:\s*" + _SCALE_LABEL + r")?)")
+_SIGNED_AMOUNT_BEFORE = re.compile(r"[" + re.escape(_SIGNS) + r"]\s*" + _AMOUNT_LABEL + r"\s*\Z")
 # A sign starting another digit run belongs to that run rather than being a
 # postfix sign of the earlier amount (for example, "10 and -12").
-_SIGNED_AMOUNT_AFTER = re.compile(r"\A\s*" + _AMOUNT_SUFFIX + r"\s*[" + re.escape(_SIGNS) + r"](?!\s*\d)")
-_CURRENCY_BEFORE = re.compile(r"(?<!\w)" + _CURRENCY_ENVELOPE + r"\s*\Z")
-_AMOUNT_AFTER = re.compile(r"\A\s*" + _AMOUNT_SUFFIX + r"(?!\w)")
+_SIGNED_AMOUNT_AFTER = re.compile(r"\A\s*" + _AMOUNT_LABEL + r"\s*[" + re.escape(_SIGNS) + r"](?!\s*\d)")
+_AMOUNT_BEFORE = re.compile(r"(?<!\w)" + _AMOUNT_LABEL + r"\s*\Z")
+_AMOUNT_AFTER = re.compile(r"\A\s*" + _AMOUNT_LABEL + r"(?!\w)")
 _GAPS = {
     "missing": "No supported fact was recorded for this requirement in the inspected evidence.",
     "stale": "Saved evidence needs checking before this requirement can be drafted as a supported fact.",
@@ -293,6 +294,10 @@ def _numeric_view(text):
                 projected = "\u00a4"
             elif category == "Pd":
                 projected = "-"
+            elif category in ("Ps", "Pe"):
+                # Treat every bracket style conservatively as parentheses in
+                # this rejection view, including styles NFKC leaves unchanged.
+                projected = "(" if category == "Ps" else ")"
             elif projected not in "+-" and any(part in name for part in ("PLUS", "MINUS", "DASH")):
                 projected = "+" if "PLUS" in name and "MINUS" not in name else "-"
             elif any(part in name for part in ("SLASH", "SOLIDUS", "DIVISION")):
@@ -316,6 +321,19 @@ def _numeric_literal(value, support, passage):
     # cropped quote. Neither a subquote nor an accepted-review crop can remove
     # an original minus, grouping separator, exponent, decimal or word prefix.
     text, offsets = _numeric_view(passage["text"])
+    # Brackets around finite currency/scale labels do not break a signed
+    # amount. Keep positions unchanged while matching those envelopes, and
+    # retain the brackets in text for accounting and incomplete-edge checks.
+    context = text.translate(str.maketrans("()", "  "))
+    openings, unmatched_closings = [], []
+    for index, character in enumerate(text):
+        if character == "(":
+            openings.append(index)
+        elif character == ")":
+            if openings:
+                openings.pop()
+            else:
+                unmatched_closings.append(index)
     left = support["start"] - passage["start"]
     right = support["end"] - passage["start"]
     for match in _NUMBER_RUN.finditer(text):
@@ -334,14 +352,14 @@ def _numeric_literal(value, support, passage):
                 depth = max(0, depth - 1)
         accounting = depth > 0
         trailing_sign = after < len(text) and text[after] in _SIGNS
-        currency_sign = (_SIGNED_CURRENCY_BEFORE.search(text[:match.start()]) is not None
-                         or _SIGNED_AMOUNT_AFTER.match(text[match.end():]) is not None)
-        # Include the complete recognized currency/scale suffix in boundary
+        currency_sign = (_SIGNED_AMOUNT_BEFORE.search(context[:match.start()]) is not None
+                         or _SIGNED_AMOUNT_AFTER.match(context[match.end():]) is not None)
+        # Include complete recognized currency/scale labels in both boundary
         # checks. A packet starting USD 42 or ending 42 million USD cannot show
         # whether an adjacent unseen sign belongs to that amount. Other long
         # lowercase unit words remain lexical stoppers, not currency codes.
-        prefix = _CURRENCY_BEFORE.search(text[:match.start()])
-        suffix = _AMOUNT_AFTER.match(text[match.end():])
+        prefix = _AMOUNT_BEFORE.search(context[:match.start()])
+        suffix = _AMOUNT_AFTER.match(context[match.end():])
         boundary_left = prefix.start() if prefix else match.start()
         boundary_right = match.end() + suffix.end() if suffix else match.end()
         if prefix:
@@ -353,11 +371,13 @@ def _numeric_literal(value, support, passage):
         # A dot or whitespace at an unknown packet edge may continue a decimal,
         # grouping separator or signed monetary envelope.
         def connector(character):
-            return character.isspace() or character in _SIGNS + ".,'_/\u0300\u066b\u066c"
+            return character.isspace() or character in _SIGNS + "().,'_/\u0300\u066b\u066c"
         while boundary_left > 0 and connector(text[boundary_left - 1]):
             boundary_left -= 1
         while boundary_right < len(text) and connector(text[boundary_right]):
             boundary_right += 1
+        incomplete_wrapper = (any(boundary_left <= index < match.start() for index in unmatched_closings)
+                              or any(match.end() <= index < boundary_right for index in openings))
         visible_boundaries = (boundary_left > 0 or passage["start"] == 0) and boundary_right < len(text)
         if (match.group() == value
                 and passage["text"][start:end] == value
@@ -366,7 +386,7 @@ def _numeric_literal(value, support, passage):
                 and (match.start() == 0 or not word(text[match.start() - 1])
                      and text[match.start() - 1] not in _SIGNS)
                 and not word(text[match.end()]) and not accounting and not trailing_sign
-                and not currency_sign and visible_boundaries):
+                and not currency_sign and not incomplete_wrapper and visible_boundaries):
             return Decimal(value)
     _invalid()
 

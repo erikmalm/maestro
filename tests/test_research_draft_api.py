@@ -239,6 +239,19 @@ class ResearchDraftApiTests(unittest.TestCase):
 
         self.writer_builder = calculated
 
+    def assert_rejected_writer(self, run):
+        self.assertEqual(run["state"], "failed")
+        self.assertIsNone(run["draft"])
+        rows = self.writer_rows(run["id"])
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0][:2], ("failed", None))
+        reloaded = self.fixture.fixture.get(run["id"])
+        self.assertEqual(reloaded["state"], "failed")
+        self.assertIsNone(reloaded["draft"])
+        for field in ("state", "draft", "assessment", "evidence_review", "budget"):
+            self.assertEqual(reloaded[field], run[field])
+        self.assert_usage(reloaded)
+
     def assert_rejected_numeric_cases(self, cases, *, zero_quote="and 0."):
         quotes = [f"Case {index}: Acme FY2025 revenue in USD was {amount} {zero_quote} Amounts recorded."
                   for index, (amount, _) in enumerate(cases)]
@@ -248,26 +261,23 @@ class ResearchDraftApiTests(unittest.TestCase):
             with self.subTest(amount=amount):
                 self.calculation_from_quote(quote, operand, zero_quote=zero_quote)
                 run = self.run_now()
-                self.assertEqual(run["state"], "failed")
-                self.assertIsNone(run["draft"])
                 self.assertEqual(run["assessment"]["completion_criterion"], requirements.REQUEST)
                 self.assertEqual(run["evidence_review"]["items"][0]["state"], "covered")
                 self.assertEqual(run["evidence_review"]["items"][0]["supports"][0]["quote"], quote)
-                rows = self.writer_rows(run["id"])
-                self.assertEqual(len(rows), 1)
-                self.assertEqual(rows[0][:2], ("failed", None))
-                reloaded = self.fixture.fixture.get(run["id"])
-                self.assertEqual(reloaded["state"], "failed")
-                self.assertIsNone(reloaded["draft"])
-                self.assertEqual(reloaded["assessment"], run["assessment"])
-                self.assertEqual(reloaded["evidence_review"], run["evidence_review"])
-                self.assertEqual(reloaded["budget"], run["budget"])
-                self.assert_usage(reloaded)
+                self.assert_rejected_writer(run)
         self.assertEqual(self.fixture.archive_fixture.source_snapshot(), snapshot)
 
     def test_currency_envelope_cannot_remove_negative_sign_from_calculation_operand(self):
         self.assert_rejected_numeric_cases((("-$42", "42"), ("-USD42", "42"), ("-USD 42", "42"),
                                             ("-usd 42", "42"), ("42 usd-", "42")))
+
+    def test_wrapped_currency_cannot_hide_signs_from_calculation_or_saved_readback(self):
+        cases = (("-(USD)42", "42"), ("-((USD)) 42", "42"),
+                 ("42 million (USD)-.", "42"), ("42 (USD) million-.", "42"),
+                 ("-\uff08USD\uff0942", "42"), ("42 million \uff08USD\uff09-.", "42"),
+                 ("42 (million) USD-.", "42"), ("-(USD) (million) 42", "42"),
+                 ("-[USD]42", "42"), ("42 million\u27e6USD\u27e7-.", "42"))
+        self.assert_rejected_numeric_cases(cases, zero_quote="Separate operand 0.")
 
     def test_separated_grouping_cannot_supply_partial_calculation_operand(self):
         self.assert_rejected_numeric_cases((("1\t234", "234"), ("1  234", "234"), ("1, 234", "234"),
@@ -304,8 +314,6 @@ class ResearchDraftApiTests(unittest.TestCase):
             with self.subTest(control=ascii(control)):
                 self.calculation_from_quote(quote, "42")
                 run = self.run_now()
-                self.assertEqual(run["state"], "failed")
-                self.assertIsNone(run["draft"])
                 review = run["evidence_review"]
                 self.assertEqual(review["items"][0]["state"], "covered")
                 support = review["items"][0]["supports"][0]
@@ -313,11 +321,7 @@ class ResearchDraftApiTests(unittest.TestCase):
                 self.assertEqual(content[support["start"]:support["end"]], quote)
                 self.assertEqual(review["sources"][0]["capture_id"], source["capture_id"])
                 self.assertTrue(any(control in passage["text"] for passage in self.writer_inputs[-1]["packet"]["passages"]))
-                self.assertEqual(self.writer_rows(run["id"])[0][:2], ("failed", None))
-                reloaded = self.fixture.fixture.get(run["id"])
-                for field in ("state", "assessment", "evidence_review", "draft", "budget"):
-                    self.assertEqual(reloaded[field], run[field])
-                self.assert_usage(run)
+                self.assert_rejected_writer(run)
         self.assertEqual(self.fixture.archive_fixture.source_snapshot(), snapshot)
 
     def test_leading_separator_cannot_detach_sign_from_calculation_operand(self):
@@ -335,13 +339,7 @@ class ResearchDraftApiTests(unittest.TestCase):
                 support = run["evidence_review"]["items"][0]
                 self.assertEqual(support["state"], "covered")
                 self.assertEqual(support["supports"][0]["quote"], quote)
-                self.assert_usage(run)
-                self.assertEqual(run["state"], "failed")
-                self.assertIsNone(run["draft"])
-                self.assertEqual(self.writer_rows(run["id"])[0][:2], ("failed", None))
-                reloaded = self.fixture.fixture.get(run["id"])
-                for field in ("state", "draft", "assessment", "evidence_review", "budget"):
-                    self.assertEqual(reloaded[field], run[field])
+                self.assert_rejected_writer(run)
         self.assertEqual(self.fixture.archive_fixture.source_snapshot(), snapshot)
 
     def test_complete_ascii_decimal_keeps_its_value_and_saved_provenance(self):
@@ -365,7 +363,7 @@ class ResearchDraftApiTests(unittest.TestCase):
         # U+FDFC is a currency symbol whose NFKC spelling has four letters.
         self.assert_rejected_numeric_cases((("-\ufdfc 42", "42"),))
 
-    def assert_natural_currency_edge_rejected(self, content, side):
+    def assert_natural_currency_edge_rejected(self, content, side, *, edge_text=None, outside_character="-"):
         source = self.fixture.capture(content)
         snapshot = self.fixture.archive_fixture.source_snapshot()
 
@@ -400,21 +398,15 @@ class ResearchDraftApiTests(unittest.TestCase):
         self.assertEqual(packet["sources"][0]["capture_id"], source["capture_id"])
         self.assertEqual(packet["sources"][0]["content_hash"], hashlib.sha256(content.encode()).hexdigest())
         if side == "left":
-            self.assertEqual(content[599], "-")
-            self.assertTrue(passage["text"].startswith("USD 42 and 0."))
+            self.assertEqual(content[599], outside_character)
+            self.assertTrue(passage["text"].startswith(edge_text or "USD 42 and 0."))
         else:
-            self.assertEqual(content[1800], "-")
-            self.assertTrue(passage["text"].endswith("42 USD"))
+            self.assertEqual(content[1800], outside_character)
+            self.assertTrue(passage["text"].endswith(edge_text or "42 USD"))
         self.assertEqual(backend._review_packet(run["evidence_review"]), packet)
         self.assertEqual(run["evidence_review"]["items"][0]["state"], "covered")
         self.assertEqual(run["assessment"]["completion_criterion"], requirements.REQUEST)
-        self.assert_usage(run)
-        self.assertEqual(run["state"], "failed")
-        self.assertIsNone(run["draft"])
-        self.assertEqual(self.writer_rows(run["id"])[0][:2], ("failed", None))
-        reloaded = self.fixture.fixture.get(run["id"])
-        for field in ("state", "draft", "assessment", "evidence_review", "budget"):
-            self.assertEqual(reloaded[field], run[field])
+        self.assert_rejected_writer(run)
         self.assertEqual(self.fixture.archive_fixture.source_snapshot(), snapshot)
 
     def test_real_left_passage_crop_cannot_hide_sign_before_currency(self):
@@ -424,6 +416,51 @@ class ResearchDraftApiTests(unittest.TestCase):
     def test_real_right_passage_crop_cannot_hide_sign_after_currency(self):
         content = (" " * 700 + "Acme revenue FY2025. Amount 0 recorded. ").ljust(1794) + "42 USD-"
         self.assert_natural_currency_edge_rejected(content.ljust(2795) + " End.", "right")
+
+    def test_real_left_passage_crop_cannot_hide_sign_before_wrapped_currency(self):
+        content = ("x" * 599 + "-(USD)42 and 0. ").ljust(1500) + "Acme revenue FY2025."
+        self.assert_natural_currency_edge_rejected(
+            content.ljust(1795) + " End.", "left", edge_text="(USD)42 and 0.")
+
+    def test_real_right_passage_crop_cannot_hide_sign_after_wrapped_currency(self):
+        amount = "42 million (USD)"
+        content = (" " * 700 + "Acme revenue FY2025. Amount 0 recorded. ").ljust(1800 - len(amount)) + amount + "-"
+        self.assert_natural_currency_edge_rejected(
+            content.ljust(2795) + " End.", "right", edge_text=amount)
+
+    def test_real_left_passage_crop_inside_currency_wrapper_cannot_hide_sign(self):
+        # Keep this currency label outside the request's lookup terms, so the
+        # real selector cannot add another passage containing the hidden sign.
+        content = ("x" * 595 + "-(EUR)42 and 0. ").ljust(1500) + "Acme revenue FY2025."
+        self.assertEqual(content[595], "-")
+        self.assert_natural_currency_edge_rejected(
+            content.ljust(1795) + " End.", "left", edge_text=")42 and 0.", outside_character="R")
+
+    def test_real_right_passage_crop_inside_currency_wrapper_cannot_hide_sign(self):
+        amount = "42 (USD"
+        content = (" " * 700 + "Acme revenue FY2025. Amount 0 recorded. ").ljust(1800 - len(amount)) + amount + ")-"
+        self.assertEqual(content[1801], "-")
+        self.assert_natural_currency_edge_rejected(
+            content.ljust(2795) + " End.", "right", edge_text=amount, outside_character=")")
+
+    def test_balanced_currency_annotations_preserve_plain_and_signed_calculations(self):
+        cases = (("(USD) 42", "42", "42.00"), ("((USD)) 42", "42", "42.00"),
+                 ("(USD) -42", "-42", "-42.00"), ("42 million (USD)", "42", "42.00"))
+        quotes = [f"Case {index}: Acme FY2025 revenue was {amount}. Separate operand 0. Amounts recorded."
+                  for index, (amount, _, _) in enumerate(cases)]
+        self.fixture.capture(" ".join(quotes))
+        snapshot = self.fixture.archive_fixture.source_snapshot()
+        for (amount, operand, result), quote in zip(cases, quotes):
+            with self.subTest(amount=amount):
+                self.calculation_from_quote(quote, operand, zero_quote="Separate operand 0.")
+                run = self.run_now()
+                self.assertEqual(run["state"], "draft")
+                row = run["draft"]["items"][0]
+                self.assertEqual(row["calculation"]["result"], result)
+                self.assertEqual(row["supports"][0]["quote"], operand)
+                self.assertEqual(self.fixture.fixture.get(run["id"])["draft"], run["draft"])
+                self.assert_usage(run)
+        self.assertEqual(self.fixture.archive_fixture.source_snapshot(), snapshot)
 
     def test_visible_currency_at_source_start_keeps_complete_signed_operand(self):
         quote = "USD +42 and 0. Acme revenue FY2025. End."

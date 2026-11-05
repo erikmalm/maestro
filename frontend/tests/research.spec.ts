@@ -558,6 +558,13 @@ async function fixture(page: Page, runs: ResearchRun[] = []) {
 }
 const selected = (page: Page) =>
   page.getByRole("region", { name: "Selected research run" });
+const draftRegion = (page: Page) =>
+  selected(page).getByRole("region", { name: "Research draft", exact: true });
+const draftItem = (draft: ReturnType<typeof selected>, number: number) =>
+  draft.getByRole("region", {
+    name: `Draft for requested item ${number}`,
+    exact: true,
+  });
 async function open(page: Page, suffix = "") {
   await page.goto("/" + suffix);
   if (!suffix)
@@ -683,9 +690,7 @@ test("writer completion publishes a three-call unreviewed draft and unlocks the 
       exact: true,
     }),
   ).toBeVisible();
-  await expect(
-    selected(page).getByRole("region", { name: "Research draft", exact: true }),
-  ).toHaveCount(0);
+  await expect(draftRegion(page)).toHaveCount(0);
   await expect(input).toBeDisabled();
   await expect(submit).toBeDisabled();
   state.runs = [{ ...drafted(), ...state.posts[0] }];
@@ -693,10 +698,7 @@ test("writer completion publishes a three-call unreviewed draft and unlocks the 
   await expect(selected(page).getByRole("status")).toHaveText(
     "Draft — not finally reviewed",
   );
-  const draft = selected(page).getByRole("region", {
-    name: "Research draft",
-    exact: true,
-  });
+  const draft = draftRegion(page);
   await expect(
     draft.getByRole("heading", { name: "Unreviewed draft", exact: true }),
   ).toBeVisible();
@@ -735,15 +737,9 @@ test("draft facts, interpretations and computed results retain citations, qualif
   run.draft!.items[0].text = plain;
   const state = await fixture(page, [run]);
   await open(page, "?research_run=" + firstId);
-  const draft = selected(page).getByRole("region", {
-    name: "Research draft",
-    exact: true,
-  });
+  const draft = draftRegion(page);
   await expect(draft).toContainText("Not finally reviewed.");
-  const fact = draft.getByRole("region", {
-    name: "Draft for requested item 1",
-    exact: true,
-  });
+  const fact = draftItem(draft, 1);
   await expect(fact).toContainText("Source fact");
   await expect(fact).toContainText(
     "Northstar Class A · FY2025 · millions · USD",
@@ -760,29 +756,13 @@ test("draft facts, interpretations and computed results retain citations, qualif
   await expect(
     fact.getByText(candidate.content_hash, { exact: true }),
   ).toBeVisible();
-  const missing = draft.getByRole("region", {
-    name: "Draft for requested item 2",
-    exact: true,
-  });
+  const missing = draftItem(draft, 2);
   await expect(missing).toContainText("Boreal · FY2024 · millions · SEK");
   await expect(missing).toContainText("Evidence gap · Missing");
   await expect(missing.getByRole("blockquote")).toHaveCount(0);
-  await expect(
-    draft.getByRole("region", {
-      name: "Draft for requested item 3",
-      exact: true,
-    }),
-  ).toContainText("Stale for this request");
-  await expect(
-    draft.getByRole("region", {
-      name: "Draft for requested item 4",
-      exact: true,
-    }),
-  ).toContainText("Conflicting");
-  const calculated = draft.getByRole("region", {
-    name: "Draft for requested item 6",
-    exact: true,
-  });
+  await expect(draftItem(draft, 3)).toContainText("Stale for this request");
+  await expect(draftItem(draft, 4)).toContainText("Conflicting");
+  const calculated = draftItem(draft, 6);
   await expect(
     calculated.getByRole("region", { name: "Calculated result", exact: true }),
   ).toContainText("Calculated result: 30.00");
@@ -793,12 +773,7 @@ test("draft facts, interpretations and computed results retain citations, qualif
   await expect(calculated.getByRole("blockquote")).toHaveText(
     "FY2025 revenue components were USD 10 million and USD 20 million.",
   );
-  await expect(
-    draft.getByRole("region", {
-      name: "Draft for requested item 7",
-      exact: true,
-    }),
-  ).toContainText("Interpretation");
+  await expect(draftItem(draft, 7)).toContainText("Interpretation");
   expect(state.posts).toHaveLength(0);
 });
 
@@ -808,10 +783,7 @@ test("draft reload persists without resubmission and withdrawn sources withhold 
   const run = drafted();
   const state = await fixture(page, [run]);
   await open(page, "?research_run=" + firstId);
-  const draft = selected(page).getByRole("region", {
-    name: "Research draft",
-    exact: true,
-  });
+  const draft = draftRegion(page);
   await expect(draft).toContainText(run.draft!.items[0].text);
   await page.reload();
   await expect(draft).toContainText(run.draft!.items[0].text);
@@ -837,12 +809,9 @@ test("draft reload persists without resubmission and withdrawn sources withhold 
   await expect(draft).toContainText(
     "The writer could not run within the remaining allowance",
   );
-  await expect(
-    draft.getByRole("region", {
-      name: "Draft for requested item 1",
-      exact: true,
-    }),
-  ).toContainText("Draft unavailable · Covered");
+  await expect(draftItem(draft, 1)).toContainText(
+    "Draft unavailable · Covered",
+  );
   await expect(draft).not.toContainText("Evidence gap · Covered");
   const withheld = structuredClone(run);
   withheld.draft!.state = "unavailable";

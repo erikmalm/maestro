@@ -342,11 +342,7 @@ class ResearchDraftTests(unittest.TestCase):
                  ("42e-3", "42"), ("42 e3 7", "7"), ("42 e-3 7", "7"),
                  ("42 e3\t7", "7"), ("42 E - 3\n7", "7"), ("42e3 7", "7"))
         for amount, value in cases:
-            for crop in ("whole", "writer", "review"):
-                with self.subTest(amount=ascii(amount), value=value, crop=crop):
-                    assessment, review, raw = self.formatted_calculation(amount, value, crop)
-                    with self.assertRaises(ValueError):
-                        validate_response(raw, assessment, review)
+            self.assert_formatted_rejected(amount, value)
         # A separately labelled signed operand and ordinary prose beginning
         # with E remain independent of scientific notation.
         for quote in ("10 and -12.", "10 Euros and -12."):
@@ -368,11 +364,7 @@ class ResearchDraftTests(unittest.TestCase):
                         amount = mantissa + before_marker + marker + before_sign + sign + after_sign + "3"
                         exponent = sign + "3" if not after_sign else "3"
                         for fragment in (value, exponent):
-                            for crop in ("whole", "writer", "review"):
-                                with self.subTest(amount=ascii(amount), fragment=fragment, crop=crop):
-                                    assessment, review, raw = self.formatted_calculation(amount, fragment, crop)
-                                    with self.assertRaisesRegex(ValueError, "research draft"):
-                                        validate_response(raw, assessment, review)
+                            self.assert_formatted_rejected(amount, fragment, match="research draft")
 
     def test_trailing_point_exponents_keep_control_and_compatibility_context(self):
         cases = (("42.\x01e +3", "42"), ("42.\x01e +3", "+3"),
@@ -381,11 +373,7 @@ class ResearchDraftTests(unittest.TestCase):
                  ("42\u2024 E \u22123", "42"), ("42\u2024 E \u22123", "3"),
                  ("42.\u0301 e +3", "42"), ("42.\u066c e +3", "+3"))
         for amount, value in cases:
-            for crop in ("whole", "writer", "review"):
-                with self.subTest(amount=ascii(amount), value=value, crop=crop):
-                    assessment, review, raw = self.formatted_calculation(amount, value, crop)
-                    with self.assertRaisesRegex(ValueError, "research draft"):
-                        validate_response(raw, assessment, review)
+            self.assert_formatted_rejected(amount, value, match="research draft")
         # Even NUL may exist in the archived packet outside the clean accepted
         # quote. It must not detach a signed exponent suffix from its mantissa.
         for control in ("\x00", "\x01", "\x1b", "\x7f", "\x9f", "\u200b"):
@@ -401,19 +389,8 @@ class ResearchDraftTests(unittest.TestCase):
             with self.subTest(amount=amount, value=value):
                 assessment, review, raw = self.formatted_calculation(amount, value, "writer")
                 raw["items"]["i0"]["calculation"]["precision"] = 2
-                # Construct an otherwise canonical saved artifact from a fact
-                # so this regression does not need the invalid calculation to
-                # pass initial validation before checking saved revalidation.
-                fact = deepcopy(raw)
-                fact["items"]["i0"].update(kind="fact", calculation=None)
-                saved = validate_response(fact, assessment, review)
-                saved["items"][0].update(kind="calculation", calculation={
-                    **deepcopy(raw["items"]["i0"]["calculation"]),
-                    "result": {"42": "42.00", "-3": "-3.00", "+3": "3.00"}[value],
-                    "rounding": "ROUND_HALF_EVEN",
-                })
-                with self.assertRaisesRegex(ValueError, "research draft"):
-                    validate_saved_draft(saved, assessment, review)
+                self.assert_saved_calculation_rejected(
+                    raw, assessment, review, {"42": "42.00", "-3": "-3.00", "+3": "3.00"}[value])
 
     def test_exponent_candidate_refusal_preserves_plain_values_and_sentence_periods(self):
         cases = (("42.", "42", "42.00"), ("42.5.", "42.5", "42.50"),
@@ -424,11 +401,7 @@ class ResearchDraftTests(unittest.TestCase):
         for amount, value, expected in cases:
             for crop in ("whole", "writer", "review"):
                 with self.subTest(amount=amount, value=value, crop=crop):
-                    assessment, review, raw = self.formatted_calculation(amount, value, crop)
-                    raw["items"]["i0"]["calculation"]["precision"] = 2
-                    saved = validate_response(raw, assessment, review)
-                    self.assertEqual(saved["items"][0]["calculation"]["result"], expected)
-                    self.assertEqual(validate_saved_draft(saved, assessment, review), saved)
+                    self.assert_formatted_value(amount, value, expected, crop, precision=2)
 
     def test_even_accepted_coverage_crops_cannot_remove_packet_numeric_context(self):
         assessment, review = scope(("covered",), quotes=["Amount -42 and 0. FY2025 USD."])
@@ -528,6 +501,40 @@ class ResearchDraftTests(unittest.TestCase):
             raw["items"]["i0"]["calculation"]["operands"][1]["support_index"] = 1
         return assessment, review, raw
 
+    def assert_formatted_rejected(self, amount, value="42", *, crops=("whole", "writer", "review"),
+                                  zero_quote="and 0.", match=None):
+        for crop in crops:
+            with self.subTest(amount=ascii(amount), value=value, crop=crop):
+                assessment, review, raw = self.formatted_calculation(amount, value, crop, zero_quote=zero_quote)
+                failure = self.assertRaisesRegex(ValueError, match) if match else self.assertRaises(ValueError)
+                with failure:
+                    validate_response(raw, assessment, review)
+
+    def assert_formatted_value(self, amount, value, expected, crop, *, precision=None, zero_quote="and 0."):
+        assessment, review, raw = self.formatted_calculation(amount, value, crop, zero_quote=zero_quote)
+        if precision is not None:
+            raw["items"]["i0"]["calculation"]["precision"] = precision
+        saved = validate_response(raw, assessment, review)
+        self.assertEqual(saved["items"][0]["calculation"]["result"], expected)
+        self.assertEqual(validate_saved_draft(saved, assessment, review), saved)
+        passages = {passage["id"]: passage for passage in review["passages"]}
+        for support in saved["items"][0]["supports"]:
+            passage = passages[support["passage_id"]]
+            self.assertEqual(passage["text"][support["start"] - passage["start"]:
+                                                support["end"] - passage["start"]], support["quote"])
+        return saved, review
+
+    def assert_saved_calculation_rejected(self, raw, assessment, review, result):
+        # Start from a canonical fact; saved rejection must not depend on the
+        # invalid calculation passing initial validation first.
+        fact = deepcopy(raw)
+        fact["items"]["i0"].update(kind="fact", calculation=None)
+        saved = validate_response(fact, assessment, review)
+        saved["items"][0].update(kind="calculation", calculation={
+            **deepcopy(raw["items"]["i0"]["calculation"]), "result": result, "rounding": "ROUND_HALF_EVEN"})
+        with self.assertRaisesRegex(ValueError, "research draft"):
+            validate_saved_draft(saved, assessment, review)
+
     def test_currency_between_amount_and_sign_cannot_authorize_positive_digits(self):
         amounts = ("-$42", "- $42", "\u2212\u00a342", "-USD 42", "\u2212 USD 42", "\u2212USD42",
                    "-US$ 42", "- USD $42", "-kr 42", "-usd 42", "-eur 42", "-\u5143 42",
@@ -535,11 +542,47 @@ class ResearchDraftTests(unittest.TestCase):
                    "42$-", "42 USD-", "42 USD -", "42 US$ \u2212", "42 usd-", "42 eur -", "42 \u5143 -",
                    "42 XUSD-", "42 U.S.$-", "42 Rp. -")
         for amount in amounts:
+            self.assert_formatted_rejected(amount)
+
+    def test_wrapped_currency_scale_envelopes_cannot_detach_explicit_signs(self):
+        wrappers = (("(", ")"), ("[", "]"), ("{", "}"), ("\u27e6", "\u27e7"),
+                    ("\u3010", "\u3011"), ("\uff08", "\uff09"))
+        for opening, closing in wrappers:
+            currency = opening + "USD" + closing
+            nested = opening + currency + closing
+            amounts = ("-" + currency + "42", "-" + nested + "42", "42 " + currency + "-",
+                       "42 million " + currency + "-", "42 " + currency + " (million)-",
+                       "42 (million) " + currency + "-", "-" + currency + " (million) 42")
+            for amount in amounts:
+                self.assert_formatted_rejected(amount, zero_quote="Separate operand 0.", match="research draft")
+        # Currency symbols, opaque labels, the literal in-connector and
+        # invisible controls retain the same explicit-sign boundary.
+        for amount in ("-(US$)42", "42 million (XUSD)-", "- (in USD) 42",
+                       "42 million (in USD)-", "- in USD million 42", "- million in USD 42",
+                       "\u2212\u200b(USD)42", "42 (million) (USD)\x01\u2212"):
+            self.assert_formatted_rejected(amount, crops=("writer",), zero_quote="Separate operand 0.")
+
+    def test_saved_draft_cannot_replay_a_wrapped_currency_sign_fragment(self):
+        for amount in ("-(USD)42", "42 million (USD)-", "42 [USD] (million)-", "-\u27e6USD\u27e742"):
             for crop in ("whole", "writer", "review"):
-                with self.subTest(amount=amount, crop=crop):
-                    assessment, review, raw = self.formatted_calculation(amount, "42", crop)
-                    with self.assertRaises(ValueError):
-                        validate_response(raw, assessment, review)
+                with self.subTest(amount=ascii(amount), crop=crop):
+                    assessment, review, raw = self.formatted_calculation(
+                        amount, "42", crop, zero_quote="Separate operand 0.")
+                    self.assert_saved_calculation_rejected(raw, assessment, review, "42")
+
+    def test_currency_annotations_preserve_complete_literals_and_original_offsets(self):
+        controls = (("(USD)42", "42"), ("((USD))42", "42"), ("(USD)-42", "-42"),
+                    ("[USD]+42", "+42"), ("\u27e6USD\u27e742", "42"),
+                    ("42 million (USD)", "42"), ("42 (million) USD", "42"),
+                    ("USD (million) 42", "42"), ("42 million (in USD)", "42"),
+                    ("42 (recorded amount).", "42"), ("42 described by the source (a note).", "42"))
+        for amount, value in controls:
+            for crop in ("whole", "writer", "review"):
+                with self.subTest(amount=ascii(amount), crop=crop):
+                    self.assert_formatted_value(amount, value, str(int(value)), crop, zero_quote="Separate operand 0.")
+        # Bracket projection never unwraps the amount itself.
+        for amount in ("(USD 42)", "[USD 42]", "\u27e6USD 42\u27e7", "((USD)42)"):
+            self.assert_formatted_rejected(amount, crops=("writer",), zero_quote="Separate operand 0.")
 
     def test_all_original_currency_symbols_retain_signs_before_compatibility_expansion(self):
         symbols = [chr(codepoint) for codepoint in range(sys.maxunicode + 1)
@@ -548,25 +591,18 @@ class ResearchDraftTests(unittest.TestCase):
         for symbol in symbols:
             for amount in ("-" + symbol + " 42", "42 " + symbol + "-"):
                 with self.subTest(symbol=ascii(symbol), amount=ascii(amount)):
-                    assessment, review, raw = self.formatted_calculation(amount, "42", "whole")
-                    with self.assertRaises(ValueError):
-                        validate_response(raw, assessment, review)
+                    self.assert_formatted_rejected(amount, crops=("whole",))
 
     def test_currency_compatibility_mapping_preserves_original_support_offsets_and_plain_values(self):
         for symbol in ("\ufdfc", "\ufe69", "\uff04", "\u20b9"):
             for amount, value, expected in ((symbol + "42", "42", "42"),
                                             (symbol + "-42", "-42", "-42")):
                 with self.subTest(symbol=ascii(symbol), value=value):
-                    assessment, review, raw = self.formatted_calculation(amount, value, "writer")
-                    saved = validate_response(raw, assessment, review)
+                    saved, review = self.assert_formatted_value(amount, value, expected, "writer")
                     support = saved["items"][0]["supports"][0]
                     passage = review["passages"][0]
                     self.assertEqual(support["quote"], value)
                     self.assertEqual(support["start"] - passage["start"], passage["text"].index(value))
-                    self.assertEqual(passage["text"][support["start"] - passage["start"]:
-                                                         support["end"] - passage["start"]], value)
-                    self.assertEqual(saved["items"][0]["calculation"]["result"], expected)
-                    self.assertEqual(validate_saved_draft(saved, assessment, review), saved)
 
     def selected_calculation(self, body):
         assessment, previous = scope(("covered",))
@@ -589,7 +625,8 @@ class ResearchDraftTests(unittest.TestCase):
         return assessment, review, raw, packet
 
     def test_real_selected_packet_cannot_hide_a_sign_before_a_currency_envelope(self):
-        for label in ("USD", "XUSD", "U.S.$"):
+        for label in ("USD", "XUSD", "U.S.$", "(USD)", "((USD))", "[USD]", "\u27e6USD\u27e7",
+                      "(million) USD", "(USD) (million)", "(in USD)"):
             body = "x" * 599 + "-" + label + " 42 and 0. "
             body += " " * (1500 - len(body)) + "Testsubject metric0 FY2025."
             body += " " * (1795 - len(body)) + " End."
@@ -602,7 +639,8 @@ class ResearchDraftTests(unittest.TestCase):
 
     def test_real_selected_packet_cannot_hide_a_sign_after_a_currency_envelope(self):
         for label in ("USD", "XUSD", "U.S.$", "million", "million USD", "USD million", "billion EUR",
-                      "millions USD", "millionUSD", "USDmillion"):
+                      "millions USD", "millionUSD", "USDmillion", "(USD)", "((USD))", "[USD]",
+                      "\u27e6USD\u27e7", "million (USD)", "(million) USD", "(USD) (million)", "million (in USD)"):
             body = " " * 700 + "Testsubject metric0 FY2025. Amount 0 recorded. "
             body += " " * (1500 - len(body)) + "USD context. "
             tail = "42 " + label
@@ -614,6 +652,29 @@ class ResearchDraftTests(unittest.TestCase):
                 self.assertTrue(packet["passages"][0]["text"].endswith(tail))
                 with self.assertRaises(ValueError):
                     validate_response(raw, assessment, review)
+
+    def test_real_selected_packet_refuses_partial_currency_annotation_edges(self):
+        for opening, closing in (("(", ")"), ("[", "]"), ("\u27e6", "\u27e7")):
+            lead = "-" + opening + "XUSD"
+            body = "x" * (600 - len(lead)) + lead + closing + "42 and 0. "
+            body += " " * (1500 - len(body)) + "Testsubject metric0 FY2025."
+            body += " " * (1795 - len(body)) + " End."
+            with self.subTest(side="left", closing=ascii(closing)):
+                assessment, review, raw, packet = self.selected_calculation(body)
+                self.assertTrue(packet["passages"][0]["text"].startswith(closing + "42"))
+                with self.assertRaises(ValueError):
+                    validate_response(raw, assessment, review)
+            for label in ("USD", "millio"):
+                body = " " * 700 + "Testsubject metric0 FY2025. Amount 0 recorded. "
+                body += " " * (1500 - len(body)) + "USD context. "
+                tail = "42 " + opening + label
+                body += " " * (1800 - len(tail) - len(body)) + tail + closing + "-"
+                body += " " * (2795 - len(body)) + " End."
+                with self.subTest(side="right", opening=ascii(opening), label=label):
+                    assessment, review, raw, packet = self.selected_calculation(body)
+                    self.assertTrue(packet["passages"][0]["text"].endswith(tail))
+                    with self.assertRaises(ValueError):
+                        validate_response(raw, assessment, review)
 
     def test_real_selected_packet_preserves_visible_currency_context_at_nonzero_offsets(self):
         body = "x" * 600 + "Visible boundary. USD 42 and 0. "
@@ -629,32 +690,19 @@ class ResearchDraftTests(unittest.TestCase):
                    "1\u00a0\u202f234", "1,\u202f234", "1' 234", "1\u066c\u2009234")
         for amount in amounts:
             for value in ("1", "234"):
-                for crop in ("whole", "writer", "review"):
-                    with self.subTest(amount=amount, value=value, crop=crop):
-                        assessment, review, raw = self.formatted_calculation(amount, value, crop)
-                        with self.assertRaises(ValueError):
-                            validate_response(raw, assessment, review)
+                self.assert_formatted_rejected(amount, value)
 
     def test_underscore_groups_cannot_authorize_numeric_fragments(self):
         for amount in ("42_3", "42 _ 3", "42 _ _ 3", "42\t_\t3", "42 e1 _ 3",
                        "42 _\u0301_ 3", "42 e1 _\u0301_ 3"):
             for value in ("42", "3"):
-                for crop in ("whole", "writer", "review"):
-                    with self.subTest(amount=ascii(amount), value=value, crop=crop):
-                        assessment, review, raw = self.formatted_calculation(amount, value, crop)
-                        with self.assertRaises(ValueError):
-                            validate_response(raw, assessment, review)
+                self.assert_formatted_rejected(amount, value)
 
     def test_scaled_postfix_signs_cannot_become_positive_operands(self):
         for label in ("thousand", "million", "billion", "trillion", "million USD", "USD million", "Billion EUR",
                       "thousands USD", "millions USD", "billions EUR", "trillions USD", "millionUSD", "USDmillion"):
             for sign in ("-", "\u2212"):
-                for crop in ("whole", "writer", "review"):
-                    with self.subTest(label=label, sign=ascii(sign), crop=crop):
-                        assessment, review, raw = self.formatted_calculation(
-                            "42 " + label + sign + ".", "42", crop, zero_quote="Separate operand 0.")
-                        with self.assertRaises(ValueError):
-                            validate_response(raw, assessment, review)
+                self.assert_formatted_rejected("42 " + label + sign + ".", zero_quote="Separate operand 0.")
         for label in ("thousand", "million", "billion", "trillion", "million USD", "USD million",
                       "millions USD", "millionUSD"):
             assessment, review, raw = self.formatted_calculation(
@@ -665,12 +713,7 @@ class ResearchDraftTests(unittest.TestCase):
     def test_leading_arabic_numeric_separators_cannot_authorize_ascii_digit_suffixes(self):
         for separator in ("\u066b", "\u066c"):
             for sign in ("", "+", "-", "\u2212"):
-                for crop in ("whole", "writer", "review"):
-                    amount = "USD" + sign + separator + "42"
-                    with self.subTest(amount=ascii(amount), crop=crop):
-                        assessment, review, raw = self.formatted_calculation(amount, "42", crop)
-                        with self.assertRaises(ValueError):
-                            validate_response(raw, assessment, review)
+                self.assert_formatted_rejected("USD" + sign + separator + "42")
 
     def test_whitespace_in_unsupported_leading_numeric_clusters_cannot_expose_digit_suffixes(self):
         amounts = ["USD" + prefix + separator + spacing + "42"
@@ -679,11 +722,7 @@ class ResearchDraftTests(unittest.TestCase):
                                            ("- ", ""), ("+", "\t"), ("\u2212 ", " "))]
         amounts += ["USD" + prefix + "42" for prefix in ("-. ", "-, ", "+. ", "+, ", "- .\t", "\u2212, ")]
         for amount in amounts:
-            for crop in ("whole", "writer", "review"):
-                with self.subTest(amount=ascii(amount), crop=crop):
-                    assessment, review, raw = self.formatted_calculation(amount, "42", crop)
-                    with self.assertRaises(ValueError):
-                        validate_response(raw, assessment, review)
+            self.assert_formatted_rejected(amount)
 
     def test_leading_separator_refusal_keeps_plain_decimals_and_quoted_operands_valid(self):
         controls = (("USD 42", "42", "42"), ("USD +42", "+42", "42"),
@@ -694,11 +733,7 @@ class ResearchDraftTests(unittest.TestCase):
         for amount, value, expected in controls:
             for crop in ("whole", "writer", "review"):
                 with self.subTest(amount=ascii(amount), crop=crop):
-                    assessment, review, raw = self.formatted_calculation(amount, value, crop)
-                    raw["items"]["i0"]["calculation"]["precision"] = 2 if "." in value else 0
-                    saved = validate_response(raw, assessment, review)
-                    self.assertEqual(saved["items"][0]["calculation"]["result"], expected)
-                    self.assertEqual(validate_saved_draft(saved, assessment, review), saved)
+                    self.assert_formatted_value(amount, value, expected, crop, precision=2 if "." in value else 0)
 
     def test_currency_context_keeps_complete_plain_and_signed_ascii_literals_valid(self):
         controls = (("$42", "42", "42"), ("USD 42", "42", "42"), ("+42", "+42", "42"),
@@ -708,10 +743,7 @@ class ResearchDraftTests(unittest.TestCase):
         for amount, value, expected in controls:
             for crop in ("whole", "writer", "review"):
                 with self.subTest(amount=amount, crop=crop):
-                    assessment, review, raw = self.formatted_calculation(amount, value, crop)
-                    saved = validate_response(raw, assessment, review)
-                    self.assertEqual(saved["items"][0]["calculation"]["result"], expected)
-                    self.assertEqual(validate_saved_draft(saved, assessment, review), saved)
+                    self.assert_formatted_value(amount, value, expected, crop)
         for second, expected in (("-12", "-2"), ("+12", "22")):
             # "and" is a short letter label, but this sign starts a separate
             # complete operand rather than being a postfix monetary sign.
