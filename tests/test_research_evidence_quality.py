@@ -8,6 +8,7 @@ import sys
 import tempfile
 import unittest
 
+from backend.research_draft import gap_draft, validate_response
 from backend.research_evidence import validate_review
 from backend.research_passages import select_packet
 from backend.research_requirements import validate_assessment
@@ -202,6 +203,33 @@ class ResearchEvidenceQualityTests(unittest.TestCase):
                 changed["evidence_review"] = validate_review(changed_raw, changed["assessment"], packet, CHECKED)
                 with self.assertRaisesRegex(AssertionError, "semantic evidence state"):
                     check_run(case, changed, sources, loader)
+
+    def test_draft_corpus_shapes_citation_bindings_gaps_and_call_bounds(self):
+        for case in self.cases.values():
+            with self.subTest(case=case["id"]):
+                run, sources, loader, _, _ = canonical(case)
+                assessment, review = run["assessment"], run["evidence_review"]
+                covered = [row for row in review["items"] if row["state"] == "covered"]
+                raw = {"version": 2, "items": {row["item_id"]: {
+                    "kind": "fact" if case["id"] == "historical_tail" else "interpretation",
+                    "text": row["supports"][0]["quote"], "support_indexes": [0], "gap_reason": None}
+                    for row in covered}}
+                run.update(workflow="research_draft", state="draft" if covered else "partial",
+                           draft=validate_response(raw, assessment, review) if covered else gap_draft(assessment, review))
+                calls = 3 if covered else 2
+                run["budget"]["consumed"]["model_calls"] = calls
+                self.assertEqual(check_run(case, run, sources, loader, "research_draft"), calls)
+                wrong_calls = deepcopy(run)
+                wrong_calls["budget"]["consumed"]["model_calls"] = 2 if covered else 3
+                with self.assertRaisesRegex(AssertionError, "local call count"):
+                    check_run(case, wrong_calls, sources, loader, "research_draft")
+                changed = deepcopy(run)
+                if covered:
+                    changed["draft"]["items"][0]["supports"][0]["source_id"] = "foreign-source"
+                else:
+                    changed["draft"]["items"][0]["text"] = "An invented supported result."
+                with self.assertRaisesRegex(AssertionError, "noncanonical draft"):
+                    check_run(case, changed, sources, loader, "research_draft")
 
 
 if __name__ == "__main__":
