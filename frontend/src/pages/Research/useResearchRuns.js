@@ -22,6 +22,7 @@ const message = (reason, fallback) =>
   reason instanceof Error ? reason.message : fallback;
 const activeStates = new Set(["queued", "running"]);
 const terminalStates = new Set([
+  "draft",
   "partial",
   "clarification",
   "cancelled",
@@ -238,7 +239,7 @@ export default function useResearchRuns(chatId) {
       submission_id: crypto.randomUUID().replaceAll("-", ""),
       request,
       query: "",
-      workflow: "evidence_review",
+      workflow: "research_draft",
       chat_id: chatId || null,
     };
     pendingBody.current = body;

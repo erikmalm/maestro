@@ -2,7 +2,7 @@
 
 Each case gets a disposable private workspace and sibling archive. No existing
 workspace, configuration, credentials, memory or hosted search is used. A case
-is attempted once, with at most two local inference requests. Unknown completion
+is attempted once, with at most two local calls (three for drafts). Unknown completion
 stops the entire run and requires operator recovery of the original server.
 """
 import argparse
@@ -31,6 +31,7 @@ from backend import credentials
 from backend.context_policy import DEFAULT as ARCHIVE_DEFAULT, SOURCE_BYTES
 from backend.memory import MemoryStore
 from backend.provider import DEFAULT, Provider, validate_ollama_url
+from backend.research_draft import validate_saved_draft
 from backend.research_evidence import validate_saved_review
 from backend.research_passages import validate_packet
 from backend.research_requirements import validate_saved_assessment
@@ -115,9 +116,12 @@ def check_qualifiers(case, assessment):
     return matched
 
 
-def check_run(case, run, captured, loader):
+def check_run(case, run, captured, loader, workflow="evidence_review"):
     """Typed/pin checks plus narrow semantic expectations for this versioned corpus."""
-    require(run["workflow"] == "evidence_review" and run["state"] == "partial", "Expected terminal partial evidence review")
+    require(workflow in ("evidence_review", "research_draft") and run["workflow"] == workflow,
+            "Unexpected research workflow")
+    require(run["state"] in (("draft", "partial") if workflow == "research_draft" else ("partial",)),
+            "Expected terminal evidence review or unreviewed draft")
     try:
         assessment = validate_saved_assessment(run.get("assessment"), case["request"])
         review = validate_saved_review(run.get("evidence_review"), assessment)
@@ -153,16 +157,33 @@ def check_run(case, run, captured, loader):
             require(checked["state"] != "covered", "Old observation was promoted to current coverage")
             require(all(support["suitability"] != "suitable" and support["best_before"] is None for support in supports),
                     "Fresh origin verification was fabricated")
+    calls = 2
+    if workflow == "research_draft":
+        try:
+            draft = validate_saved_draft(run.get("draft"), assessment, review)
+        except (ValueError, KeyError, TypeError):
+            raise AssertionError("Missing or noncanonical draft or accepted citation bindings") from None
+        supported = any(item["state"] == "covered" for item in review["items"])
+        require(run["state"] == ("draft" if supported else "partial"), "Unexpected draft completion state")
+        require((draft["state"], draft["reason"]) == (("unreviewed", "draft_requires_review") if supported
+                else ("unavailable", "no_supported_facts")), "Expected unreviewed prose or a no-support gap")
+        for item in draft["items"]:
+            require(item["kind"] in (("fact", "interpretation") if item["coverage_state"] == "covered" else ("gap",)),
+                    "Expected supported corpus prose or an explicit evidence gap")
+        calls += int(supported)
     consumed = run["budget"]["consumed"]
-    require(consumed["model_calls"] == 2, "Expected exactly two local calls for the populated fixture")
+    require(consumed["model_calls"] == calls, "Unexpected local call count for the populated fixture")
     require(consumed["hosted_searches"] == 0, "Unexpected hosted usage")
     require(all(amount == 0 for amount in run["budget"]["reserved"].values()), "Unreleased allowance")
     require(run["result"] is None, "An ordinary answer or lookup result was produced")
+    return calls
 
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--model", required=True, help="Explicit installed local model ID; no ambient model selection")
+    parser.add_argument("--workflow", choices=("evidence_review", "research_draft"), default="evidence_review",
+                        help="Draft checks validate structure/citations; inspect reported prose separately")
     parser.add_argument("--base-url", default="http://127.0.0.1:11434")
     parser.add_argument("--context-tokens", type=int, default=16384)
     parser.add_argument("--output-tokens", type=int, default=1024)
@@ -192,6 +213,7 @@ def main(argv=None):
         cases = [case for case in cases if case["id"] in args.case_ids]
     original_sync, original_async = httpx.HTTPTransport.handle_request, httpx.AsyncHTTPTransport.handle_async_request
     active, lock = {"chats": 0}, Lock()
+    maximum_calls = 3 if args.workflow == "research_draft" else 2
 
     def allowed(request):
         require((request.url.scheme, request.url.host, request.url.port or 80) ==
@@ -203,7 +225,7 @@ def main(argv=None):
                 "Credentials must not be sent")
         if request.url.path == "/api/chat":
             with lock:
-                require(active["chats"] < 2, "A fixture cannot make more than two inference requests")
+                require(active["chats"] < maximum_calls, "A fixture exceeded its inference request bound")
                 active["chats"] += 1
 
     def guarded_sync(transport, request):
@@ -259,7 +281,7 @@ def main(argv=None):
                     active["chats"] = 0
                     started = time.monotonic()
                     response = client.post("/api/research/runs", json={"submission_id": uuid.uuid4().hex,
-                        "request": case["request"], "query": "", "chat_id": None, "workflow": "evidence_review"}, headers=headers)
+                        "request": case["request"], "query": "", "chat_id": None, "workflow": args.workflow}, headers=headers)
                     response.raise_for_status()
                     detail = client.get("/api/research/runs/" + response.json()["run"]["id"])
                     detail.raise_for_status()
@@ -268,20 +290,24 @@ def main(argv=None):
                         "consumed": run["budget"]["consumed"], "reserved": run["budget"]["reserved"],
                         "network_chat_requests": active["chats"], "assessment": run.get("assessment"),
                         "evidence_review": run.get("evidence_review"), "passed": False}
+                    if args.workflow == "research_draft":
+                        result["draft"] = run.get("draft")
                     try:
-                        check_run(case, run, captured, store.get_capture)
-                        require(active["chats"] == 2, "Unexpected local inference request count")
+                        calls = check_run(case, run, captured, store.get_capture, args.workflow)
+                        require(active["chats"] == calls, "Unexpected local inference request count")
                         result["passed"] = True
                     except AssertionError as error:
                         result["failure"] = str(error)
                     results.append(result)
-                    print(json.dumps({key: value for key, value in result.items() if key not in ("assessment", "evidence_review")}), flush=True)
+                    print(json.dumps({key: value for key, value in result.items() if key not in ("assessment", "evidence_review", "draft")}), flush=True)
                     recovery_required = (any(run["budget"]["reserved"].values()) or
                                          any(entry["status"] in ("reserved", "uncertain") for entry in service.read_state()["ledger"]))
             if recovery_required:
                 break
     report = {"model": args.model, "context_tokens": args.context_tokens, "output_tokens": args.output_tokens,
-              "timezone": args.timezone,
+              "timezone": args.timezone, "workflow": args.workflow,
+              "validation_scope": "Canonical records, source pins, coverage, draft citation bindings and budgets; "
+                                  "draft prose meaning and figure fidelity require human inspection of the report.",
               "results": results, "passed": len(results) == len(cases) and all(result["passed"] for result in results),
               "recovery_required": recovery_required}
     if args.report:

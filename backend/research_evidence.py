@@ -77,6 +77,11 @@ Cite only supplied passage IDs and exact, contiguous, uniquely occurring quotes 
 Do not supply offsets or hashes; the server derives them. Keep the period and observation_date null
 unless that exact text occurs inside the cited quote; observation_date must be YYYY-MM-DD.
 historical requires an explicit requested item period and a quote establishing that same period.
+For each historical support, set temporal_scope to historical and copy that exact requested period
+into period. Do not leave it unspecified or null when the quote establishes the reporting period.
+A known reporting period and an unknown observation/publication date are separate: retain the quoted
+period with historical scope while leaving an absent observation_date null. Do not infer missing
+periods or dates from source titles, retrieval time or other passages.
 Old retrieval does not invalidate evidence for its original historical period. current describes a
 current/latest fact; refresh describes an explicit fresh-origin verification requirement. Retrieval
 time is not observation, publication or origin verification. Never promote an old article retrieved
@@ -90,7 +95,10 @@ MESSAGE = ("Return only valid schema JSON with version 2. Final structure check:
            "keyed by every exact supplied mandatory item ID, including missing items. Each value "
            "contains only state, reason and supports, with no item_id field. "
            "covered/stale need support; missing has supports: []; conflicting cites at least two "
-           "distinct passage IDs. Preserve exact supplied quotes and quoted periods/dates; invent none.")
+           "distinct passage IDs. Temporal check for every support: when a quote establishes the "
+           "requested historical reporting period, use temporal_scope historical and copy that exact "
+           "period even if observation_date is null. Never use unspecified for a requirement with "
+           "a period or freshness condition. Preserve exact supplied quotes and quoted periods/dates; invent none.")
 
 
 def _invalid():
