@@ -61,11 +61,15 @@ export default function Draft({ draft, assessment, review }) {
         {(draft.items || []).map((item) => {
           const supports = item.supports || [];
           const withheld =
-            draft.state !== "unreviewed" ||
-            (item.kind !== "gap" &&
-              (!supports.length || !supports.every(available)));
+            item.kind !== "gap" &&
+            (draft.state !== "unreviewed" ||
+              !supports.length ||
+              !supports.every(available));
           const proseUnavailable =
-            item.kind === "gap" && item.gap_reason === "insufficient_evidence";
+            item.kind === "gap" &&
+            (item.gap_reason === "insufficient_evidence" ||
+              (draft.reason === "writer_capacity" &&
+                item.coverage_state === "covered"));
           const label = withheld
             ? "Draft unavailable"
             : item.kind === "gap"
@@ -115,7 +119,7 @@ export default function Draft({ draft, assessment, review }) {
                       : "A supported draft statement is unavailable for this item."
                     : item.text}
                 </p>
-                {!withheld && supports.length > 0 && (
+                {item.kind !== "gap" && !withheld && supports.length > 0 && (
                   <ul
                     className="research-reviewed-passages"
                     aria-label="Draft source quotes"

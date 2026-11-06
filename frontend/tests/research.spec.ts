@@ -1013,6 +1013,88 @@ test("a completed cited draft separates facts, interpretations and calculation g
   ).toContainText("Supported prose unavailable · Evidence assessment: Covered");
 });
 
+test("unavailable drafts retain server-authored gaps and evidence coverage", async ({
+  page,
+}) => {
+  const run = citedDraft();
+  const gaps = [
+    [
+      "missing",
+      "Missing",
+      "No support was recorded for this requirement in the inspected evidence.",
+    ],
+    [
+      "stale",
+      "Stale for this request",
+      "Saved evidence needs checking before this requirement can be drafted as a supported fact.",
+    ],
+    [
+      "conflicting",
+      "Conflicting",
+      "Conflicting evidence prevents a supported factual draft for this requirement.",
+    ],
+    [
+      "unavailable",
+      "Unavailable",
+      "Evidence suitable for this requirement is unavailable.",
+    ],
+  ] as const;
+  run.state = "partial";
+  run.draft!.state = "unavailable";
+  run.draft!.reason = "no_supported_facts";
+  run.draft!.items.forEach((item, index) => {
+    Object.assign(item, {
+      kind: "gap",
+      gap_reason: "coverage_gap",
+      supports: [],
+      coverage_state: gaps[index][0],
+      text: gaps[index][2],
+    });
+    run.evidence_review!.items[index].state = gaps[index][0];
+  });
+  await fixture(page, [run]);
+  await open(page, "?research_run=" + firstId);
+  const draft = selected(page).getByRole("region", {
+    name: "Research draft",
+    exact: true,
+  });
+  await expect(draft).toContainText(
+    "No supported facts are available to write a draft.",
+  );
+  for (let index = 0; index < gaps.length; index++) {
+    const item = draft.getByRole("region", {
+      name: `Draft for requested item ${index + 1}`,
+      exact: true,
+    });
+    await expect(item).toContainText(`Evidence gap · ${gaps[index][1]}`);
+    await expect(item).toContainText(gaps[index][2]);
+  }
+  run.draft!.reason = "writer_capacity";
+  Object.assign(run.draft!.items[3], {
+    coverage_state: "covered",
+    text: "A draft could not be written within the available allowance.",
+  });
+  run.evidence_review!.items[3].state = "covered";
+  await focus(page);
+  await expect(draft).toContainText(
+    "The writer could not run within the remaining allowance.",
+  );
+  for (let index = 0; index < 3; index++) {
+    await expect(draft).toContainText(gaps[index][2]);
+  }
+  const covered = draft.getByRole("region", {
+    name: "Draft for requested item 4",
+    exact: true,
+  });
+  await expect(covered).toContainText(
+    "Supported prose unavailable · Evidence assessment: Covered",
+  );
+  await expect(covered).toContainText(
+    "A draft could not be written within the available allowance.",
+  );
+  await expect(covered).not.toContainText("Evidence gap");
+});
+
 test("draft source withholding removes prose and citations through refresh and reload", async ({
   page,
 }) => {
@@ -1030,6 +1112,10 @@ test("draft source withholding removes prose and citations through refresh and r
   withheld.state = "partial";
   withheld.draft!.state = "unavailable";
   withheld.draft!.reason = "source_unavailable";
+  Object.assign(withheld.draft!.items[3], {
+    coverage_state: "unavailable",
+    text: "Saved source evidence is unavailable; draft text is withheld.",
+  });
   withheld.evidence_review!.sources = [];
   withheld.evidence_review!.passages = [];
   state.runs = [withheld];
@@ -1038,6 +1124,9 @@ test("draft source withholding removes prose and citations through refresh and r
     draft.getByRole("heading", { name: "Draft unavailable", exact: true }),
   ).toBeVisible();
   await expect(draft).toContainText("The previous draft text is withheld");
+  await expect(draft).toContainText(
+    "Saved source evidence is unavailable; draft text is withheld.",
+  );
   await expect(draft).not.toContainText(
     "Northstar reported FY2025 revenue of USD 10.",
   );
