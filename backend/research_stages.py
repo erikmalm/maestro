@@ -169,10 +169,19 @@ def _held(db, run_id):
     return json.loads(row[0]) if row else None
 
 
-def _finishing_holds(run, config):
+def _finishing_holds(run, config, *, dispatch=None):
     if run.get("workflow") == "research_draft":
-        tokens = min(config["ollama_context_tokens"], DRAFT_FINISHING_TOKENS)
-        seconds = DRAFT_FINISHING_SECONDS
+        budget = run["budget"]
+        dispatch = dispatch or _amounts()
+        spare = {name: max(0, budget["total"][name] - budget["consumed"][name]
+                           - budget["reserved"][name] - dispatch[name]) for name in AMOUNTS}
+        # Protect finishing calls from optional spending without promising two
+        # full contexts regardless of the run limit. The first dispatch must
+        # fit on its own; share only its spare allowance across remaining calls.
+        # A zero-sized hold still permits requirements and a recorded gap.
+        slots = max(2, spare["model_calls"])
+        tokens = min(config["ollama_context_tokens"], DRAFT_FINISHING_TOKENS, spare["tokens"] // slots)
+        seconds = min(DRAFT_FINISHING_SECONDS, spare["seconds"] / slots)
     else:
         tokens, seconds = FINISHING_TOKENS, FINISHING_SECONDS
     return {kind: _amounts(model_calls=1, tokens=tokens, seconds=seconds)
@@ -317,11 +326,12 @@ def reserve(store, stage, workspace, provider_state, request_id, input_bound, ou
     row = _row(db, stage)
     run = _owner(store, db, stage)
     store._elapsed(run)
+    amounts = _amounts(model_calls=1, tokens=input_bound + output_bound, seconds=json.loads(row[5])["seconds"])
     held = _held(db, stage.run_id)
     if held is None:
-        held = _finishing_holds(run, provider_state["config"])
-        for amounts in held.values():
-            _change(run, amounts, 1)
+        held = _finishing_holds(run, provider_state["config"], dispatch=amounts)
+        for hold in held.values():
+            _change(run, hold, 1)
     if row[2] in held:
         slot = held.pop(row[2])
         if (run.get("workflow") != "research_draft"
@@ -335,7 +345,6 @@ def reserve(store, stage, workspace, provider_state, request_id, input_bound, ou
             # rather than the larger capacity temporarily assigned to the call.
             spec["finishing_hold"] = slot
         db.execute("UPDATE research_stages SET spec=? WHERE id=?", (_encoded(spec, MAX_SPEC_BYTES), stage.stage_id))
-    amounts = _amounts(model_calls=1, tokens=input_bound + output_bound, seconds=json.loads(row[5])["seconds"])
     if any(run["budget"]["consumed"][name] + run["budget"]["reserved"][name] + amounts[name] > run["budget"]["total"][name]
            for name in AMOUNTS):
         raise ValueError("Research allowance cannot cover this stage and finishing capacity.")

@@ -1,6 +1,7 @@
 """Owned draft publication with disposable archives and synthetic local replies."""
 from contextlib import closing, contextmanager
 from copy import deepcopy
+from datetime import datetime
 import json
 import sqlite3
 import unittest
@@ -152,6 +153,40 @@ class ResearchDraftApiTests(unittest.TestCase):
                 self.assertEqual(case.writer_inputs, [])
                 self.assertEqual(case.writer_rows(run["id"]), [])
                 case.assert_usage(run, calls)
+
+    def test_insufficient_writer_time_records_gap_without_dispatch_or_leaked_holds(self):
+        self.fixture.capture()
+        finish = backend.ResearchStore.finish_evidence_review
+
+        def finish_then_advance(store, run_id, token, review, **options):
+            completed = finish(store, run_id, token, review, **options)
+            deadline = datetime.fromisoformat(store.get(run_id)["budget"]["deadline"]).timestamp()
+            # Evidence completed in time. Between stages, only the reviewer's
+            # protected 20 seconds plus half a second remain for writing.
+            self.enterContext(patch.object(backend.ResearchStore, "clock", return_value=deadline - 20.5))
+            return completed
+
+        with patch.object(backend.ResearchStore, "finish_evidence_review", new=finish_then_advance):
+            run = self.run_now()
+        self.assertEqual((run["state"], run["draft"]["reason"]), ("partial", "writer_capacity"))
+        self.assertEqual(run["evidence_review"]["items"][0]["state"], "covered")
+        self.assertEqual(run["draft"]["items"][0]["coverage_state"], "covered")
+        self.assertEqual(self.writer_inputs, [])
+        self.assertEqual(self.writer_rows(run["id"]), [("failed", None)])
+        self.assertEqual(self.fixture.fixture.get(run["id"])["draft"], run["draft"])
+        self.assert_usage(run, 2)
+
+    def test_fifty_thousand_token_run_can_record_requirements_and_draft_at_32k_context(self):
+        with backend.workspace_transaction() as workspace:
+            workspace["limits"]["max_tokens"] = 50000
+        with backend.provider().transaction() as state:
+            state["config"].update(ollama_context_tokens=32768, max_output_tokens=1024)
+        self.fixture.capture()
+        run = self.run_now()
+        self.assertIsNotNone(run["assessment"])
+        self.assertEqual(run["evidence_review"]["items"][0]["state"], "covered")
+        self.assertEqual((run["state"], run["draft"]["state"]), ("draft", "unreviewed"))
+        self.assert_usage(run)
 
     def test_invalid_index_purges_writer_output_but_preserves_evidence_and_actual_usage(self):
         self.fixture.capture()
