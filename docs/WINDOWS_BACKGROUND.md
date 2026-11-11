@@ -31,6 +31,20 @@ powercfg /a
 
 The native launcher, `scripts/start.ps1 -NoBrowser`, starts a hidden server process. The container launcher starts Maestro detached and sets `--restart unless-stopped`. Neither launcher installs a Windows service or scheduled task. The container restart policy does not start the Windows Ollama process, the Podman machine or a missing Windows SSH tunnel.
 
+### Native ports and reopening a server
+
+Choose a native port through `scripts/start.ps1 -Port <number>` or the `MAESTRO_PORT` environment variable. The explicit argument takes precedence. With neither configured, a new server uses 8765. Port 0 asks Windows to assign an available loopback port; the server keeps the bound socket while starting, rather than probing a free port and releasing it.
+
+```powershell
+.\scripts\start.ps1 -Port 0 -NoBrowser
+```
+
+Use the URL printed when startup completes. The launcher sets `MAESTRO_PORT` to the actual listening port in its PowerShell session and saves `server.json` beside `server.pid` in the selected private data directory. This runtime record includes the actual port, launch/process identity and workspace/archive identities. It is separate from defaults and saved provider settings. Repeating startup without an explicit port, or with port 0, checks the record and health endpoint before reopening the matching instance. To use a different fixed port, stop that instance first; shutdown follows its verified process record rather than a port number. Keep the same data/archive environment and run the launcher from the checkout that owns it.
+
+For Vite development, run `npm run dev` from `frontend` in that same PowerShell session after backend startup. Its API proxy reads `MAESTRO_PORT`, defaulting to 8765. A separate frontend shell must set the variable to the backend's printed port. Vite requires a concrete target between 1 and 65535; port 0 is valid for starting the backend, not for connecting to it. The production frontend makes relative API requests and needs no separately configured backend URL.
+
+The Ollama server address is an independent saved connection in **Settings → Model provider**. `MAESTRO_OLLAMA_URL` supplies its default and the exact trusted container host endpoint; it does not replace an existing saved address. Changing Maestro's listening port does not move Ollama, create a tunnel or repair a stopped one. If the saved model endpoint is unavailable, restore that endpoint or deliberately reconnect to the intended Ollama server in Settings; startup does not silently substitute a different model service.
+
 ### Permanent source archive on Windows
 
 Keep the same `MAESTRO_DATA_DIR` used by your existing workspace. The private database and source index remain there. Select a separate absolute public-source archive path through `MAESTRO_CONTEXT_ARCHIVE_DIR` in the server's environment. Maestro does not load `.env` files automatically.
