@@ -1,6 +1,7 @@
 import { sourceDate } from "../Evidence/useEvidence";
 import Assessment from "./Assessment";
 import EvidenceReview from "./EvidenceReview";
+import Draft from "./Draft";
 
 const number = (value) =>
   typeof value === "number" && Number.isFinite(value)
@@ -11,6 +12,7 @@ export const stateLabel = (state) =>
   ({
     queued: "Queued",
     running: "Running",
+    draft: "Draft — not finally reviewed",
     partial: "Partial — no reviewed answer",
     clarification: "Clarification needed — no reviewed answer",
     cancelled: "Cancelled",
@@ -27,9 +29,11 @@ const lookupLabels = {
 };
 
 export default function RunDetails({ run, busy, onCancel, onDelete }) {
-  const requirements = ["requirements", "evidence_review"].includes(
-    run.workflow,
-  );
+  const requirements = [
+    "requirements",
+    "evidence_review",
+    "research_draft",
+  ].includes(run.workflow);
   const result = run.result;
   const candidates = result?.candidates || [];
   return (
@@ -84,10 +88,18 @@ export default function RunDetails({ run, busy, onCancel, onDelete }) {
         </div>
       </dl>
       {requirements && <Assessment assessment={run.assessment} />}
+      {run.draft && (
+        <Draft
+          draft={run.draft}
+          assessment={run.assessment}
+          review={run.evidence_review}
+        />
+      )}
       {run.evidence_review && (
         <EvidenceReview
           review={run.evidence_review}
           assessment={run.assessment}
+          hasDraft={Boolean(run.draft)}
         />
       )}
       <section

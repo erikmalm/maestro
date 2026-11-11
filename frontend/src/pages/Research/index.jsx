@@ -11,15 +11,15 @@ export default function Research({ chatId }) {
       <div className="page-heading">
         <div>
           <h1>Research</h1>
-          <p>Assess requirements and review saved evidence.</p>
+          <p>Prepare a cited draft from saved evidence.</p>
         </div>
         <span className="badge neutral">Preview</span>
       </div>
       <p className="page-note">
         This preview assesses your request, then reviews a bounded selection of
-        saved evidence with an installed local model. It makes no hosted
-        searches or personal-memory recall, and produces no written or finally
-        reviewed answer.
+        saved evidence with an installed local model, then prepares a cited
+        draft. It makes no hosted searches or personal-memory recall. Drafts are
+        not finally reviewed and show evidence gaps explicitly.
       </p>
       <form
         className="card entry-form research-form"
@@ -29,7 +29,7 @@ export default function Research({ chatId }) {
             void data.submit(data.request.trim());
         }}
       >
-        <h2>Review saved evidence</h2>
+        <h2>Write saved-evidence draft</h2>
         <label>
           Research request
           <textarea
@@ -43,8 +43,8 @@ export default function Research({ chatId }) {
         </label>
         <p className="form-note">
           The current conversation's sharing restrictions are retained. Material
-          ambiguity stops the run for clarification. Answer writing and final
-          review are later steps.
+          ambiguity stops the run for clarification. Draft statements cite
+          accepted evidence; final review is a later step.
         </p>
         <div className="research-actions">
           <button
@@ -52,7 +52,7 @@ export default function Research({ chatId }) {
             disabled={!data.request.trim() || data.formLocked}
             aria-busy={data.busy === "submit" || data.working}
           >
-            Review saved evidence
+            Write saved-evidence draft
           </button>
         </div>
         {data.working && (

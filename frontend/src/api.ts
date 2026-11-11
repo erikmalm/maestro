@@ -544,19 +544,47 @@ export type ResearchEvidenceReview = {
     }[];
   }[];
 };
+export type ResearchDraft = {
+  version: 2;
+  state: "unreviewed" | "unavailable";
+  reason:
+    | "draft_requires_review"
+    | "no_supported_facts"
+    | "writer_capacity"
+    | "source_unavailable";
+  packet_hash: string;
+  coverage_hash: string;
+  items: {
+    item_id: string;
+    coverage_state: ResearchEvidenceReview["items"][number]["state"];
+    kind: "fact" | "interpretation" | "gap";
+    text: string;
+    subject_ids: string[];
+    criterion: string;
+    period: string | null;
+    unit: string | null;
+    currency: string | null;
+    freshness: string | null;
+    supports: ResearchEvidenceReview["items"][number]["supports"];
+    gap_reason:
+      null | "calculation_required" | "insufficient_evidence" | "coverage_gap";
+  }[];
+};
 export type ResearchRun = {
   id: string;
   submission_id: string;
   request: string;
   query: string;
-  workflow?: "lookup" | "requirements" | "evidence_review";
+  workflow?: "lookup" | "requirements" | "evidence_review" | "research_draft";
   assessment?: ResearchAssessment | null;
   evidence_review?: ResearchEvidenceReview | null;
+  draft?: ResearchDraft | null;
   chat_id: string | null;
   state:
     | "queued"
     | "running"
     | "partial"
+    | "draft"
     | "clarification"
     | "cancelled"
     | "interrupted"
@@ -599,7 +627,7 @@ export const createResearchRun = (body: {
   submission_id: string;
   request: string;
   query: string;
-  workflow?: "lookup" | "requirements" | "evidence_review";
+  workflow?: "lookup" | "requirements" | "evidence_review" | "research_draft";
   chat_id: string | null;
 }) =>
   request<{ run: ResearchRun; created: boolean }>(
