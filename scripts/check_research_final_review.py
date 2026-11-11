@@ -125,7 +125,8 @@ def grade(case, run, *, real_calls, seeded_stages, loader):
     return {"passed": valid and accounting and accepted == expected,
             "valid_semantic_review": valid, "accounting_ok": accounting,
             "expected_acceptance": expected, "observed_acceptance": accepted,
-            "false_acceptance": accepted and not expected, "false_rejection": expected and not accepted,
+            "false_acceptance": valid and accepted and not expected,
+            "false_rejection": valid and expected and not accepted,
             "invalid_review": not valid}
 
 
@@ -257,6 +258,7 @@ def main(argv=None):
                 break
     report = {"model": args.model, "base_url": endpoint, "context_tokens": args.context_tokens,
         "output_tokens": args.output_tokens, "timezone": args.timezone, "workflow": "research_answer",
+        "reviewer_max_seconds": backend.FINAL_REVIEW_SECONDS,
         "validation_scope": "Seeded-review detection only: three synthetic upstream replies through the production owned API/Provider; "
                             "one actual local final-review inference per case. Synthetic upstream token usage is zero. "
                             "This is not an all-real pipeline evaluation or independent origin verification.",

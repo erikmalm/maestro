@@ -247,7 +247,7 @@ The writer inherits current source eligibility/credentials, originating privacy,
 
 ### Final answer review (#27)
 
-The explicit `research_answer` workflow extends #26 with one sequential reviewer through the same Provider, owned stages and four-call/120-second cumulative allowance. Existing `research_draft` callers retain their unreviewed terminal artifact. No new agent, database, provider client, calculation execution, rewrite or acquisition loop is introduced.
+The explicit `research_answer` workflow extends #26 with one sequential reviewer through the same Provider, owned stages and four-call/120-second cumulative allowance. The last stage uses remaining available time up to 90 seconds for loading and review; reservations and the parent deadline still bound it. A 60-second result can be accepted while a result after the parent's 120-second deadline is rejected with usage settled. Existing `research_draft` callers retain their unreviewed terminal artifact. No new agent, database, provider client, calculation execution, rewrite or acquisition loop is introduced.
 
 Before inference and publication, code revalidates canonical requirements, coverage, draft and exact saved passages. The reviewer stage captures the assessment, packet, coverage and draft hashes; publication requires those identities, exact source pins, matching schema and the completed owned response. The writer artifact stays immutable and `unreviewed`; acceptance is a separate bound record. Model findings cover prose entailment, figures, dates/periods, units/currencies, interpretation, contradictions and all original request restrictions, including requirements omitted by extraction.
 

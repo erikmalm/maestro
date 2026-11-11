@@ -49,6 +49,7 @@ CSRF = secrets.token_urlsafe(32)
 PORT = int(os.environ.get("MAESTRO_PORT", "8765"))
 ORIGINS = {f"http://{host}:{port}" for host in ("127.0.0.1", "localhost") for port in (PORT, 5173, 4173)}
 SOURCE_CREDENTIAL_STATE_BYTES = 16 * 1024 ** 2
+FINAL_REVIEW_SECONDS = 90
 
 
 def now() -> str:
@@ -1135,7 +1136,9 @@ def execute_final_review(run, token, store):
                     "draft_hash": draft_hash(draft), "assessment_hash": selected["assessment_hash"]}
                 stage = store.prepare_stage(run["id"], token, "reviewer", seconds=1, **options)
                 envelope = store.authorize_stage(stage, workspace, state, db)
-                seconds = min(45, int(envelope["finishing_seconds_limit"]))
+                # This is the final stage; use the remaining run allowance for
+                # loading and review instead of reserving time for later work.
+                seconds = min(FINAL_REVIEW_SECONDS, int(envelope["finishing_seconds_limit"]))
                 size = len((research_instructions(envelope, INSTRUCTIONS) + json.dumps(history) + json.dumps(schema)).encode("utf-8")) + 3072
                 output = min(4096, state["config"]["max_output_tokens"])
                 fits = (seconds >= 1 and size + output <= min(workspace["limits"]["max_tokens"],

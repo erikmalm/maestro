@@ -584,7 +584,7 @@ export type ResearchFinalReview = {
   draft_hash: string;
   items: {
     item_id: string;
-    outcome: ResearchFinalReview["outcome"];
+    outcome: Exclude<ResearchFinalReview["outcome"], "partial">;
     reason: string;
   }[];
 };

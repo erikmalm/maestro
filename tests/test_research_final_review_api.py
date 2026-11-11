@@ -143,6 +143,39 @@ class ResearchFinalReviewApiTests(unittest.TestCase):
         self.assertEqual(self.reviewer_rows(run["id"]), [("failed", None)])
         self.assert_usage(run, 3)
 
+    def completed_review_after(self, seconds):
+        self.capture()
+        def advance(selected):
+            run_id = self.fixture.current_id()
+            started = self.sql("SELECT updated_at FROM research_stages WHERE run_id=? AND kind='reviewer'",
+                               (run_id,))[0][0]
+            finished = datetime.fromisoformat(started).timestamp() + seconds
+            self.enterContext(patch.object(backend.ResearchStore, "clock", return_value=finished))
+        self.review_hook = advance
+        return self.run_now()
+
+    def test_final_review_can_finish_after_sixty_seconds_within_parent_allowance(self):
+        run = self.completed_review_after(60)
+        self.assertEqual(run["state"], "accepted")
+        self.assertEqual(run["final_review"]["outcome"], "accepted")
+        self.assertEqual(run["budget"]["total"]["seconds"], 120)
+        self.assertEqual(run["budget"]["total"]["model_calls"], 4)
+        saved = json.loads(self.sql("SELECT spec FROM research_stages WHERE run_id=? AND kind='reviewer'",
+                                    (run["id"],))[0][0])
+        self.assertGreater(saved["seconds"], 60)
+        self.assertLessEqual(saved["seconds"], 90)
+        self.assert_usage(run)
+
+    def test_final_review_cannot_accept_a_reply_after_parent_deadline(self):
+        run = self.completed_review_after(121)
+        self.assertEqual(run["state"], "failed")
+        self.assertIsNone(run["final_review"])
+        self.assertEqual(run["draft"]["state"], "unreviewed")
+        self.assertEqual(run["budget"]["total"]["seconds"], 120)
+        self.assertEqual(run["budget"]["consumed"]["seconds"], 120)
+        self.assertEqual(self.reviewer_rows(run["id"]), [("failed", None)])
+        self.assert_usage(run)
+
     def test_late_reviewer_reply_cannot_cross_cancellation_deletion_settings_or_restart(self):
         for action, expected in (("cancel", "cancelled"), ("delete", None), ("settings", "failed"), ("recover", "interrupted")):
             with self.subTest(action=action), self.isolated_case() as case:

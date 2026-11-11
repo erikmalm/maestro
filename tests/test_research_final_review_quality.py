@@ -64,7 +64,7 @@ class ResearchFinalReviewQualityTests(unittest.TestCase):
                 items = {row["item_id"]: {"outcome": "accepted" if row["kind"] != "gap" else "evidence_gap",
                                           "reason": "Frozen synthetic reviewer finding."}
                          for row in selected["draft"]["items"]}
-                accepted = case["expected_acceptance"] or mode == "false_accept"
+                accepted = (case["expected_acceptance"] or mode == "false_accept") and mode != "false_reject"
                 if not accepted and all(row["outcome"] == "accepted" for row in items.values()):
                     items[next(iter(items))]["outcome"] = "writing_defect"
                 raw = {"version": 1, "outcome": "accepted" if accepted else "partial",
@@ -106,6 +106,15 @@ class ResearchFinalReviewQualityTests(unittest.TestCase):
         self.assertEqual(report["invalid_reviews"], 0)
         self.assertEqual(observed[0]["draft"]["items"][0]["text"], "Acme revenue for FY2025 was USD 43 million.")
 
+    def test_valid_semantic_rejection_of_supported_fact_counts_as_false_rejection(self):
+        code, report, observed = self.trial(["--case", "supported_fact"], mode="false_reject")
+        self.assertEqual(code, 1)
+        self.assertFalse(report["passed"])
+        self.assertEqual((report["false_acceptances"], report["false_rejections"], report["invalid_reviews"]), (0, 1, 0))
+        self.assertTrue(report["results"][0]["valid_semantic_review"])
+        self.assertEqual(report["results"][0]["final_review"]["items"][0]["outcome"], "writing_defect")
+        self.assertEqual(observed[0]["draft"]["items"][0]["text"], "Acme revenue for FY2025 was USD 42 million.")
+
     def test_unknown_completion_stops_before_another_case_and_preserves_reservations(self):
         code, report, observed = self.trial(mode="unknown")
         self.assertEqual(code, 2)
@@ -113,7 +122,8 @@ class ResearchFinalReviewQualityTests(unittest.TestCase):
         self.assertEqual(len(report["results"]), 1)
         self.assertTrue(report["recovery_required"])
         self.assertTrue(any(report["results"][0]["reserved"].values()))
-        self.assertEqual(report["false_rejections"], 1)
+        self.assertEqual(report["false_acceptances"], 0)
+        self.assertEqual(report["false_rejections"], 0)
         self.assertEqual(report["invalid_reviews"], 1)
 
     def test_help_invalid_endpoints_and_existing_report_do_not_open_ambient_storage(self):

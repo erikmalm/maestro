@@ -1145,7 +1145,7 @@ test("review defects, evidence gaps and calculation limitations remain unaccepte
       },
       {
         item_id: "growth",
-        outcome: "partial",
+        outcome: "evidence_gap",
         reason: "The calculation remains unperformed.",
       },
       {
@@ -1167,7 +1167,6 @@ test("review defects, evidence gaps and calculation limitations remain unaccepte
   await expect(review).toContainText("Writing correction needed");
   await expect(review).toContainText("Evidence gap");
   await expect(review).toContainText("Unable to verify");
-  await expect(review).toContainText("Partial");
   await expect(review).toContainText("The calculation remains unperformed.");
   await expect(
     selected(page).getByRole("region", {
@@ -1181,6 +1180,11 @@ test("review defects, evidence gaps and calculation limitations remain unaccepte
   });
   await expect(draft).toContainText("Not accepted as a complete answer");
   await expect(draft).toContainText("Derived calculation unavailable");
+  run.final_review!.outcome = "partial";
+  await focus(page);
+  await expect(selected(page).getByRole("status")).toHaveText(
+    "Partial — not accepted",
+  );
   await expect(
     page.getByRole("button", { name: /rewrite|continue research/i }),
   ).toHaveCount(0);
