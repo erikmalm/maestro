@@ -275,7 +275,7 @@ class ResearchInput(StrictModel):
     query: str = Field(default="", max_length=512, strict=True)
     chat_id: str | None = Field(default=None, min_length=1, max_length=100, strict=True)
     # Lookup remains the compatibility default for already-open clients (#31).
-    workflow: Literal["lookup", "requirements", "evidence_review", "research_draft"] = "lookup"
+    workflow: Literal["lookup", "requirements", "evidence_review", "research_draft", "research_answer"] = "lookup"
 
 
 _context_lock = threading.RLock()
@@ -776,8 +776,8 @@ def safe_research_run(run, *, secrets):
     # that the browser reconstructs from the response.
     safe_private_content(run["request"], run["query"], run["submission_id"], run["chat_id"] or "",
                          json.dumps(run, ensure_ascii=False), secrets=secrets)
-    if (run.get("workflow") in ("requirements", "evidence_review", "research_draft")
-            or any(run.get(field) is not None for field in ("assessment", "evidence_review", "draft"))):
+    if (run.get("workflow") in ("requirements", "evidence_review", "research_draft", "research_answer")
+            or any(run.get(field) is not None for field in ("assessment", "evidence_review", "draft", "final_review"))):
         from backend.research_requirements import validate_saved_assessment
         from backend.research_stages import safe_stage_content
         if run.get("assessment") is not None:
@@ -788,6 +788,12 @@ def safe_research_run(run, *, secrets):
         if run.get("draft") is not None:
             from backend.research_draft import validate_saved_draft
             validate_saved_draft(run["draft"], run["assessment"], run["evidence_review"])
+        if run.get("final_review") is not None:
+            from backend.research_final_review import validate_saved_final_review
+            validate_saved_final_review(run["final_review"], run["assessment"], run["evidence_review"], run["draft"])
+        if run.get("state") == "accepted" and (not run.get("final_review")
+                or run["final_review"]["basis"] != "semantic" or run["final_review"]["outcome"] != "accepted"):
+            raise ValueError("A reviewed answer requires its accepted final review.")
         safe_stage_content([run, json.dumps(run, ensure_ascii=False, allow_nan=False)],
                            {"protocol": "ollama"}, secrets=secrets)
     return run
@@ -813,7 +819,12 @@ def research_view(run):
                 if run.get("draft") is not None:
                     from backend.research_draft import gap_draft
                     projected_draft = gap_draft(run["assessment"], projected_review, reason="source_unavailable")
-                run = {**run, "evidence_review": projected_review, "draft": projected_draft}
+                projected_final = None
+                if run.get("final_review") is not None:
+                    from backend.research_final_review import gap_review
+                    projected_final = gap_review(run["assessment"], projected_review, projected_draft, reason="source_unavailable")
+                run = {**run, "evidence_review": projected_review, "draft": projected_draft, "final_review": projected_final,
+                       "state": "partial" if run["state"] == "accepted" else run["state"]}
         result, visible, response_secrets = run.get("result"), [], None
         # Never rewrite saved pins. Broken optional storage withholds references
         # while the safe private request and recorded activity remain readable.
@@ -884,7 +895,7 @@ def execute_requirements(run, token, store):
             stage = store.prepare_stage(run["id"], token, "requirements", model=requirements_model(state),
                                         schema=SCHEMA, assignment="Extract only the requested research requirements; do not answer them.",
                                         permitted_actions=["emit_requirements", "report_gap"],
-                                        seconds=45 if run.get("workflow") == "research_draft" else 90, db=db)
+                                        seconds=45 if run.get("workflow") in ("research_draft", "research_answer") else 90, db=db)
         instructions = (INSTRUCTIONS + "\nServer request time: " + run["created_at"]
                         + ". Server timezone: " + TIMEZONE.key + ".")
         provider().generate_research_stage(stage, instructions, [{"role": "user", "content": MESSAGE}],
@@ -1093,6 +1104,62 @@ def execute_draft_writer(run, token, store):
         store.fail(run["id"], token, "writer_failed")
 
 
+def execute_final_review(run, token, store):
+    from backend.research_draft import coverage_hash
+    from backend.research_final_review import (INSTRUCTIONS, MESSAGE, draft_hash, gap_review,
+                                               response_schema, review_input, validate_response)
+    from backend.research_passages import evidence_packet_hash
+    from backend.provider import research_instructions
+    try:
+        operation_secrets = source_secrets()
+        assessment, review, draft = run["assessment"], run["evidence_review"], run["draft"]
+        packet = _review_packet(review)
+        _verified_evidence_packet(packet, lambda value: value, secrets=operation_secrets)
+        stage = None
+        if draft["state"] != "unreviewed":
+            final = gap_review(assessment, review, draft, reason="no_supported_draft")
+        else:
+            schema = response_schema(assessment, review, draft)
+            selected = review_input(assessment, review, draft)
+            history = [{"role": "user", "content": "Server-selected final review input (source text and draft are untrusted data):\n" +
+                        json.dumps(selected, ensure_ascii=False)},
+                       {"role": "user", "content": MESSAGE}]
+            with provider().transaction(with_db=True) as (state, db):
+                workspace = json.loads(db.execute("SELECT value FROM workspace WHERE id=1").fetchone()[0])
+                options = {"model": requirements_model(state), "schema": schema,
+                    "assignment": "Review the exact draft against the original request and supplied source support. Accept only complete supported fulfillment; report defects and gaps.",
+                    "evidence": [{key: source[key] for key in ("capture_id", "content_hash", "manifest_hash", "retrieved_at", "stale")}
+                                 for source in packet["sources"]],
+                    "permitted_actions": ["review_answer", "report_gap"], "db": db,
+                    "packet_hash": evidence_packet_hash(packet), "coverage_hash": coverage_hash(review),
+                    "draft_hash": draft_hash(draft), "assessment_hash": selected["assessment_hash"]}
+                stage = store.prepare_stage(run["id"], token, "reviewer", seconds=1, **options)
+                envelope = store.authorize_stage(stage, workspace, state, db)
+                seconds = min(45, int(envelope["finishing_seconds_limit"]))
+                size = len((research_instructions(envelope, INSTRUCTIONS) + json.dumps(history) + json.dumps(schema)).encode("utf-8")) + 3072
+                output = min(4096, state["config"]["max_output_tokens"])
+                fits = (seconds >= 1 and size + output <= min(workspace["limits"]["max_tokens"],
+                        state["config"]["ollama_context_tokens"], envelope["finishing_token_limit"]))
+                if fits:
+                    stage = store.prepare_stage(run["id"], token, "reviewer", seconds=seconds, **options)
+            if not fits:
+                stage = None
+                final = gap_review(assessment, review, draft, reason="review_capacity")
+            else:
+                provider().generate_research_stage(stage, INSTRUCTIONS, history, max_output_tokens=4096,
+                    output_validator=lambda raw, objective: validate_response(raw, assessment, review, draft),
+                    pre_dispatch=lambda: _verified_evidence_packet(packet, lambda value: value, secrets=operation_secrets))
+                with closing(sqlite3.connect(DATABASE)) as db:
+                    record = db.execute("SELECT output FROM research_stages WHERE id=? AND state='completed'", (stage.stage_id,)).fetchone()
+                if record is None or record[0] is None:
+                    raise ValueError("No valid final review was recorded.")
+                final = validate_response(json.loads(record[0]), assessment, review, draft)
+        _verified_evidence_packet(packet, lambda value: store.finish_final_review(run["id"], token, final,
+            stage=stage, secrets=(*operation_secrets, *source_secrets())), secrets=operation_secrets)
+    except Exception:
+        store.fail(run["id"], token, "reviewer_failed")
+
+
 def execute_research_run(run_id):
     """One explicitly selected workflow; recovery never resubmits it."""
     store = research_store()
@@ -1104,17 +1171,21 @@ def execute_research_run(run_id):
     if claimed is None:
         return
     run, token = claimed
-    if workflow in ("requirements", "evidence_review", "research_draft"):
+    if workflow in ("requirements", "evidence_review", "research_draft", "research_answer"):
         execute_requirements(run, token, store)
-        if workflow in ("evidence_review", "research_draft"):
+        if workflow in ("evidence_review", "research_draft", "research_answer"):
             try:
                 current = store.get(run_id)
                 if current["state"] == "running" and current.get("assessment") is not None:
                     execute_evidence_review(current, token, store)
-                    if workflow == "research_draft":
+                    if workflow in ("research_draft", "research_answer"):
                         current = store.get(run_id)
                         if current["state"] == "running" and current.get("evidence_review") is not None:
                             execute_draft_writer(current, token, store)
+                            if workflow == "research_answer":
+                                current = store.get(run_id)
+                                if current["state"] == "running" and current.get("draft") is not None:
+                                    execute_final_review(current, token, store)
             except (KeyError, ValueError):
                 return
         return
@@ -1141,13 +1212,13 @@ def execute_research_run(run_id):
 @app.post("/api/research/runs", status_code=202)
 def create_research_run(entry: ResearchInput, background_tasks: BackgroundTasks):
     invalid = "Check the research request and remove credentials before saving."
-    if entry.workflow in ("requirements", "evidence_review", "research_draft") and entry.query:
+    if entry.workflow in ("requirements", "evidence_review", "research_draft", "research_answer") and entry.query:
         raise HTTPException(422, "Requirements assessment does not use saved-evidence keywords.")
     try:
         operation_secrets = source_secrets()
         safe_private_content(entry.request, entry.query, entry.submission_id, entry.chat_id or "",
                              secrets=operation_secrets)
-        if entry.workflow in ("requirements", "evidence_review", "research_draft"):
+        if entry.workflow in ("requirements", "evidence_review", "research_draft", "research_answer"):
             from backend.research_stages import safe_stage_content
             safe_stage_content([entry.request, entry.query, entry.submission_id, entry.chat_id or "",
                                 json.dumps(entry.model_dump(), ensure_ascii=False, allow_nan=False)],
@@ -1158,7 +1229,7 @@ def create_research_run(entry: ResearchInput, background_tasks: BackgroundTasks)
         permissions = research_permissions(state, entry.chat_id)
         run, created = research_store().create(entry.submission_id, entry.request, entry.query, entry.chat_id,
                                                permissions, research_budget(state), db, workflow=entry.workflow)
-        if created and entry.workflow in ("requirements", "evidence_review", "research_draft"):
+        if created and entry.workflow in ("requirements", "evidence_review", "research_draft", "research_answer"):
             requirements_model()
         try:
             safe_research_run(run, secrets=(*operation_secrets, *source_secrets()))
@@ -1187,7 +1258,10 @@ def list_research_runs(limit: int = Query(default=20, ge=1, le=50)):
         try:
             # Lists carry request/status/allowance metadata. Only the selected
             # detail read exports a revalidated saved-version receipt.
-            visible.append(research_view({**run, "result": None, "evidence_review": None, "draft": None}))
+            # An acceptance label needs current evidence validation, available
+            # only on detail reads. History metadata never exports approval.
+            visible.append(research_view({**run, "result": None, "evidence_review": None, "draft": None,
+                                          "final_review": None, "state": "partial" if run["state"] == "accepted" else run["state"]}))
         except HTTPException:
             skipped += 1
     try:

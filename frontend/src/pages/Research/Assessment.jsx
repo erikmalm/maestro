@@ -10,7 +10,7 @@ const constraintLabels = {
   forbid: "Excluded",
 };
 
-export default function Assessment({ assessment }) {
+export default function Assessment({ assessment, hasFinalReview = false }) {
   if (!assessment)
     return (
       <section
@@ -39,7 +39,9 @@ export default function Assessment({ assessment }) {
       <p>
         {assessment.decision === "clarify"
           ? "Clarification is needed before dependent research can begin."
-          : "Requested scope recorded. No reviewed answer has been produced."}
+          : hasFinalReview
+            ? "Requested scope recorded. The final review outcome is shown below."
+            : "Requested scope recorded. No reviewed answer has been produced."}
       </p>
       {assessment.clarifications.length > 0 && (
         <section

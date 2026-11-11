@@ -164,18 +164,18 @@ Measure requirement coverage, supported claims, freshness violations, incorrect 
 
 ## Current implementation and target gaps
 
-Main `db367b1` includes the archive/Evidence foundation, local candidates (#22), durable runs (#23), owned stages/shared budgets (#37), requirements/clarification (#24) and saved-evidence review (#25/PR #49). This branch adds the smaller #26 cited unreviewed draft; #27 final review is next. Automatic calculations are deferred to [#52](https://github.com/erikmalm/maestro/issues/52). The 2026-11-06 scope reset supersedes [PR #50](https://github.com/erikmalm/maestro/pull/50) while preserving its branch and saved data. Hosted acquisition and broader storage/accounting remain separate. Validation is recorded in the development plan; no personal storage migration or deployment is implied.
+Main `db367b1` includes the archive/Evidence foundation, candidates, owned runs/stages, requirements and saved-evidence review (#22–25/#37). On the smaller #26/PR #53, this branch adds #27 final review. Automatic calculations remain [#52](https://github.com/erikmalm/maestro/issues/52). Hosted acquisition and broader storage/accounting remain separate. Validation and real-model limitations are recorded in the development plan; no personal storage migration or deployment is implied.
 
 | Area | Implemented foundation | Target addition |
 | --- | --- | --- |
-| Coordination | Ordinary chat can select the orchestrator model; explicit Research runs assess requirements and saved evidence; this branch adds cited unreviewed drafting. | Final review (#27), deferred calculations and later automatic chat routing. |
+| Coordination | Ordinary chat can select the orchestrator model; explicit Research assesses requirements/evidence, drafts and records final-review findings in this branch. | Bounded continuation, deferred calculations and automatic chat routing. |
 | Retrieval and acquisition | One hosted-search round in ordinary chat; verified local candidates and bounded passage selection in explicit Research. | Targeted acquisition for recorded gaps; ordinary-chat archive capture/reuse remains unwired. |
 | Storage | Immutable captures, private catalogue/query records, durable run/assessment records, configuration/ownership and pinned reads. | Complete-content/capacity/accounting work (#36/#20), container archive setup and later observations. |
-| Freshness and verification | Pin/eligibility/credential checks plus a conservative per-requirement temporal policy; model reasons retain semantic limitations. | Independently verified current evidence, richer best-before policy (#32), writing and final claim support review. |
-| Inspection | Evidence metadata/text browser and Research requirements/coverage with shared pinned passages; this branch displays cited unreviewed drafts and gaps. Private memory stays separate. | Searchable Evidence controls (#43) and provenance graph (#34). |
-| Execution | One generation slot and cumulative allowance across requirements, saved-evidence review and this branch's writer, with durable cancellation/restart fences. | Reviewed answers, general task execution and specialist delegation. |
+| Freshness and verification | Pin/eligibility/credential checks, conservative temporal policy and bounded semantic draft review with explicit findings. | Independently verified current evidence, richer best-before policy (#32) and measured review quality. |
+| Inspection | Evidence browser and Research requirements/coverage, drafts, final-review findings and currently available reviewed answers. Private memory stays separate. | Searchable Evidence controls (#43) and provenance graph (#34). |
+| Execution | One generation slot and cumulative allowance through requirements, evidence, writing and final review, with cancellation/restart fences. | General task execution and specialist delegation. |
 
-The following sections distinguish merged foundations from this branch's #26 extension. The [storage design](SEARCH_CONTEXT_STORAGE.md#local-candidate-lookup-22) also labels older draft cache/replay behavior, which is not a prerequisite to import.
+The following sections distinguish merged foundations from the #26/#27 extensions. The [storage design](SEARCH_CONTEXT_STORAGE.md#local-candidate-lookup-22) also labels older draft cache/replay behavior, which is not a prerequisite to import.
 
 ### Durable research preview (#23)
 
@@ -244,6 +244,16 @@ For example, a passage stating Acme FY2025 revenue was USD 42 million can suppor
 The result is explicitly an **unreviewed draft**, including when every evidence item is covered. Structure, owned packet identity, exact references and lifecycle checks do not prove that a claim follows from its citation or that a publisher is correct. #27 adds the next explicit gate: deterministic reference/provenance checks plus bounded semantic review against the original request, facts and interpretation. A rejected, unavailable or unreviewed result must not become approved because its allowance is exhausted.
 
 The writer inherits current source eligibility/credentials, originating privacy, cancellation/deletion and restart barriers. Reopening must retain the source-version checks and withhold content whose evidence is no longer available. Existing evidence-only and requirements-only records remain compatible until the #31 caller/migration gates are met; no saved sources or private memory are retired as part of this increment.
+
+### Final answer review (#27)
+
+The explicit `research_answer` workflow extends #26 with one sequential reviewer through the same Provider, owned stages and four-call/120-second cumulative allowance. Existing `research_draft` callers retain their unreviewed terminal artifact. No new agent, database, provider client, calculation execution, rewrite or acquisition loop is introduced.
+
+Before inference and publication, code revalidates canonical requirements, coverage, draft and exact saved passages. The reviewer stage captures the assessment, packet, coverage and draft hashes; publication requires those identities, exact source pins, matching schema and the completed owned response. The writer artifact stays immutable and `unreviewed`; acceptance is a separate bound record. Model findings cover prose entailment, figures, dates/periods, units/currencies, interpretation, contradictions and all original request restrictions, including requirements omitted by extraction.
+
+Canonical outcomes are `accepted`, `writing_defect`, `evidence_gap`, `partial` or `unverifiable`, with bounded overall/per-item reasons. Full acceptance requires every item accepted; a draft gap or non-covered evidence item cannot be approved even by a positive model response. Calculation limitations remain incomplete. Invalid output is withheld with actual usage settled. Capacity/no-supported-draft outcomes are server-authored `basis: not_run`, always unverifiable; no exhausted allowance can approve a draft.
+
+Current source/configuration/credential, cancellation, deletion, deadline and restart barriers apply through reviewer dispatch, settlement, publication and readback. Uncertain completion keeps its reservation and is never retried automatically. Detail reads withdraw earlier acceptance when evidence becomes unavailable without changing historical records; metadata lists omit review content and unverified acceptance. **Reviewed answer** is displayed only for a currently available semantically accepted result. These checks establish recorded support and ownership, not independent factual truth. Seeded-error model trials report false acceptance, false rejection and invalid output separately from deterministic fixture tests.
 
 ## Implemented boundaries
 
