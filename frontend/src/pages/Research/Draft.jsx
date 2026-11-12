@@ -17,8 +17,44 @@ const coverageLabels = {
   conflicting: "Conflicting",
   unavailable: "Unavailable",
 };
+const supportAvailable = (support, passages, sources) => {
+  const passage = passages.get(support.passage_id);
+  return (
+    sources.has(support.source_id) &&
+    passage?.source_id === support.source_id &&
+    support.quote &&
+    passage.text.includes(support.quote)
+  );
+};
 
-export default function Draft({ draft, assessment, review }) {
+export function draftSourcesAvailable(draft, review) {
+  const sources = new Map(
+    (review?.sources || []).map((source) => [source.id, source]),
+  );
+  const passages = new Map(
+    (review?.passages || []).map((passage) => [passage.id, passage]),
+  );
+  return Boolean(
+    draft?.state === "unreviewed" &&
+    draft.items?.length &&
+    draft.items.every(
+      (item) =>
+        item.kind !== "gap" &&
+        item.supports?.length &&
+        item.supports.every((support) =>
+          supportAvailable(support, passages, sources),
+        ),
+    ),
+  );
+}
+
+export default function Draft({
+  draft,
+  assessment,
+  review,
+  accepted = false,
+  reviewed = false,
+}) {
   const subjects = new Map(
     (assessment?.subjects || []).map((s) => [s.id, s.name]),
   );
@@ -31,26 +67,32 @@ export default function Draft({ draft, assessment, review }) {
   const passages = new Map(
     (review?.passages || []).map((passage) => [passage.id, passage]),
   );
-  const available = (support) => {
-    const passage = passages.get(support.passage_id);
-    return (
-      sources.has(support.source_id) &&
-      passage?.source_id === support.source_id &&
-      support.quote &&
-      passage.text.includes(support.quote)
-    );
-  };
   return (
-    <section className="research-section" aria-label="Research draft">
+    <section
+      className="research-section"
+      aria-label={accepted ? "Reviewed answer" : "Research draft"}
+    >
       <h3>
-        {draft.state === "unreviewed"
-          ? "Unreviewed draft"
-          : "Draft unavailable"}
+        {accepted
+          ? "Reviewed answer"
+          : draft.state === "unreviewed"
+            ? "Unreviewed draft"
+            : "Draft unavailable"}
       </h3>
       <p>
-        <strong>Not finally reviewed.</strong>{" "}
-        {reasonMessages[draft.reason] ||
-          "Draft availability could not be established."}
+        {accepted ? (
+          "Accepted by the recorded review against your request and the supplied saved evidence."
+        ) : reviewed ? (
+          <strong>
+            Not accepted as a complete answer. Review findings remain below.
+          </strong>
+        ) : (
+          <>
+            <strong>Not finally reviewed.</strong>{" "}
+            {reasonMessages[draft.reason] ||
+              "Draft availability could not be established."}
+          </>
+        )}
       </p>
       {review?.checked_at && (
         <p className="form-note">
@@ -64,7 +106,9 @@ export default function Draft({ draft, assessment, review }) {
             item.kind !== "gap" &&
             (draft.state !== "unreviewed" ||
               !supports.length ||
-              !supports.every(available));
+              !supports.every((support) =>
+                supportAvailable(support, passages, sources),
+              ));
           const proseUnavailable =
             item.kind === "gap" &&
             (item.gap_reason === "insufficient_evidence" ||

@@ -146,6 +146,7 @@ export default function EvidenceReview({
   review,
   assessment,
   hasDraft = false,
+  hasFinalReview = false,
 }) {
   const requirements = new Map(
     (assessment?.items || []).map((item, index) => [
@@ -178,9 +179,11 @@ export default function EvidenceReview({
       <h3>Saved-evidence review</h3>
       <p>
         Evidence was assessed against the requested items.{" "}
-        {hasDraft
-          ? "Draft availability is shown above. Final review has not run."
-          : "No answer has been written or finally reviewed."}
+        {hasFinalReview
+          ? "Draft and final review availability are shown above."
+          : hasDraft
+            ? "Draft availability is shown above. Final review has not run."
+            : "No answer has been written or finally reviewed."}
       </p>
       <p className="form-note">
         Assessment recorded: {date(review.checked_at)}
