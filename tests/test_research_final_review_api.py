@@ -91,6 +91,45 @@ class ResearchFinalReviewApiTests(unittest.TestCase):
         self.assertTrue(all("tools" not in call[2] for call in self.fixture.fixture.fixture.chats()))
         self.assert_usage(run)
 
+    def test_slow_requirements_preserve_finishing_time_for_evidence_and_answer(self):
+        self.capture()
+        clock = {"now": None}
+        observed = []
+
+        def now():
+            return clock["now"] if clock["now"] is not None else datetime.now().timestamp()
+
+        def inspect(review, selected):
+            run_id = self.fixture.current_id()
+            if not review:
+                started = self.sql("SELECT updated_at FROM research_stages WHERE run_id=? AND kind='requirements'",
+                                   (run_id,))[0][0]
+                # The call itself consumes forty seconds and completes within
+                # its forty-five-second stage allowance.
+                clock["now"] = datetime.fromisoformat(started).timestamp() + 40
+            else:
+                seconds = json.loads(self.sql("SELECT spec FROM research_stages WHERE run_id=? AND kind='evidence_review'",
+                                              (run_id,))[0][0])["seconds"]
+                holds = json.loads(self.sql("SELECT held FROM research_finishing WHERE run_id=?", (run_id,))[0][0])
+                observed.append((seconds, holds))
+
+        self.fixture.fixture.chat_hook = inspect
+        with (patch.object(backend.ResearchStore, "clock", side_effect=now),
+              patch.object(backend, "datetime", wraps=datetime) as server_datetime):
+            server_datetime.now.side_effect = lambda zone=None: datetime.fromtimestamp(now(), zone)
+            run = self.run_now()
+        self.assertEqual(run["state"], "accepted")
+        self.assertEqual(len(observed), 1)
+        seconds, holds = observed[0]
+        self.assertGreater(seconds, 0)
+        self.assertLessEqual(seconds, 40)
+        self.assertEqual(set(holds), {"writer", "reviewer"})
+        self.assertTrue(all(hold["seconds"] == 20 for hold in holds.values()))
+        self.assertGreaterEqual(run["budget"]["consumed"]["seconds"], 40)
+        self.assertEqual(run["budget"]["total"]["seconds"], 120)
+        self.assertEqual(run["budget"]["total"]["model_calls"], 4)
+        self.assert_usage(run)
+
     def test_semantic_writing_and_evidence_findings_prevent_full_acceptance(self):
         for outcome in ("writing_defect", "evidence_gap", "partial", "unverifiable"):
             with self.subTest(outcome=outcome), self.isolated_case() as case:

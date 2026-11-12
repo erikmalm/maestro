@@ -994,7 +994,7 @@ def execute_evidence_review(run, token, store):
                        {"role": "user", "content": MESSAGE}]
             with provider().transaction(with_db=True) as (state, db):
                 workspace = json.loads(db.execute("SELECT value FROM workspace WHERE id=1").fetchone()[0])
-                if run.get("workflow") == "research_draft":
+                if run.get("workflow") in ("research_draft", "research_answer"):
                     current = store._public(db, store._row(db, run["id"]))
                     remaining = (datetime.fromisoformat(current["budget"]["deadline"]).timestamp()
                                  - datetime.now(TIMEZONE).timestamp() - current["budget"]["reserved"]["seconds"])
