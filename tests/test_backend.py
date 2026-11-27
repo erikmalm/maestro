@@ -72,11 +72,17 @@ class WorkspaceTests(unittest.TestCase):
             self.assertEqual(generate.call_count, 1)
 
     def test_non_ascii_session_and_csrf_tokens_are_rejected(self):
-        result = self.client.get("/api/workspace", headers=[(b"cookie", b"maestro_session=caf\xe9")])
+        result = self.client.get("/api/workspace", headers=[(b"cookie", backend.SESSION_COOKIE.encode("ascii") + b"=caf\xe9")])
         self.assertEqual(result.status_code, 401)
         result = self.client.post("/api/tasks", json={"title": "Synthetic task"},
                                   headers=[(b"x-maestro-csrf", b"caf\xe9")])
         self.assertEqual(result.status_code, 403)
+
+    def test_legacy_shared_cookie_cannot_authorize_a_port_scoped_session(self):
+        anonymous = TestClient(backend.app)
+        self.addCleanup(anonymous.close)
+        result = anonymous.get("/api/workspace", headers={"Cookie": f"maestro_session={backend.SESSION}"})
+        self.assertEqual(result.status_code, 401)
 
     def test_request_size_uses_actual_bytes_without_trusting_content_length(self):
         before = self.workspace()

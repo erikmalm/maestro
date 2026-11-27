@@ -12,6 +12,7 @@ import tempfile
 import time
 import unittest
 from urllib.error import HTTPError, URLError
+from urllib.parse import urlsplit
 from urllib.request import HTTPCookieProcessor, ProxyHandler, Request, build_opener
 import uuid
 
@@ -171,6 +172,79 @@ class NativeServerTests(unittest.TestCase):
                 second_health = self.request(second, second_base + "/health")
                 self.assertNotEqual(first_health["workspace_id"], second_health["workspace_id"])
                 self.assertNotEqual(first_health["launch_id"], second_health["launch_id"])
+
+    def test_parallel_previews_keep_shared_browser_sessions_and_csrf_isolated(self):
+        jar = CookieJar()
+        browser = build_opener(ProxyHandler({}), HTTPCookieProcessor(jar))
+        with self.running() as (first_base, _, _):
+            with self.running() as (second_base, _, _):
+                vite_origin = "http://127.0.0.1:5173"
+                vite_headers = {"Origin": vite_origin, "Host": "127.0.0.1:5173"}
+                first_session = self.request(browser, first_base + "/api/session", headers=vite_headers)
+                second_session = self.request(browser, second_base + "/api/session", headers={"Origin": second_base})
+                # One real browser shares cookies across ports. Initializing the
+                # second preview must leave the first authenticated.
+                for base, session, title in (
+                    (first_base, first_session, "First native preview task"),
+                    (second_base, second_session, "Second native preview task"),
+                ):
+                    self.assertEqual(self.request(browser, base + "/api/workspace")["tasks"], [])
+                    created = self.request(browser, base + "/api/tasks", method="POST",
+                        headers={"Origin": base, "Content-Type": "application/json", "X-Maestro-CSRF": session["csrf"]},
+                        body=json.dumps({"title": title}).encode())
+                    self.assertEqual([task["title"] for task in created["tasks"]], [title])
+
+                first_name = f"maestro_session_{urlsplit(first_base).port}"
+                second_name = f"maestro_session_{urlsplit(second_base).port}"
+                self.assertEqual({cookie.name for cookie in jar}, {first_name, second_name})
+                self.request(browser, first_base + "/api/session", headers=vite_headers)
+                self.assertEqual(len(self.request(browser, first_base + "/api/workspace", headers=vite_headers)["tasks"]), 1)
+                self.assertEqual(len(self.request(browser, second_base + "/api/workspace")["tasks"]), 1)
+
+                with self.assertRaises(HTTPError) as foreign_csrf:
+                    self.request(browser, first_base + "/api/tasks", method="POST",
+                        headers={"Origin": first_base, "Content-Type": "application/json", "X-Maestro-CSRF": second_session["csrf"]},
+                        body=b'{"title":"Foreign CSRF must fail"}')
+                self.assertEqual(foreign_csrf.exception.code, 403)
+                foreign_csrf.exception.close()
+                foreign_jar = CookieJar()
+                foreign_jar.set_cookie(next(cookie for cookie in jar if cookie.name == second_name))
+                foreign_browser = build_opener(ProxyHandler({}), HTTPCookieProcessor(foreign_jar))
+                with self.assertRaises(HTTPError) as foreign_cookie:
+                    self.request(foreign_browser, first_base + "/api/workspace")
+                self.assertEqual(foreign_cookie.exception.code, 401)
+                foreign_cookie.exception.close()
+
+    def test_same_port_restart_rotates_session_without_invalidating_another_preview(self):
+        jar = CookieJar()
+        browser = build_opener(ProxyHandler({}), HTTPCookieProcessor(jar))
+        with self.running() as (other_base, _, _):
+            self.request(browser, other_base + "/api/session")
+            with self.running() as (original_base, _, _):
+                old_session = self.request(browser, original_base + "/api/session")
+                port = urlsplit(original_base).port
+                old_cookie_values = {cookie.name: cookie.value for cookie in jar}
+            with self.running(("--port", str(port))) as (restarted_base, _, _):
+                self.assertEqual(restarted_base, original_base)
+                with self.assertRaises(HTTPError) as old_cookie:
+                    self.request(browser, restarted_base + "/api/workspace")
+                self.assertEqual(old_cookie.exception.code, 401)
+                old_cookie.exception.close()
+                fresh_session = self.request(browser, restarted_base + "/api/session")
+                self.assertEqual(self.request(browser, restarted_base + "/api/workspace")["tasks"], [])
+                self.assertEqual(self.request(browser, other_base + "/api/workspace")["tasks"], [])
+                name = f"maestro_session_{port}"
+                self.assertNotEqual(next(cookie.value for cookie in jar if cookie.name == name), old_cookie_values[name])
+                with self.assertRaises(HTTPError) as old_csrf:
+                    self.request(browser, restarted_base + "/api/tasks", method="POST",
+                        headers={"Origin": restarted_base, "Content-Type": "application/json", "X-Maestro-CSRF": old_session["csrf"]},
+                        body=b'{"title":"Old CSRF must fail"}')
+                self.assertEqual(old_csrf.exception.code, 403)
+                old_csrf.exception.close()
+                created = self.request(browser, restarted_base + "/api/tasks", method="POST",
+                    headers={"Origin": restarted_base, "Content-Type": "application/json", "X-Maestro-CSRF": fresh_session["csrf"]},
+                    body=b'{"title":"Fresh restarted preview task"}')
+                self.assertEqual(created["tasks"][0]["title"], "Fresh restarted preview task")
 
     def test_explicit_port_overrides_invalid_environment_default(self):
         with self.running(("--port", "0"), MAESTRO_PORT="invalid") as (base, opener, _):
