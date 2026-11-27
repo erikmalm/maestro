@@ -1,18 +1,22 @@
 """No-inference checks for the opt-in evidence runner and synthetic corpus."""
 from copy import deepcopy
 import hashlib
+import json
 import os
 from pathlib import Path
 import subprocess
+import sqlite3
 import sys
 import tempfile
 import unittest
 
 from backend.research_draft import gap_draft, validate_response
 from backend.research_evidence import validate_review
+from backend import research_final_review as final_review
 from backend.research_passages import select_packet
 from backend.research_requirements import validate_assessment
-from scripts.check_research_evidence import check_qualifiers, check_run, expected_items, load_cases, source_text
+from backend.research_stages import initialize
+from scripts.check_research_evidence import check_qualifiers, check_run, expected_items, load_cases, source_text, stage_receipts
 
 
 CHECKED = "2026-10-23T12:00:00+00:00"
@@ -76,6 +80,39 @@ def canonical(case, *, current_location="freshness"):
 class ResearchEvidenceQualityTests(unittest.TestCase):
     def setUp(self):
         self.cases = {case["id"]: case for case in load_cases()}
+
+    def test_stage_receipts_export_only_allowlisted_timing_and_usage_metadata(self):
+        secret = "synthetic-private-stage-text-must-not-be-exported"
+        with tempfile.TemporaryDirectory(prefix="maestro-stage-receipts-") as temporary:
+            database = Path(temporary) / "workspace.sqlite3"
+            db = sqlite3.connect(database)
+            try:
+                initialize(db)
+                for identity, run_id, request_id in (("a", "selected-run", "selected-request"),
+                                                      ("b", "other-run", "other-request"),
+                                                      ("c", "selected-run", None)):
+                    db.execute("INSERT INTO research_stages VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (
+                        identity, run_id, identity, "writer", "failed" if request_id else "prepared", request_id,
+                        json.dumps({"seconds": 45, "assignment": secret, "config": {"key": secret}}),
+                        secret, secret, json.dumps({"tokens": 48 if request_id else 0,
+                                                   "model_calls": int(request_id is not None)}),
+                        "{}", secret, CHECKED, CHECKED))
+                db.commit()
+            finally:
+                db.close()
+            receipts = stage_receipts(database, "selected-run", [{"id": "selected-request",
+                "input_tokens": 41, "output_tokens": 7, "config": secret, "reply": secret}])
+            self.assertEqual(receipts, [
+                {"kind": "writer", "state": "failed", "seconds_limit": 45, "consumed_tokens": 48,
+                 "consumed_model_calls": 1, "created_at": CHECKED, "updated_at": CHECKED,
+                 "input_tokens": 41, "output_tokens": 7},
+                {"kind": "writer", "state": "prepared", "seconds_limit": 45, "consumed_tokens": 0,
+                 "consumed_model_calls": 0, "created_at": CHECKED, "updated_at": CHECKED,
+                 "input_tokens": None, "output_tokens": None}])
+            self.assertNotIn(secret, json.dumps(receipts))
+            self.assertNotIn("request_id", json.dumps(receipts))
+            self.assertTrue(all(type(value) in (str, int, float, type(None))
+                                for receipt in receipts for value in receipt.values()))
 
     def test_help_and_invalid_endpoint_never_touch_ambient_private_directory(self):
         root = Path(__file__).resolve().parents[1]
@@ -230,6 +267,51 @@ class ResearchEvidenceQualityTests(unittest.TestCase):
                     changed["draft"]["items"][0]["text"] = "An invented supported result."
                 with self.assertRaisesRegex(AssertionError, "noncanonical draft"):
                     check_run(case, changed, sources, loader, "research_draft")
+
+    def test_answer_corpus_requires_canonical_semantic_acceptance_and_four_owned_calls(self):
+        for case in self.cases.values():
+            with self.subTest(case=case["id"]):
+                run, sources, loader, _, _ = canonical(case)
+                assessment, review = run["assessment"], run["evidence_review"]
+                covered = [row for row in review["items"] if row["state"] == "covered"]
+                raw = {"version": 2, "items": {row["item_id"]: {
+                    "kind": "fact", "text": row["supports"][0]["quote"], "support_indexes": [0], "gap_reason": None}
+                    for row in covered}}
+                draft = validate_response(raw, assessment, review) if covered else gap_draft(assessment, review)
+                complete = len(covered) == len(review["items"])
+                if covered:
+                    final = final_review.validate_response({"version": 1,
+                        "outcome": "accepted" if complete else "partial", "reason": "Synthetic completion assessment.",
+                        "items": {row["item_id"]: {"outcome": "accepted" if row["state"] == "covered" else "evidence_gap",
+                                                    "reason": "Synthetic supported fact or mandatory evidence gap."}
+                                  for row in review["items"]}}, assessment, review, draft)
+                else:
+                    final = final_review.gap_review(assessment, review, draft, "no_supported_draft")
+                run.update(workflow="research_answer", state="accepted" if complete else "partial",
+                           draft=draft, final_review=final)
+                calls = 4 if covered else 2
+                run["budget"]["consumed"]["model_calls"] = calls
+                self.assertEqual(check_run(case, run, sources, loader, "research_answer"), calls)
+                for change in ("missing_review", "changed_binding", "hidden_call"):
+                    changed = deepcopy(run)
+                    if change == "missing_review":
+                        changed.pop("final_review")
+                    elif change == "changed_binding":
+                        changed["final_review"]["draft_hash"] = "f" * 64
+                    else:
+                        changed["budget"]["consumed"]["model_calls"] += 1
+                    with self.subTest(change=change), self.assertRaises(AssertionError):
+                        check_run(case, changed, sources, loader, "research_answer")
+                if complete:
+                    changed = deepcopy(run)
+                    changed["state"] = "partial"
+                    changed["final_review"] = final_review.gap_review(assessment, review, draft, "review_capacity")
+                    changed["budget"]["consumed"]["model_calls"] = 3
+                    with self.assertRaisesRegex(AssertionError, "production semantic review"):
+                        check_run(case, changed, sources, loader, "research_answer")
+                    changed.pop("final_review")
+                    with self.assertRaisesRegex(AssertionError, "unreviewed draft is not an answer"):
+                        check_run(case, changed, sources, loader, "research_answer")
 
 
 if __name__ == "__main__":

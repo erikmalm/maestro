@@ -170,7 +170,7 @@ def _held(db, run_id):
 
 
 def _finishing_holds(run, config, *, dispatch=None):
-    if run.get("workflow") == "research_draft":
+    if run.get("workflow") in ("research_draft", "research_answer"):
         budget = run["budget"]
         dispatch = dispatch or _amounts()
         spare = {name: max(0, budget["total"][name] - budget["consumed"][name]
@@ -200,7 +200,7 @@ def _change(run, amounts, multiplier):
     _remainder(run)
 
 
-def prepare(store, run_id, claim_token, kind, *, model, schema, assignment, evidence, permitted_actions, seconds, db=None, packet_hash=None, coverage_hash=None):
+def prepare(store, run_id, claim_token, kind, *, model, schema, assignment, evidence, permitted_actions, seconds, db=None, packet_hash=None, coverage_hash=None, draft_hash=None, assessment_hash=None):
     if kind not in KINDS:
         raise ValueError("Use a supported research stage.")
     _text(model, 200)
@@ -215,6 +215,10 @@ def prepare(store, run_id, claim_token, kind, *, model, schema, assignment, evid
         raise ValueError("Use an exact selected-evidence packet hash.")
     if coverage_hash is not None and (not isinstance(coverage_hash, str) or not re.fullmatch(r"[a-f0-9]{64}", coverage_hash)):
         raise ValueError("Use an exact saved-evidence coverage hash.")
+    if draft_hash is not None and (not isinstance(draft_hash, str) or not re.fullmatch(r"[a-f0-9]{64}", draft_hash)):
+        raise ValueError("Use an exact original-draft hash.")
+    if assessment_hash is not None and (not isinstance(assessment_hash, str) or not re.fullmatch(r"[a-f0-9]{64}", assessment_hash)):
+        raise ValueError("Use an exact original-requirements hash.")
     _encoded(schema, 8192)
     references = _result({"lookup_state": "ready", "search_limited": False, "skipped_count": 0,
                           "candidates": list(evidence), "summary": "Server-selected evidence references."})["candidates"]
@@ -249,6 +253,10 @@ def prepare(store, run_id, claim_token, kind, *, model, schema, assignment, evid
             spec["packet_hash"] = packet_hash
         if coverage_hash is not None:
             spec["coverage_hash"] = coverage_hash
+        if draft_hash is not None:
+            spec["draft_hash"] = draft_hash
+        if assessment_hash is not None:
+            spec["assessment_hash"] = assessment_hash
         encoded_spec = _encoded(spec, MAX_SPEC_BYTES)
         safe_stage_content([{"objective": run["request"], **spec}, encoded_spec], config)
         connection.execute("INSERT OR IGNORE INTO research_stage_scope VALUES(?,?,?)",
@@ -295,7 +303,7 @@ def authorize(store, stage, workspace, provider_state, db, *, reserved=False):
     held = _held(db, stage.run_id)
     finishing_slot = spec.get("finishing_slot", False) if reserved else row[2] in (("writer", "reviewer") if held is None else held)
     token_limit, seconds_limit = (FINISHING_TOKENS, FINISHING_SECONDS) if finishing_slot else (None, None)
-    if finishing_slot and run.get("workflow") == "research_draft":
+    if finishing_slot and run.get("workflow") in ("research_draft", "research_answer"):
         if reserved:
             assigned = json.loads(row[9])
             token_limit, seconds_limit = assigned["tokens"], assigned["seconds"]
@@ -334,13 +342,13 @@ def reserve(store, stage, workspace, provider_state, request_id, input_bound, ou
             _change(run, hold, 1)
     if row[2] in held:
         slot = held.pop(row[2])
-        if (run.get("workflow") != "research_draft"
+        if (run.get("workflow") not in ("research_draft", "research_answer")
                 and (input_bound + output_bound > slot["tokens"] or json.loads(row[5])["seconds"] > slot["seconds"])):
             raise ValueError("This finishing stage exceeds its saved finishing capacity.")
         _change(run, slot, -1)
         spec = json.loads(row[5])
         spec["finishing_slot"] = True
-        if run.get("workflow") == "research_draft":
+        if run.get("workflow") in ("research_draft", "research_answer"):
             # A failed preflight must restore this original protected slot,
             # rather than the larger capacity temporarily assigned to the call.
             spec["finishing_hold"] = slot

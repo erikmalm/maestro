@@ -2,16 +2,17 @@
 
 Each case gets a disposable private workspace and sibling archive. No existing
 workspace, configuration, credentials, memory or hosted search is used. A case
-is attempted once, with at most two local calls (three for drafts). Unknown completion
+is attempted once, with at most two local calls (three for drafts, four for reviewed answers). Unknown completion
 stops the entire run and requires operator recovery of the original server.
 """
 import argparse
-from contextlib import ExitStack
+from contextlib import ExitStack, closing
 from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
 import re
+import sqlite3
 import sys
 import tempfile
 from threading import Lock
@@ -33,6 +34,7 @@ from backend.memory import MemoryStore
 from backend.provider import DEFAULT, Provider, validate_ollama_url
 from backend.research_draft import validate_saved_draft
 from backend.research_evidence import validate_saved_review
+from backend.research_final_review import validate_saved_final_review
 from backend.research_passages import validate_packet
 from backend.research_requirements import validate_saved_assessment
 from backend.web_search import WebSearch
@@ -44,6 +46,23 @@ CORPUS = ROOT / "tests" / "fixtures" / "research_evidence_quality.json"
 def require(condition, message):
     if not condition:
         raise AssertionError(message)
+
+
+def stage_receipts(database, run_id, ledger):
+    """Read only timing/usage scalars; never load stage prompts or output."""
+    entries = {entry["id"]: entry for entry in ledger}
+    with closing(sqlite3.connect(Path(database).resolve().as_uri() + "?mode=ro", uri=True)) as db:
+        rows = db.execute("SELECT kind,state,json_extract(spec,'$.seconds'),"
+                          "json_extract(consumed,'$.tokens'),json_extract(consumed,'$.model_calls'),"
+                          "created_at,updated_at,request_id FROM research_stages "
+                          "WHERE run_id=? ORDER BY created_at,id", (run_id,)).fetchall()
+    result = []
+    fields = ("kind", "state", "seconds_limit", "consumed_tokens", "consumed_model_calls", "created_at", "updated_at")
+    for *metadata, request_id in rows:
+        entry = entries.get(request_id, {})
+        result.append({**dict(zip(fields, metadata)),
+                       "input_tokens": entry.get("input_tokens"), "output_tokens": entry.get("output_tokens")})
+    return result
 
 
 def source_text(source):
@@ -118,10 +137,11 @@ def check_qualifiers(case, assessment):
 
 def check_run(case, run, captured, loader, workflow="evidence_review"):
     """Typed/pin checks plus narrow semantic expectations for this versioned corpus."""
-    require(workflow in ("evidence_review", "research_draft") and run["workflow"] == workflow,
+    require(workflow in ("evidence_review", "research_draft", "research_answer") and run["workflow"] == workflow,
             "Unexpected research workflow")
-    require(run["state"] in (("draft", "partial") if workflow == "research_draft" else ("partial",)),
-            "Expected terminal evidence review or unreviewed draft")
+    states = {"evidence_review": ("partial",), "research_draft": ("draft", "partial"),
+              "research_answer": ("accepted", "partial")}
+    require(run["state"] in states[workflow], "Expected terminal evidence review, draft or reviewed answer")
     try:
         assessment = validate_saved_assessment(run.get("assessment"), case["request"])
         review = validate_saved_review(run.get("evidence_review"), assessment)
@@ -158,19 +178,36 @@ def check_run(case, run, captured, loader, workflow="evidence_review"):
             require(all(support["suitability"] != "suitable" and support["best_before"] is None for support in supports),
                     "Fresh origin verification was fabricated")
     calls = 2
-    if workflow == "research_draft":
+    if workflow in ("research_draft", "research_answer"):
         try:
             draft = validate_saved_draft(run.get("draft"), assessment, review)
         except (ValueError, KeyError, TypeError):
             raise AssertionError("Missing or noncanonical draft or accepted citation bindings") from None
         supported = any(item["state"] == "covered" for item in review["items"])
-        require(run["state"] == ("draft" if supported else "partial"), "Unexpected draft completion state")
+        if workflow == "research_draft":
+            require(run["state"] == ("draft" if supported else "partial"), "Unexpected draft completion state")
         require((draft["state"], draft["reason"]) == (("unreviewed", "draft_requires_review") if supported
                 else ("unavailable", "no_supported_facts")), "Expected unreviewed prose or a no-support gap")
         for item in draft["items"]:
             require(item["kind"] in (("fact", "interpretation") if item["coverage_state"] == "covered" else ("gap",)),
                     "Expected supported corpus prose or an explicit evidence gap")
         calls += int(supported)
+        if workflow == "research_answer":
+            try:
+                final = validate_saved_final_review(run.get("final_review"), assessment, review, draft)
+            except (ValueError, KeyError, TypeError):
+                raise AssertionError("Missing or noncanonical final review; an unreviewed draft is not an answer") from None
+            complete = all(item["state"] == "covered" for item in review["items"])
+            if supported:
+                require(final["basis"] == "semantic", "Expected the production semantic review stage")
+                require((final["outcome"] == "accepted") == complete,
+                        "Expected acceptance only for complete supported corpus answers")
+            else:
+                require(final["basis"] == "not_run" and final["reason_code"] == "no_supported_draft"
+                        and final["outcome"] == "unverifiable", "Expected an explicit no-supported-draft review gap")
+            require(run["state"] == ("accepted" if final["outcome"] == "accepted" else "partial"),
+                    "Final review and terminal answer state disagree")
+            calls += int(supported)
     consumed = run["budget"]["consumed"]
     require(consumed["model_calls"] == calls, "Unexpected local call count for the populated fixture")
     require(consumed["hosted_searches"] == 0, "Unexpected hosted usage")
@@ -182,8 +219,8 @@ def check_run(case, run, captured, loader, workflow="evidence_review"):
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--model", required=True, help="Explicit installed local model ID; no ambient model selection")
-    parser.add_argument("--workflow", choices=("evidence_review", "research_draft"), default="evidence_review",
-                        help="Draft checks validate structure/citations; inspect reported prose separately")
+    parser.add_argument("--workflow", choices=("evidence_review", "research_draft", "research_answer"), default="evidence_review",
+                        help="Reviewed answers require the production review stage; inspect reported prose and findings separately")
     parser.add_argument("--base-url", default="http://127.0.0.1:11434")
     parser.add_argument("--context-tokens", type=int, default=16384)
     parser.add_argument("--output-tokens", type=int, default=1024)
@@ -213,7 +250,7 @@ def main(argv=None):
         cases = [case for case in cases if case["id"] in args.case_ids]
     original_sync, original_async = httpx.HTTPTransport.handle_request, httpx.AsyncHTTPTransport.handle_async_request
     active, lock = {"chats": 0}, Lock()
-    maximum_calls = 3 if args.workflow == "research_draft" else 2
+    maximum_calls = {"evidence_review": 2, "research_draft": 3, "research_answer": 4}[args.workflow]
 
     def allowed(request):
         require((request.url.scheme, request.url.host, request.url.port or 80) ==
@@ -286,12 +323,16 @@ def main(argv=None):
                     detail = client.get("/api/research/runs/" + response.json()["run"]["id"])
                     detail.raise_for_status()
                     run = detail.json()
+                    ledger = service.read_state()["ledger"]
                     result = {"case": case["id"], "state": run["state"], "seconds": round(time.monotonic() - started, 2),
                         "consumed": run["budget"]["consumed"], "reserved": run["budget"]["reserved"],
                         "network_chat_requests": active["chats"], "assessment": run.get("assessment"),
-                        "evidence_review": run.get("evidence_review"), "passed": False}
-                    if args.workflow == "research_draft":
+                        "evidence_review": run.get("evidence_review"), "passed": False,
+                        "stage_receipts": stage_receipts(database, run["id"], ledger)}
+                    if args.workflow in ("research_draft", "research_answer"):
                         result["draft"] = run.get("draft")
+                    if args.workflow == "research_answer":
+                        result["final_review"] = run.get("final_review")
                     try:
                         calls = check_run(case, run, captured, store.get_capture, args.workflow)
                         require(active["chats"] == calls, "Unexpected local inference request count")
@@ -299,15 +340,18 @@ def main(argv=None):
                     except AssertionError as error:
                         result["failure"] = str(error)
                     results.append(result)
-                    print(json.dumps({key: value for key, value in result.items() if key not in ("assessment", "evidence_review", "draft")}), flush=True)
+                    print(json.dumps({key: value for key, value in result.items() if key not in ("assessment", "evidence_review", "draft", "final_review")}), flush=True)
                     recovery_required = (any(run["budget"]["reserved"].values()) or
-                                         any(entry["status"] in ("reserved", "uncertain") for entry in service.read_state()["ledger"]))
+                                         any(entry["status"] in ("reserved", "uncertain") for entry in ledger))
             if recovery_required:
                 break
     report = {"model": args.model, "context_tokens": args.context_tokens, "output_tokens": args.output_tokens,
               "timezone": args.timezone, "workflow": args.workflow,
-              "validation_scope": "Canonical records, source pins, coverage, draft citation bindings and budgets; "
-                                  "draft prose meaning and figure fidelity require human inspection of the report.",
+              "reviewer_max_seconds": backend.FINAL_REVIEW_SECONDS if args.workflow == "research_answer" else None,
+              "maximum_calls_per_case": maximum_calls,
+              "validation_scope": "Canonical records, source pins, coverage, draft citation bindings, final-review bindings when requested, "
+                                  "finite corpus completion/acceptance expectations and shared budgets. "
+                                  "Inspect prose and review findings for meaning and figure fidelity; these fixtures do not establish general semantic accuracy or publisher factual correctness.",
               "results": results, "passed": len(results) == len(cases) and all(result["passed"] for result in results),
               "recovery_required": recovery_required}
     if args.report:

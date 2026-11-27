@@ -19,7 +19,7 @@ MAX_RESULT_BYTES = 32768
 MAX_PROVIDER_STATE_BYTES = 16 * 1024 ** 2
 MAX_EVENTS = 32
 ACTIVE = ("queued", "running")
-WORKFLOWS = ("lookup", "requirements", "evidence_review", "research_draft")
+WORKFLOWS = ("lookup", "requirements", "evidence_review", "research_draft", "research_answer")
 AMOUNTS = ("model_calls", "tokens", "seconds", "estimated_model_usd", "hosted_searches")
 EVENTS = {
     "submitted": "Local research preview submitted.",
@@ -38,6 +38,9 @@ EVENTS = {
     "writer_started": "Saved evidence assessed. Preparing an unreviewed draft.",
     "draft_recorded": "Unreviewed draft recorded. Final answer review has not run.",
     "draft_unavailable": "No draft was written. Evidence decisions and gaps remain recorded.",
+    "reviewer_started": "Checking the draft against the original request and exact saved evidence.",
+    "answer_accepted": "Final review accepted the answer against the request and supplied evidence.",
+    "answer_not_accepted": "Final review did not accept a complete answer. Findings and gaps remain recorded.",
     "requirements_started": "Assessing the research requirements with the local model.",
     "requirements_recorded": "Requirements recorded. Evidence assessment, writing and final review have not run.",
     "clarification_needed": "Clarification is needed before dependent research. No answer was produced.",
@@ -51,6 +54,7 @@ FAILURES = {
     "requirements_failed": "Requirements assessment did not produce an accepted result. No answer was produced.",
     "evidence_failed": "Saved-evidence assessment did not produce an accepted result. No answer was produced.",
     "writer_failed": "Draft writing did not produce a valid result. Earlier evidence decisions and actual usage are retained.",
+    "reviewer_failed": "Final review did not produce a valid result. The draft remains unreviewed and actual usage is retained.",
 }
 
 
@@ -231,6 +235,7 @@ class ResearchStore:
         result.setdefault("assessment", None)
         result.setdefault("evidence_review", None)
         result.setdefault("draft", None)
+        result.setdefault("final_review", None)
         if events:
             rows = db.execute("SELECT sequence,at,kind,summary FROM research_events WHERE run_id=? ORDER BY sequence LIMIT ?",
                               (row[0], MAX_EVENTS + 1)).fetchall()
@@ -305,7 +310,8 @@ class ResearchStore:
                 raise ValueError("Another request is active or its completion is unknown. Wait before starting research.")
             run_id, stamp = uuid.uuid4().hex, self.stamp()
             payload = {"request": request, "query": query, "permissions": captured, "budget": allowance,
-                       "result": None, "workflow": workflow, "assessment": None, "evidence_review": None, "draft": None}
+                       "result": None, "workflow": workflow, "assessment": None, "evidence_review": None, "draft": None,
+                       "final_review": None}
             connection.execute("INSERT INTO research_runs VALUES(?,?,?,?,?,?,?,?,?)",
                                (run_id, submission_id, fingerprint, chat_id, "queued", stamp, stamp, None, _encoded(payload)))
             self._event(connection, run_id, "submitted")
@@ -357,7 +363,7 @@ class ResearchStore:
         run["state"], run["updated_at"] = state, self.stamp()
         payload = {name: run[name] for name in ("request", "query", "permissions", "budget", "result")}
         payload.update(workflow=run.get("workflow", "lookup"), assessment=run.get("assessment"),
-                       evidence_review=run.get("evidence_review"), draft=run.get("draft"))
+                       evidence_review=run.get("evidence_review"), draft=run.get("draft"), final_review=run.get("final_review"))
         db.execute("UPDATE research_runs SET state=?,updated_at=?,claim_token=?,payload=? WHERE id=?",
                    (state, run["updated_at"], token, _encoded(payload), run["id"]))
 
@@ -392,7 +398,7 @@ class ResearchStore:
             token = uuid.uuid4().hex
             run["permissions"]["memory_derived"] |= self._chat_memory(db, run["chat_id"])
             self._save(db, run, "running", token=token)
-            if run.get("workflow") in ("requirements", "evidence_review", "research_draft"):
+            if run.get("workflow") in ("requirements", "evidence_review", "research_draft", "research_answer"):
                 self._event(db, run_id, "requirements_started")
             elif lookup:
                 self._event(db, run_id, "local_lookup_started")
@@ -435,8 +441,8 @@ class ResearchStore:
             if not self._chat_exists(db, run["chat_id"]):
                 self._purge(db, run_id)
                 return False
-            if reason in ("evidence_failed", "writer_failed"):
-                kind = "writer" if reason == "writer_failed" else "evidence_review"
+            if reason in ("evidence_failed", "writer_failed", "reviewer_failed"):
+                kind = {"writer_failed": "writer", "evidence_failed": "evidence_review", "reviewer_failed": "reviewer"}[reason]
                 db.execute("UPDATE research_stages SET output=NULL,state=CASE WHEN state IN ('completed','prepared') THEN 'failed' ELSE state END WHERE run_id=? AND kind=?", (run_id, kind))
             self._terminal(db, run, "failed", "failed", FAILURES[reason])
             return True
@@ -456,7 +462,7 @@ class ResearchStore:
             if not self._chat_exists(db, run["chat_id"]):
                 self._purge(db, run_id)
                 return False
-            if run.get("workflow") not in ("requirements", "evidence_review", "research_draft") or stage.run_id != run_id or stage.claim_token != token:
+            if run.get("workflow") not in ("requirements", "evidence_review", "research_draft", "research_answer") or stage.run_id != run_id or stage.claim_token != token:
                 raise ValueError("Use the owned requirements assessment.")
             record = _row(db, stage)
             if record[2] != "requirements" or record[3] != "completed" or record[10] is None:
@@ -476,7 +482,7 @@ class ResearchStore:
             if self.clock() >= deadline:
                 raise ValueError("Research requirements reached their deadline.")
             clarify = assessment["decision"] == "clarify"
-            if run.get("workflow") in ("evidence_review", "research_draft") and not clarify:
+            if run.get("workflow") in ("evidence_review", "research_draft", "research_answer") and not clarify:
                 self._save(db, run, "running", token=token)
                 self._event(db, run_id, "evidence_started")
                 return True
@@ -497,7 +503,7 @@ class ResearchStore:
             if not self._chat_exists(db, run["chat_id"]):
                 self._purge(db, run_id)
                 return False
-            if run.get("workflow") not in ("evidence_review", "research_draft") or run.get("assessment") is None:
+            if run.get("workflow") not in ("evidence_review", "research_draft", "research_answer") or run.get("assessment") is None:
                 raise ValueError("Use the owned saved-evidence assessment.")
             validate_saved_review(review, run["assessment"])
             workspace, provider_state = _states(db)
@@ -528,7 +534,7 @@ class ResearchStore:
             safe_stage_content([run, _encoded(run)], provider_state["config"], secrets=secrets)
             if self.clock() >= _date(run["budget"]["deadline"]).timestamp():
                 raise ValueError("The research deadline has passed.")
-            if run.get("workflow") == "research_draft":
+            if run.get("workflow") in ("research_draft", "research_answer"):
                 self._save(db, run, "running", token=token)
                 self._event(db, run_id, "writer_started")
                 return True
@@ -549,7 +555,7 @@ class ResearchStore:
             if not self._chat_exists(db, run["chat_id"]):
                 self._purge(db, run_id)
                 return False
-            if run.get("workflow") != "research_draft" or run.get("evidence_review") is None:
+            if run.get("workflow") not in ("research_draft", "research_answer") or run.get("evidence_review") is None:
                 raise ValueError("Use the owned research draft workflow.")
             assessment, review = run["assessment"], run["evidence_review"]
             validate_saved_draft(draft, assessment, review)
@@ -586,7 +592,70 @@ class ResearchStore:
             if self.clock() >= _date(run["budget"]["deadline"]).timestamp():
                 raise ValueError("The research deadline has passed.")
             written = draft["state"] == "unreviewed"
+            if run.get("workflow") == "research_answer":
+                self._save(db, run, "running", token=token)
+                self._event(db, run_id, "reviewer_started")
+                return True
             self._terminal(db, run, "draft" if written else "partial", "draft_recorded" if written else "draft_unavailable")
+            return True
+
+    def finish_final_review(self, run_id, token, final_review, *, stage=None, secrets=()):
+        """Accept only this owner's review of the exact original draft and evidence."""
+        from backend.research_draft import coverage_hash
+        from backend.research_final_review import (draft_hash, response_schema, validate_response,
+                                                  validate_saved_final_review)
+        from backend.research_passages import evidence_packet_hash
+        from backend.research_stages import ResearchStage, _row, _states, _hash, safe_stage_content
+        _identifier(run_id)
+        with self._transaction() as db:
+            row = self._row(db, run_id)
+            if row is None or row[4] != "running" or row[7] != token:
+                return False
+            run = self._public(db, row)
+            if not self._chat_exists(db, run["chat_id"]):
+                self._purge(db, run_id)
+                return False
+            if run.get("workflow") != "research_answer" or run.get("draft") is None:
+                raise ValueError("Use the owned final-review workflow.")
+            assessment, review, draft = run["assessment"], run["evidence_review"], run["draft"]
+            validate_saved_final_review(final_review, assessment, review, draft)
+            workspace, provider_state = _states(db)
+            scope = db.execute("SELECT config_hash,limits_hash FROM research_stage_scope WHERE run_id=?", (run_id,)).fetchone()
+            if scope != (_hash(provider_state["config"]), _hash(workspace["limits"])):
+                raise ValueError("Research model settings or parent limits changed.")
+            if stage is None:
+                if final_review["basis"] != "not_run" or final_review["reason_code"] not in ("no_supported_draft", "review_capacity"):
+                    raise ValueError("Acceptance requires an owned reviewer stage.")
+                if db.execute("SELECT 1 FROM research_stages WHERE run_id=? AND kind='reviewer' AND state IN ('reserved','uncertain','completed')", (run_id,)).fetchone():
+                    raise ValueError("A dispatched review cannot be replaced by a no-call outcome.")
+                db.execute("UPDATE research_stages SET state='failed',output=NULL WHERE run_id=? AND kind='reviewer' AND state='prepared'", (run_id,))
+            else:
+                if type(stage) is not ResearchStage or stage.run_id != run_id or stage.claim_token != token:
+                    raise ValueError("Use the owned final-review stage.")
+                record = _row(db, stage)
+                if record[2] != "reviewer" or record[3] != "completed" or record[10] is None:
+                    raise ValueError("A completed final-review stage is required.")
+                spec = json.loads(record[5])
+                packet = {key: review[key] for key in ("version", "offset_unit", "lookup", "selection", "sources", "passages")}
+                pins = [{key: source[key] for key in ("capture_id", "content_hash", "manifest_hash", "retrieved_at", "stale")}
+                        for source in packet["sources"]]
+                if (spec["model"] not in provider_state.get("models", [])
+                        or spec.get("packet_hash") != evidence_packet_hash(packet)
+                        or spec.get("coverage_hash") != coverage_hash(review) or spec.get("draft_hash") != draft_hash(draft)
+                        or spec.get("assessment_hash") != final_review["assessment_hash"]
+                        or spec["evidence"] != pins):
+                    raise ValueError("The reviewed draft or evidence differs from the owned stage.")
+                schema_identity = lambda value: json.dumps(value, sort_keys=True, ensure_ascii=False, allow_nan=False, separators=(",", ":"))
+                if (schema_identity(spec["schema"]) != schema_identity(response_schema(assessment, review, draft))
+                        or validate_response(json.loads(record[10]), assessment, review, draft) != final_review):
+                    raise ValueError("The final review differs from the owned reviewer response.")
+            run["final_review"] = final_review
+            safe_stage_content([run, _encoded(run)], provider_state["config"], secrets=secrets)
+            if self.clock() >= _date(run["budget"]["deadline"]).timestamp():
+                raise ValueError("The research deadline has passed.")
+            accepted = final_review["basis"] == "semantic" and final_review["outcome"] == "accepted"
+            self._terminal(db, run, "accepted" if accepted else "partial",
+                           "answer_accepted" if accepted else "answer_not_accepted")
             return True
 
     def cancel(self, run_id):
@@ -635,11 +704,11 @@ class ResearchStore:
             return 1
 
     def prepare_stage(self, run_id, claim_token, kind, *, model, schema, assignment, evidence=(),
-                      permitted_actions=(), seconds=5, db=None, packet_hash=None, coverage_hash=None):
+                      permitted_actions=(), seconds=5, db=None, packet_hash=None, coverage_hash=None, draft_hash=None, assessment_hash=None):
         from backend.research_stages import prepare
         return prepare(self, run_id, claim_token, kind, model=model, schema=schema, assignment=assignment,
                        evidence=evidence, permitted_actions=permitted_actions, seconds=seconds, db=db,
-                       packet_hash=packet_hash, coverage_hash=coverage_hash)
+                       packet_hash=packet_hash, coverage_hash=coverage_hash, draft_hash=draft_hash, assessment_hash=assessment_hash)
 
     def authorize_stage(self, stage, workspace, provider_state, db, *, reserved=False):
         from backend.research_stages import authorize

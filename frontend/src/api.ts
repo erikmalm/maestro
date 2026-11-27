@@ -570,21 +570,46 @@ export type ResearchDraft = {
       null | "calculation_required" | "insufficient_evidence" | "coverage_gap";
   }[];
 };
+export type ResearchFinalReview = {
+  version: 1;
+  basis: "semantic" | "not_run";
+  outcome:
+    "accepted" | "writing_defect" | "evidence_gap" | "partial" | "unverifiable";
+  reason_code:
+    null | "review_capacity" | "no_supported_draft" | "source_unavailable";
+  reason: string;
+  assessment_hash: string;
+  packet_hash: string;
+  coverage_hash: string;
+  draft_hash: string;
+  items: {
+    item_id: string;
+    outcome: Exclude<ResearchFinalReview["outcome"], "partial">;
+    reason: string;
+  }[];
+};
 export type ResearchRun = {
   id: string;
   submission_id: string;
   request: string;
   query: string;
-  workflow?: "lookup" | "requirements" | "evidence_review" | "research_draft";
+  workflow?:
+    | "lookup"
+    | "requirements"
+    | "evidence_review"
+    | "research_draft"
+    | "research_answer";
   assessment?: ResearchAssessment | null;
   evidence_review?: ResearchEvidenceReview | null;
   draft?: ResearchDraft | null;
+  final_review?: ResearchFinalReview | null;
   chat_id: string | null;
   state:
     | "queued"
     | "running"
     | "partial"
     | "draft"
+    | "accepted"
     | "clarification"
     | "cancelled"
     | "interrupted"
@@ -627,7 +652,12 @@ export const createResearchRun = (body: {
   submission_id: string;
   request: string;
   query: string;
-  workflow?: "lookup" | "requirements" | "evidence_review" | "research_draft";
+  workflow?:
+    | "lookup"
+    | "requirements"
+    | "evidence_review"
+    | "research_draft"
+    | "research_answer";
   chat_id: string | null;
 }) =>
   request<{ run: ResearchRun; created: boolean }>(
