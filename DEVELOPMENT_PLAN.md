@@ -274,3 +274,7 @@ Use synthetic models and public-safe fixtures for automated checks; CI requires 
 Live checks remain deliberate and bounded: a running local model for generation, or an explicitly configured remote profile and allowance. A model-list response does not prove generation; simulated results do not prove delegation; a reviewer accepting a proposal does not prove an improvement.
 
 The archive, settings/status and Evidence browser expose dated source versions; merged #22–27/#37 supply candidates, owned runs/stages, requirements, exact selected passages, cited drafts and final review. Merged #28 adds the durable acquisition journal; #29 can connect one targeted hosted acquisition once #36's bounded-content prerequisite is complete. Continuation and automatic calculations remain separate. Byte integrity, model support judgments and independent factual truth remain distinct; unverified current facts stay unavailable/stale. The memory target remains measured curation with correction/forgetting, and one durable task precedes broader delegation. Separate archive mounting still requires verification before activation.
+
+## Session handoff
+
+The [2026-11-27 handoff](docs/HANDOFF.md) records unmerged PR #57 at tested runtime `30a78cd`, its 905 passing backend tests, resolved Copilot findings, the remaining fresh-review step and the #29 → #30 → #38 → #31 delivery sequence. Start there if the prior conversation is unavailable. Later wrap-up commits change documentation only; PR #57 still requires review acceptance and a merge.
