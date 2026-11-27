@@ -268,9 +268,15 @@ class WebSearch:
             if outcome == "cancelled" and entry["status"] != "reserved":
                 raise ValueError("A dispatched search cannot be cancelled as undispatched.")
             entry["status"] = outcome
-            key, _ = credentials.read(ENDPOINT)
-            if booking.test and key and _binding(key) == booking.credential_binding:
-                state["tested_at"] = self.now().isoformat() if outcome == "completed" else None
+            if booking.test:
+                # Key availability can affect connection verification, never
+                # whether a dispatched attempt's accounting is committed.
+                try:
+                    key, _ = credentials.read(ENDPOINT)
+                    if key and _binding(key) == booking.credential_binding:
+                        state["tested_at"] = self.now().isoformat() if outcome == "completed" else None
+                except (ValueError, OSError):
+                    state["tested_at"] = None
             return True
 
     def dispatch(self, booking, *, before_dispatch=None, finalize=True):
