@@ -316,7 +316,7 @@ class AcquisitionJournal:
                                        {"protocol": "ollama"})
                     saved = candidate
                     state = "response_received"
-                except (ValueError, KeyError):
+                except (ValueError, KeyError, OSError):
                     state = "failed"
             db.execute("UPDATE acquisition_attempts SET state=?,receipt=?,updated_at=? WHERE id=?",
                        (state, _encoded(saved, MAX_SPEC) if saved is not None else None, self.store.stamp(), attempt.attempt_id))

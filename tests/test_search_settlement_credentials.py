@@ -159,6 +159,32 @@ class AcquisitionCredentialSettlementTests(unittest.TestCase):
     def test_invalid_mounted_secret_after_response_cannot_roll_back_accounting(self):
         self._response_then_credential_failure(invalid=True)
 
+    def test_credential_os_error_after_response_cannot_roll_back_accounting(self):
+        f = self.fixture
+        attempt = f.prepare()
+        booking = f.journal.reserve(attempt)
+        original = WebSearch._response
+        unavailable = False
+
+        def read_credential(endpoint):
+            if unavailable:
+                raise OSError("Synthetic credential store unavailable")
+            return self.read_credential(endpoint)
+
+        def unavailable_after_screening(service, *args, **kwargs):
+            nonlocal unavailable
+            receipt = original(service, *args, **kwargs)
+            unavailable = True
+            return receipt
+
+        with patch("backend.credentials.read", side_effect=read_credential):
+            with patch.object(WebSearch, "_response", new=unavailable_after_screening):
+                with self.assertRaises(ValueError):
+                    f.journal.dispatch(attempt, booking)
+            self.assert_charged_once(attempt, booking, "completed", "failed")
+            unavailable = False
+            self.assert_repaired_key_allows_new_search()
+
     def test_timeout_after_mounted_secret_removal_commits_unknown_outcome(self):
         f = self.fixture
         attempt = f.prepare()
