@@ -1,4 +1,4 @@
-"""Opt-in public excerpt capture and pinned readback; private indexing stays local."""
+"""Bounded public provider-excerpt capture and pinned readback; indexing stays local."""
 from contextlib import closing, contextmanager, nullcontext
 from datetime import date, datetime, timezone
 from functools import wraps
@@ -10,6 +10,7 @@ from pathlib import Path
 import re
 import shutil
 import sqlite3
+import stat
 import threading
 import time
 import uuid
@@ -30,6 +31,14 @@ CANDIDATE_SCAN_LIMIT = 200
 CANDIDATE_SECONDS = 2
 CANDIDATE_SQL_STEPS = 10000000
 CANDIDATE_MAP_BYTES = 4096
+CANDIDATE_BODY_BYTES = 2 * 1024 * 1024
+INDEX_RESERVE_OVERHEAD = 65536
+
+SOURCE_LIMIT_WARNING = "A returned source exceeded its content allowance and was refused without truncation."
+CAPTURE_LIMIT_WARNING = "Returned sources exceeded this capture's content allowance. Some sources were refused without truncation."
+LARGE_SOURCE_WARNING = "A returned source is unusually large. Its complete accepted text was retained."
+CAPACITY_WARNING = "The archive reached its byte, item or remaining free-space allowance. Some source evidence was not saved."
+CAPACITY_UNKNOWN_WARNING = "Storage capacity could not be checked. Some source evidence was not saved."
 
 
 class CandidateWork:
@@ -38,6 +47,7 @@ class CandidateWork:
         self.deadline = time.monotonic() + CANDIDATE_SECONDS
         self.steps = 0
         self.examined = 0
+        self.body_bytes = 0
 
 
 @contextmanager
@@ -337,8 +347,16 @@ class ContextStore:
     def _deleted(self, capture_id):
         return archive_path(self.archive, "records/deletions/" + capture_id + ".json").exists()
 
-    def _manifest(self, relative, config):
+    def _manifest_metadata(self, relative, config):
         data = validate_capture_manifest(read_archive_json(self.archive, relative, MANIFEST_BYTES), relative, config)
+        if self._deleted(data["capture_id"]):
+            raise ValueError("Invalid or unavailable source capture.")
+        return data
+
+    def _manifest(self, relative, config, metadata=None):
+        # Candidate lookup can reserve its body allowance from this exact,
+        # already validated manifest before opening the content-addressed object.
+        data = self._manifest_metadata(relative, config) if metadata is None else validate_capture_manifest(metadata, relative, config)
         if self._deleted(data["capture_id"]):
             raise ValueError("Invalid or unavailable source capture.")
         obj = data["object"]
@@ -346,6 +364,33 @@ class ContextStore:
         if len(raw) != obj["bytes"] or hashlib.sha256(raw).hexdigest() != obj["sha256"]:
             raise ValueError("An archived source failed its hash check.")
         return data, raw.decode("utf-8")
+
+    def _capture_space(self, archive_bytes, index_bytes, minimum):
+        """Reserve conservative growth on both filesystems before publication.
+
+        The private catalogue, FTS copies and SQLite journal need space even
+        when a repeated capture reuses its archive object. On one filesystem
+        their reservations must be added before retaining the free-space floor.
+        """
+        reservations = {}
+        try:
+            private = self.index.parent
+            try:
+                info = private.stat()
+            except FileNotFoundError:
+                private = self.database.parent
+                info = private.stat()
+            if not stat.S_ISDIR(info.st_mode):
+                return "unknown"
+            for path, needed in ((self.archive, archive_bytes), (private, index_bytes)):
+                device, free = path.stat().st_dev, shutil.disk_usage(path).free
+                if type(device) is not int or type(free) is not int or free < 0:
+                    return "unknown"
+                previous = reservations.get(device, (free, 0))
+                reservations[device] = (min(previous[0], free), previous[1] + needed)
+        except (OSError, ValueError, AttributeError):
+            return "unknown"
+        return "insufficient" if any(free < needed + minimum for free, needed in reservations.values()) else None
 
     def _key(self, query, max_results):
         if type(max_results) is not int or not 1 <= max_results <= 3:
@@ -486,6 +531,10 @@ class ContextStore:
                 return (f"CASE WHEN typeof({column})='text' AND length(CAST({column} AS BLOB))<={maximum} "
                         f"THEN {column} END")
 
+            def bounded_length(column, maximum):
+                return (f"CASE WHEN typeof({column})='text' AND length(CAST({column} AS BLOB))<={maximum} "
+                        f"THEN length(CAST({column} AS BLOB)) END")
+
             def source_domain(value):
                 try:
                     return urlsplit(public_url(value, allow_query=True, allow_http=True)).hostname
@@ -517,9 +566,12 @@ class ContextStore:
                                       if query else None)
                         index.create_function("source_domain", 1, source_domain)
                         fields = (("id", 32), ("manifest", 100), ("title", 800), ("url", 8192),
-                                  ("at", 64), ("manifest_hash", 64), ("content", SOURCE_BYTES))
+                                  ("at", 64), ("manifest_hash", 64))
                         projection = ",".join(bounded("c." + field, maximum) for field, maximum in fields)
-                        verified, accepted = {}, set()
+                        # Sort and nominate metadata, never hundreds of complete
+                        # index/FTS bodies. Full copies are compared one at a time.
+                        projection += "," + bounded_length("c.content", SOURCE_BYTES)
+                        verified, accepted, compared_fts = {}, set(), set()
                         now = self.now()
 
                         def verify(row):
@@ -535,18 +587,32 @@ class ContextStore:
                             try:
                                 if row is None:
                                     raise ValueError()
-                                capture_id, relative, title, url, at, digest, content = row[:7]
+                                capture_id, relative, title, url, at, digest, content_bytes = row[:7]
                                 if (not isinstance(capture_id, str) or not ID.fullmatch(capture_id)
                                         or not isinstance(at, str) or timestamp(at) != at
                                         or not isinstance(digest, str) or not HASH.fullmatch(digest)
+                                        or type(content_bytes) is not int or not 1 <= content_bytes <= SOURCE_BYTES
                                         or relative != "records/captures/" + at[:7] + "/" + capture_id + ".json"):
                                     raise ValueError()
-                                manifest, body = self._manifest(relative, config)
-                                source = capture_source(manifest, body)
-                                if (capture_id, title, url, at, digest, content) != (
-                                        source["capture_id"], source["title"], source["url"], source["retrieved_at"],
-                                        source["manifest_hash"], source["content"]):
+                                metadata = self._manifest_metadata(relative, config)
+                                if metadata["object"]["bytes"] != content_bytes:
                                     raise ValueError()
+                                if work.body_bytes + content_bytes > CANDIDATE_BODY_BYTES:
+                                    work_exceeded = True
+                                    raise WorkLimit()
+                                work.body_bytes += content_bytes
+                                check_time()
+                                manifest, body = self._manifest(relative, config, metadata)
+                                source = capture_source(manifest, body)
+                                if (capture_id, title, url, at, digest) != (
+                                        source["capture_id"], source["title"], source["url"], source["retrieved_at"],
+                                        source["manifest_hash"]):
+                                    raise ValueError()
+                                indexed = index.execute("SELECT " + bounded("content", SOURCE_BYTES) +
+                                                        " FROM captures WHERE id=?", (capture_id,)).fetchone()
+                                if indexed is None or indexed[0] != body:
+                                    raise ValueError()
+                                del indexed
                                 normalized_url = public_url(url, allow_query=True, allow_http=True)
                                 if (contains_url_secret(url, secrets) or contains_url_secret(normalized_url, secrets)
                                         or any(contains_source_secret(value, secrets) for value in (title, url, normalized_url, body))):
@@ -613,7 +679,8 @@ class ContextStore:
                             if query:
                                 clauses.insert(0, "captures_fts MATCH ?")
                                 parameters.insert(0, expression)
-                                selection = projection + "," + bounded("f.title", 800) + "," + bounded("f.content", SOURCE_BYTES)
+                                selection = (projection + "," + bounded("f.title", 800) + "," +
+                                             bounded_length("f.content", SOURCE_BYTES) + ",f.rowid")
                                 tables = "captures_fts f JOIN captures c ON c.id=f.id"
                                 order = "bm25(captures_fts),c.at DESC,c.id DESC"
                             else:
@@ -624,10 +691,30 @@ class ContextStore:
                             cursor = index.execute(sql, [*parameters, CANDIDATE_SCAN_LIMIT + 1])
                             for row in cursor:
                                 source = verify(row)
-                                if source and query and ((row[7], row[8]) != (source["title"], source["content"])
-                                        or not matches(source["title"] + "\n" + source["content"], expression)):
-                                    result["skipped_count"] += 1
-                                    continue
+                                if source and query:
+                                    if source["capture_id"] in accepted:
+                                        continue
+                                    if (row[7], row[8]) != (source["title"], row[6]):
+                                        result["skipped_count"] += 1
+                                        continue
+                                    # One canonical/index/FTS comparison is covered
+                                    # by its source reservation. Rejected duplicate
+                                    # nominations must not reread arbitrary full FTS
+                                    # bodies for free from the verified cache.
+                                    if source["capture_id"] in compared_fts:
+                                        if work.body_bytes + row[6] > CANDIDATE_BODY_BYTES:
+                                            work_exceeded = True
+                                            raise WorkLimit()
+                                        work.body_bytes += row[6]
+                                    compared_fts.add(source["capture_id"])
+                                    check_time()
+                                    indexed = index.execute("SELECT " + bounded("content", SOURCE_BYTES) +
+                                                            " FROM captures_fts WHERE rowid=?", (row[9],)).fetchone()
+                                    valid = indexed is not None and indexed[0] == source["content"]
+                                    del indexed
+                                    if not valid or not matches(source["title"] + "\n" + source["content"], expression):
+                                        result["skipped_count"] += 1
+                                        continue
                                 check_time()
                                 append(source, "keyword" if query else "filtered")
                                 if len(result["candidates"]) == limit:
@@ -649,11 +736,48 @@ class ContextStore:
         result = {"query": query, "at": at, "sources": [], "from_cache": False}
         saved = []
         measured = {"retrieved_at": at, "sources_received": len(sources[:max_results]), "sources_saved": 0,
-                    "excerpt_bytes": 0, "manifest_bytes": 0, "object_bytes": 0, "new_bytes": 0}
-        config = self._state()["config"]
+                    "excerpt_bytes": 0, "manifest_bytes": 0, "object_bytes": 0, "new_bytes": 0,
+                    "sources_refused": 0, "warnings": []}
+        config = configuration(self._state()["config"])
+        accepted_bytes = 0
+        failures = []
+
+        def warn(message):
+            if message not in measured["warnings"]:
+                measured["warnings"].append(message)
+            if message != LARGE_SOURCE_WARNING and message not in failures:
+                failures.append(message)
+            result["archive_warning"] = " ".join(measured["warnings"])
+
         for source in sources[:max_results]:
             clean = {field: source.get(field) for field in ("title", "url", "content")} if isinstance(source, dict) else {}
             if not all(isinstance(clean.get(field), str) for field in ("title", "url", "content")):
+                continue
+            # Cheap character checks precede encoding, credential replacement
+            # and decoded safety views, including when saving is disabled.
+            if (len(clean["content"]) > config["max_source_bytes"] or len(clean["title"]) > SOURCE_BYTES
+                    or len(clean["url"]) > 2048):
+                measured["sources_refused"] += 1
+                warn(SOURCE_LIMIT_WARNING)
+                continue
+            if len(clean["content"]) + accepted_bytes > config["max_capture_bytes"]:
+                measured["sources_refused"] += 1
+                warn(CAPTURE_LIMIT_WARNING)
+                continue
+            try:
+                size = len(clean["content"].encode("utf-8"))
+                clean["title"].encode("utf-8")
+            except UnicodeError:
+                measured["sources_refused"] += 1
+                warn(SOURCE_LIMIT_WARNING)
+                continue
+            if not 1 <= size <= config["max_source_bytes"]:
+                measured["sources_refused"] += 1
+                warn(SOURCE_LIMIT_WARNING)
+                continue
+            if accepted_bytes + size > config["max_capture_bytes"]:
+                measured["sources_refused"] += 1
+                warn(CAPTURE_LIMIT_WARNING)
                 continue
             if contains_url_secret(clean["url"], secrets) or contains_source_secret(clean["url"], secrets):
                 continue  # Never forward a credential embedded in a source link.
@@ -662,6 +786,16 @@ class ContextStore:
                     clean[field] = clean[field].replace(secret, "\u2588")
             if any(contains_source_secret(clean[field], secrets) for field in ("title", "content")):
                 continue  # Encoded credentials must not reach inference or synced files.
+            # Redaction may change UTF-8 length (for example a one-byte secret
+            # becomes a three-byte block). The accepted copy must fit too.
+            size = len(clean["content"].encode("utf-8"))
+            if size > config["max_source_bytes"] or accepted_bytes + size > config["max_capture_bytes"]:
+                measured["sources_refused"] += 1
+                warn(SOURCE_LIMIT_WARNING if size > config["max_source_bytes"] else CAPTURE_LIMIT_WARNING)
+                continue
+            accepted_bytes += size
+            if size >= config["warn_source_bytes"]:
+                warn(LARGE_SOURCE_WARNING)
             existing = source.get("completeness")
             completeness = {"maestro_truncated": bool(source.get("maestro_truncated") or (existing.get("maestro_truncated") if isinstance(existing, dict) else False)), "full_page": False}
             clean.update(archive_status="skipped", content_kind="search_excerpt", retrieved_at=at,
@@ -673,18 +807,26 @@ class ContextStore:
         with self._write_lock:
             try:
                 with self._writer():
-                    config = self._state()["config"]
+                    config = configuration(self._state()["config"])
                     if not config["enabled"]:
                         return result
                     self._format()
                     total, items, _ = archive_inventory(self.archive, config["max_items"])
+                    stored_bytes = 0
                     for clean in result["sources"]:
                         if not eligible(clean["url"], config):
                             continue
                         clean["archive_status"] = "not_saved"
                         raw = clean["content"].encode("utf-8")
-                        if not 1 <= len(raw) <= SOURCE_BYTES:
-                            raise ValueError("A source excerpt exceeds its archive allowance.")
+                        if not 1 <= len(raw) <= config["max_source_bytes"]:
+                            measured["sources_refused"] += 1
+                            warn(SOURCE_LIMIT_WARNING)
+                            continue
+                        if stored_bytes + len(raw) > config["max_capture_bytes"]:
+                            measured["sources_refused"] += 1
+                            warn(CAPTURE_LIMIT_WARNING)
+                            continue
+                        stored_bytes += len(raw)
                         content_hash = hashlib.sha256(raw).hexdigest()
                         capture_id = uuid.uuid4().hex
                         relative = "records/captures/" + at[:7] + "/" + capture_id + ".json"
@@ -698,8 +840,14 @@ class ContextStore:
                         new_paths = {archive_path(self.archive, name) for name in (obj["path"], relative)}
                         new_paths |= {parent for path in tuple(new_paths) for parent in path.parents if parent != self.archive and self.archive in parent.parents}
                         additions = sum(not path.exists() for path in new_paths)
-                        if total + extra > config["max_bytes"] or items + additions > config["max_items"] or shutil.disk_usage(self.archive).free < extra + 65536:
-                            result["archive_warning"] = "The archive has reached its byte, item or free-space allowance. Some source evidence was not saved."
+                        if total + extra > config["max_bytes"] or items + additions > config["max_items"]:
+                            measured["sources_refused"] += 1
+                            warn(CAPACITY_WARNING)
+                            continue
+                        space = self._capture_space(extra, len(raw) * 8 + INDEX_RESERVE_OVERHEAD, config["min_free_bytes"])
+                        if space is not None:
+                            measured["sources_refused"] += 1
+                            warn(CAPACITY_UNKNOWN_WARNING if space == "unknown" else CAPACITY_WARNING)
                             continue
                         for field, path, data in (("object_bytes", obj["path"], raw), ("manifest_bytes", relative, encoded)):
                             if publish_archive(self.archive, path, data):
@@ -716,19 +864,19 @@ class ContextStore:
                         if saved:
                             db.execute("INSERT INTO context_queries VALUES(?,?,?,?) ON CONFLICT(key) DO UPDATE SET query=excluded.query,at=excluded.at,captures=excluded.captures", (key, query, at, json.dumps(saved)))
                         total, items, _ = archive_inventory(self.archive, config["max_items"])
-                        state.update(archive_bytes=total, archive_items=items, last_error=result.get("archive_warning"),
+                        state.update(archive_bytes=total, archive_items=items, last_error=" ".join(failures) or None,
                                      write_unavailable=False, last_capture=measured)
                         if saved:
                             state["last_indexed_at"] = self.now().isoformat()
             except (OSError, sqlite3.Error, ValueError, UnicodeError):
-                result["archive_warning"] = "Some source evidence could not be saved. Existing captures remain unchanged."
+                warn("Some source evidence could not be saved. Existing captures remain unchanged.")
                 try:
                     try:
                         total, items, _ = archive_inventory(self.archive, config["max_items"])
                     except (OSError, ValueError):
                         total = items = None
                     with self._transaction() as (state, _):
-                        state.update(last_error=result["archive_warning"], last_capture=measured)
+                        state.update(last_error=" ".join(failures), last_capture=measured)
                         if total is not None:
                             state.update(archive_bytes=total, archive_items=items)
                 except (OSError, sqlite3.Error):

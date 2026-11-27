@@ -78,6 +78,27 @@ class ArchiveStatusTests(unittest.TestCase):
             self.assertEqual(list(self.archive.glob("records/captures/*/*.json")), [])
             self.assertEqual(store.status()["indexed_count"], 0)
 
+    def test_content_limits_roundtrip_and_toggle_preserves_current_values(self):
+        with TestClient(backend.app) as client:
+            headers, config = self.enable(client)
+            limits = {"max_source_bytes": 32768, "warn_source_bytes": 16384,
+                      "max_capture_bytes": 65536, "min_free_bytes": 1048576}
+            response = client.put("/api/context", json={**config, **limits}, headers=headers)
+            self.assertEqual(response.status_code, 200, response.text)
+            for key, value in limits.items():
+                self.assertEqual(response.json()["config"][key], value)
+            toggled = client.patch("/api/context", json={"enabled": False}, headers=headers)
+            self.assertEqual(toggled.status_code, 200, toggled.text)
+            for key, value in limits.items():
+                self.assertEqual(toggled.json()["config"][key], value)
+            before = backend.context_store()._state()["config"]
+            for invalid in ({"max_source_bytes": True}, {"min_free_bytes": 1.5},
+                            {"warn_source_bytes": 131072}, {"max_capture_bytes": 8192}):
+                with self.subTest(invalid=invalid):
+                    refused = client.put("/api/context", json={**before, **invalid}, headers=headers)
+                    self.assertIn(refused.status_code, (409, 422), refused.text)
+                    self.assertEqual(backend.context_store()._state()["config"], before)
+
     def test_existing_captures_without_an_index_are_not_replaced_by_an_empty_catalogue(self):
         with TestClient(backend.app) as client:
             headers, config = self.enable(client)

@@ -447,7 +447,10 @@ class ContextCandidateTests(unittest.TestCase):
                 def counted():
                     counts[connection.label] = counts.get(connection.label, 0) + 1
                     return callback()
-                return super().set_progress_handler(counted, interval)
+                # Dedupe removes repeated full-text checks. Use a finer test
+                # interval so even one tokenizer setup remains observable;
+                # the same production callback still charges the shared cap.
+                return super().set_progress_handler(counted, 1 if connection.label == ":memory:" else interval)
 
         def tracked(database, **kwargs):
             connection = connect(database, factory=TrackedConnection, **kwargs)
