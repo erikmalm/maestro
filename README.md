@@ -80,7 +80,7 @@ Merged [#22](https://github.com/erikmalm/maestro/issues/22) provides a local can
 
 ## Saved-evidence research preview
 
-Merged #24/PR #48 delivered requirements assessment; #25/PR #49 added saved-evidence coverage. On the smaller [#26 draft](https://github.com/erikmalm/maestro/pull/53), this branch adds [#27](https://github.com/erikmalm/maestro/issues/27): one final review against the original request and exact supplied evidence. Automatic calculations remain deferred to [#52](https://github.com/erikmalm/maestro/issues/52).
+Merged #24/PR #48 delivered requirements assessment; #25/PR #49 added saved-evidence coverage; [#26/PR #53](https://github.com/erikmalm/maestro/pull/53) added the smaller cited draft; [#27/PR #54](https://github.com/erikmalm/maestro/pull/54) added final review against the original request and exact supplied evidence. Main `0740871` contains the complete saved-evidence answer loop. Automatic calculations remain deferred to [#52](https://github.com/erikmalm/maestro/issues/52).
 
 Choose an installed Local Ollama model in Settings and test the connection. Open **Research**, enter a request, and choose **Review saved-evidence answer**. The configured local orchestrator model is used, falling back to the local chat model. One call extracts requirements; material ambiguity stops with **Clarification needed**. A clear request proceeds to bounded local candidates, optional evidence review, drafting and one final review when evidence and allowance permit. All stages share the existing four-call, token and 120-second run allowance. The final stage can use available time up to 90 seconds, including model loading, within that same run deadline.
 
@@ -95,6 +95,8 @@ Requirements receive only the request, server time, privacy and shared allowance
 Reopening restores requirements, coverage, the available draft, final-review findings and activity. Detail reads recheck source pins, eligibility and credentials, withdrawing prose and earlier acceptance if evidence becomes unavailable. Duplicate submissions reuse one run. Invalid or late output fails with actual usage retained; cancellation, deletion and restart fence late work without automatic replay. Run/chat deletion removes private requests, assessments, drafts, reviews and stage prose while retaining opaque usage/submission guards and preserving saved source files.
 
 New Research submissions select `research_answer`. Historical draft, evidence-review, requirements-only and lookup records remain compatible under #31. A personal archive may be empty until acquisition is connected. No personal storage migration or deployment is implied. See the [final-review contract](docs/ARCHITECTURE.md#final-answer-review-27) and [delivery plan](DEVELOPMENT_PLAN.md#next-delivery-sequence).
+
+The next research increment is [#28, the acquisition journal](https://github.com/erikmalm/maestro/issues/28): record acquisition attempts and prevent duplicate or uncertain redispatch before enabling network acquisition. [#29](https://github.com/erikmalm/maestro/issues/29) then adds one targeted hosted search after [#36](https://github.com/erikmalm/maestro/issues/36)'s bounded-content storage prerequisite. Automatic corrections, chat routing and obsolete-code removal follow separately.
 
 ## Private memory
 
