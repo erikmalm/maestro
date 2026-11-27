@@ -47,6 +47,7 @@ TIMEZONE = ZoneInfo(os.environ.get("MAESTRO_TIMEZONE", "Europe/Stockholm"))
 SESSION = secrets.token_urlsafe(32)
 CSRF = secrets.token_urlsafe(32)
 PORT = int(os.environ.get("MAESTRO_PORT", "8765"))
+SESSION_COOKIE = f"maestro_session_{PORT}"
 ORIGINS = {f"http://{host}:{port}" for host in ("127.0.0.1", "localhost") for port in (PORT, 5173, 4173)}
 SOURCE_CREDENTIAL_STATE_BYTES = 16 * 1024 ** 2
 FINAL_REVIEW_SECONDS = 90
@@ -396,7 +397,7 @@ async def protect_local_workspace(request: Request, call_next):
         origin = request.headers.get("origin")
         if origin and origin not in ORIGINS:
             return JSONResponse({"detail": "Only your local Maestro interface can access this workspace."}, status_code=403)
-        if request.url.path != "/api/session" and not hmac.compare_digest(request.cookies.get("maestro_session", "").encode(), SESSION.encode()):
+        if request.url.path != "/api/session" and not hmac.compare_digest(request.cookies.get(SESSION_COOKIE, "").encode(), SESSION.encode()):
             return JSONResponse({"detail": "Open Maestro again to start a local session."}, status_code=401)
         if request.method not in ("GET", "HEAD"):
             if not hmac.compare_digest(request.headers.get("x-maestro-csrf", "").encode(), CSRF.encode()):
@@ -418,7 +419,7 @@ async def protect_local_workspace(request: Request, call_next):
 
 @app.get("/api/session")
 def session(response: Response):
-    response.set_cookie("maestro_session", SESSION, httponly=True, samesite="strict")
+    response.set_cookie(SESSION_COOKIE, SESSION, httponly=True, samesite="strict")
     return {"csrf": CSRF}
 
 
