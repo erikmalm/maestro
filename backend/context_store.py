@@ -237,6 +237,28 @@ class ContextStore:
                 **{field: state[field] for field in ("missing_count", "corrupt_count", "archive_bytes", "archive_items",
                                                     "last_error", "last_indexed_at", "last_capture", "rebuild_progress")}}
 
+    def policy_generation(self, db=None):
+        """Private version for coherent pin validation; never creates storage.
+
+        A final check on a caller's writer transaction fences configuration
+        changes across instances/processes without holding it over archive I/O.
+        Legacy configuration has no generation until its next explicit save.
+        """
+        if db is None:
+            with closing(sqlite3.connect(self.database.as_uri() + "?mode=ro", uri=True)) as connection:
+                return self.policy_generation(connection)
+        row = db.execute("SELECT CASE WHEN typeof(value)='text' AND length(CAST(value AS BLOB))<=? "
+                         "THEN value END FROM context_state WHERE id=1", (1024 * 1024,)).fetchone()
+        if row is None or row[0] is None:
+            raise ValueError("Archive policy is unavailable.")
+        try:
+            generation = json.loads(row[0]).get("policy_generation")
+            if generation is not None and (not isinstance(generation, str) or not ID.fullmatch(generation)):
+                raise ValueError()
+            return generation
+        except (ValueError, TypeError, AttributeError, RecursionError):
+            raise ValueError("Archive policy is unavailable.") from None
+
     @contextmanager
     def archive_owner(self):
         with archive_owner(self.archive, self._token, self._write_lock):
@@ -279,6 +301,9 @@ class ContextStore:
                     if any(config[field] != previous[field] for field in ("enabled", "capture_policy", "public_sources")):
                         db.execute("DELETE FROM context_queries")
                     state["config"] = config
+                    # Rotate even for an identical save: an A -> B -> A policy
+                    # change must not validate a packet read across both scopes.
+                    state["policy_generation"] = uuid.uuid4().hex
                     if config["enabled"]:
                         state.update(last_error=None, write_unavailable=False,
                                      archive_bytes=total, archive_items=items)

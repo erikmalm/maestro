@@ -125,6 +125,8 @@ with tempfile.TemporaryDirectory(prefix="maestro-browser-") as directory:
                 with service.transaction() as state:
                     if len(state["ledger"]) == 1:
                         state["ledger"][-1]["at"] = (service.now() - timedelta(seconds=6)).isoformat()
+                        if "dispatched_at" in state["ledger"][-1]:
+                            state["ledger"][-1]["dispatched_at"] = state["ledger"][-1]["at"]
                 return httpx.Response(200, json={"results": [{"title": "Ollama web search documentation",
                     "url": "https://docs.ollama.com/capabilities/web-search", "content": "Synthetic hosted search evidence."}]})
             if request.url.host != "127.0.0.1" or request.url.port != fake.server_port:

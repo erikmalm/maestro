@@ -68,6 +68,8 @@ class WebSearchTests(unittest.TestCase):
         with self.service.transaction() as state:
             for entry in state["ledger"]:
                 entry["at"] = (self.service.now() - timedelta(seconds=10)).isoformat()
+                if "dispatched_at" in entry:
+                    entry["dispatched_at"] = entry["at"]
 
     def enable(self):
         self.assertEqual(self.configure(key=self.key).status_code, 200)
@@ -409,7 +411,7 @@ class WebSearchTests(unittest.TestCase):
                     release.set()
                 self.assertEqual(len(calls), 1)
                 self.assertTrue(closed)
-                self.assertEqual(self.service.read_state()["ledger"][-1]["status"], "failed")
+                self.assertEqual(self.service.read_state()["ledger"][-1]["status"], "uncertain")
                 self.assertIsNone(self.service.status()["tested_at"])
         self.assertEqual(self.service.status()["searches_today"], 3)
 
