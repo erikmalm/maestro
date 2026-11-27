@@ -123,6 +123,51 @@ class SearchDispatchTests(unittest.TestCase):
         self.assertNotIn(booking.query.encode(), self.database.read_bytes())
         self.assertNotIn(self.key.encode(), self.database.read_bytes())
 
+    def test_delayed_journal_booking_preserves_spacing_before_legacy_dispatch(self):
+        booked_at = self.clock.isoformat()
+        booking = self.service.reserve("Synthetic delayed journal acquisition")
+        self.clock += timedelta(seconds=20)
+        dispatched_at = self.clock.isoformat()
+        with self.http():
+            self.service.dispatch(booking, before_dispatch=lambda db: None, finalize=False)
+        self.assertTrue(self.service.finalize(booking, "completed"))
+        # Quota stays on the booking date while dispatch spacing uses its own time.
+        entry = self.service.read_state()["ledger"][0]
+        self.assertEqual(entry["at"], booked_at)
+        self.assertEqual(self.service.summary()["searches_today"], 1)
+        with self.http(), self.assertRaisesRegex(ValueError, "five seconds"):
+            self.service.search("Synthetic immediate legacy follow-up")
+        self.assertEqual(len(self.calls), 1)
+        self.assertEqual(entry["dispatched_at"], dispatched_at)
+        self.clock += timedelta(seconds=5)
+        with self.http():
+            self.service.search("Synthetic properly spaced legacy follow-up")
+        self.assertEqual(len(self.calls), 2)
+
+    def test_delayed_failed_and_unknown_dispatches_keep_the_shared_spacing(self):
+        for kind in ("http", "timeout"):
+            with self.subTest(kind=kind):
+                self.clock += timedelta(seconds=60)
+                booking = self.service.reserve("Synthetic delayed outcome " + kind)
+                self.clock += timedelta(seconds=20)
+
+                def response(request):
+                    self.calls.append(request)
+                    if kind == "timeout":
+                        raise httpx.ReadTimeout("Synthetic timeout", request=request)
+                    return httpx.Response(503)
+
+                with self.http(response), self.assertRaises(SearchFailure):
+                    self.service.dispatch(booking)
+                calls_before = len(self.calls)
+                with self.http(), self.assertRaisesRegex(ValueError, "five seconds"):
+                    self.service.search("Synthetic immediate follow-up after " + kind)
+                self.assertEqual(len(self.calls), calls_before)
+                self.clock += timedelta(seconds=5)
+                with self.http():
+                    self.service.search("Synthetic spaced follow-up after " + kind)
+                self.assertEqual(len(self.calls), calls_before + 1)
+
     def test_callback_failure_rolls_back_dispatch_and_does_not_send(self):
         booking = self.service.reserve("Synthetic cancelled owner")
 

@@ -217,6 +217,14 @@ class WebSearch:
             raise ValueError("Ollama search is paused after a rate limit. Wait until the cooldown ends.")
         return key, summary
 
+    def _spacing(self, state, *, request_id=None):
+        # A journal can book well before transport. Keep quota on the booking
+        # date, but do not let that older timestamp erase dispatch spacing.
+        stamps = [datetime.fromisoformat(entry[field]) for entry in state["ledger"]
+                  if entry["id"] != request_id for field in ("at", "dispatched_at") if field in entry]
+        if stamps and (self.now() - max(stamps)).total_seconds() < 5:
+            raise ValueError("Search requests are spaced at least five seconds apart. Wait before trying again.")
+
     def reserve(self, query, *, request_id=None, test=False, db=None):
         if (not isinstance(query, str) or not 1 <= len(query.strip()) <= 512
                 or type(test) is not bool):
@@ -233,8 +241,7 @@ class WebSearch:
                 raise ValueError("Daily web search limit reached. Adjust the search allowance in Settings.")
             if any(entry["status"] in ("reserved", "dispatched") for entry in state["ledger"]):
                 raise ValueError("A web search is already running. Wait for it to finish.")
-            if state["ledger"] and (self.now() - datetime.fromisoformat(state["ledger"][-1]["at"])).total_seconds() < 5:
-                raise ValueError("Search requests are spaced at least five seconds apart. Wait before trying again.")
+            self._spacing(state)
             booking = SearchBooking(request_id, query, state["config"]["max_results"], test,
                                     _binding(key), uuid.uuid4().hex)
             state["ledger"].append({"id": request_id, "at": self.now().isoformat(), "status": "reserved",
@@ -292,9 +299,11 @@ class WebSearch:
                         raise ValueError("That search booking expired before dispatch. Start a new attempt.")
                     if summary["searches_today"] > state["config"]["daily_limit"]:
                         raise ValueError("Daily web search limit changed before dispatch.")
+                    self._spacing(state, request_id=booking.request_id)
                     if before_dispatch is not None:
                         before_dispatch(db)
                     entry["status"] = "dispatched"
+                    entry["dispatched_at"] = self.now().isoformat()
             claimed = True
             loop = asyncio.new_event_loop()
             try:

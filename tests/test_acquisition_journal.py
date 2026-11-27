@@ -820,5 +820,26 @@ class AcquisitionJournalTests(unittest.TestCase):
         self.assertIsNone(self.journal.get(attempt.attempt_id)["refs"])
 
 
+    def test_cancelled_owner_cannot_receive_late_transport_result(self):
+        attempt = self.prepare()
+        booking = self.journal.reserve(attempt)
+
+        def cancel_before_response(key, query, max_results):
+            self.store.cancel(attempt.run_id)
+            return self.response(key, query, max_results)
+
+        self.handler = cancel_before_response
+        with self.assertRaises(ValueError):
+            self.journal.dispatch(attempt, booking)
+        record = self.journal.get(attempt.attempt_id)
+        self.assertEqual(record["state"], "uncertain")
+        self.assertIsNone(record["receipt"])
+        self.assertEqual(len(self.requests), 1)
+        self.assertEqual(self.ledger()[0]["status"], "uncertain")
+        budget = self.store.get(attempt.run_id)["budget"]
+        self.assertEqual(budget["reserved"]["hosted_searches"], 0)
+        self.assertEqual(budget["consumed"]["hosted_searches"], 1)
+
+
 if __name__ == "__main__":
     unittest.main()

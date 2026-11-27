@@ -285,7 +285,8 @@ class AcquisitionJournal:
             else:
                 self._finish(attempt, booking, "cancelled", expected="pending")
             raise
-        self._finish(attempt, booking, "completed", receipt)
+        if not self._finish(attempt, booking, "completed", receipt):
+            raise ValueError("The acquisition owner changed; its late response was withheld.")
         return receipt
 
     def _finish(self, attempt, booking, outcome, receipt=None, *, expected="dispatched"):

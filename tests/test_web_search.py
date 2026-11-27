@@ -68,6 +68,8 @@ class WebSearchTests(unittest.TestCase):
         with self.service.transaction() as state:
             for entry in state["ledger"]:
                 entry["at"] = (self.service.now() - timedelta(seconds=10)).isoformat()
+                if "dispatched_at" in entry:
+                    entry["dispatched_at"] = entry["at"]
 
     def enable(self):
         self.assertEqual(self.configure(key=self.key).status_code, 200)
