@@ -117,6 +117,68 @@ class ResearchStageTests(unittest.TestCase):
         self.assertEqual(self.database.read_bytes(), before)
         self.assertEqual(self.store.get(self.run["id"])["budget"]["reserved"]["model_calls"], 0)
 
+    def draft_run(self, tokens):
+        self.store.cancel(self.run["id"])
+        self.workspace["limits"]["max_tokens"] = tokens
+        self.provider["config"]["ollama_context_tokens"] = 32768
+        self.budget["total"]["tokens"] = self.budget["remaining"]["tokens"] = tokens
+        self.budget["parent_limits"] = deepcopy(self.workspace["limits"])
+        with self.store._transaction() as db:
+            self.save(db)
+        self.run, _ = self.store.create(uuid.uuid4().hex, "Inspect the supplied saved evidence.", "", "chat",
+                                        self.permissions, self.budget, workflow="research_draft")
+        self.token = self.store.claim(self.run["id"], lookup=False)[1]
+
+    def test_draft_first_reservation_fits_a_smaller_run_and_keeps_finishing_calls(self):
+        self.draft_run(50000)
+        stage = self.prepare(seconds=45)
+        request_id, packet = self.reserve(stage, 24000, 1024)
+        budget = packet["allowance"]
+        self.assertLessEqual(budget["reserved"]["tokens"], 50000)
+        self.assertEqual(budget["reserved"]["model_calls"], 3)
+        with closing(sqlite3.connect(self.database)) as db:
+            holds = json.loads(db.execute("SELECT held FROM research_finishing WHERE run_id=?",
+                                          (self.run["id"],)).fetchone()[0])
+        self.assertEqual(set(holds), {"writer", "reviewer"})
+        self.assertTrue(all(0 < hold["tokens"] <= 32768 for hold in holds.values()))
+        self.assertTrue(self.settle(stage, request_id))
+        for kind in ("evidence_review", "writer", "reviewer"):
+            next_stage = self.prepare(kind)
+            request_id, packet = self.reserve(next_stage, 24000, 1024)
+            self.assertLessEqual(packet["allowance"]["consumed"]["tokens"] +
+                                 packet["allowance"]["reserved"]["tokens"], 50000)
+            self.assertTrue(self.settle(next_stage, request_id))
+        budget = self.store.get(self.run["id"])["budget"]
+        self.assertEqual(budget["consumed"]["model_calls"], 4)
+        self.assertEqual(budget["reserved"]["model_calls"], 0)
+
+    def test_draft_finishing_holds_do_not_block_a_requirement_that_uses_the_token_allowance(self):
+        self.draft_run(1000)
+        stage = self.prepare()
+        request_id, packet = self.reserve(stage, 900, 100)
+        self.assertEqual(packet["allowance"]["reserved"]["tokens"], 1000)
+        self.assertTrue(self.settle(stage, request_id))
+        self.assertEqual(self.store.get(self.run["id"])["budget"]["consumed"]["tokens"], 80)
+
+    def test_draft_reduced_finishing_holds_still_protect_against_optional_spending(self):
+        self.draft_run(50000)
+        stage = self.prepare(seconds=45)
+        request_id, _ = self.reserve(stage, 24000, 1024)
+        self.assertTrue(self.settle(stage, request_id, input_tokens=19980, output_tokens=20))
+        optional = self.prepare("evidence_review")
+        before = self.store.get(self.run["id"])["budget"]
+        with self.assertRaisesRegex(ValueError, "finishing capacity"):
+            self.reserve(optional, 20000, 100)
+        self.assertEqual(self.store.get(self.run["id"])["budget"], before)
+        writer = self.prepare("writer")
+        request_id, packet = self.reserve(writer, 20000, 100)
+        self.assertEqual(packet["allowance"]["reserved"]["model_calls"], 2)
+        self.assertFalse(self.settle(writer, request_id, outcome="failed", dispatched=False,
+                                     input_tokens=0, output_tokens=0))
+        restored = self.store.get(self.run["id"])["budget"]
+        self.assertEqual(restored["reserved"], before["reserved"])
+        self.assertEqual(restored["consumed"], before["consumed"])
+
     def test_foreign_claim_and_attempt_cannot_authorize_or_replay_dispatch(self):
         stage = self.prepare()
         for forged in (replace(stage, claim_token=uuid.uuid4().hex), replace(stage, attempt_id=uuid.uuid4().hex),

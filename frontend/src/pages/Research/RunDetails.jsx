@@ -1,6 +1,8 @@
 import { sourceDate } from "../Evidence/useEvidence";
 import Assessment from "./Assessment";
 import EvidenceReview from "./EvidenceReview";
+import Draft, { draftSourcesAvailable } from "./Draft";
+import FinalReview, { reviewOutcomeLabel } from "./FinalReview";
 
 const number = (value) =>
   typeof value === "number" && Number.isFinite(value)
@@ -11,6 +13,8 @@ export const stateLabel = (state) =>
   ({
     queued: "Queued",
     running: "Running",
+    draft: "Draft — not finally reviewed",
+    accepted: "Reviewed answer",
     partial: "Partial — no reviewed answer",
     clarification: "Clarification needed — no reviewed answer",
     cancelled: "Cancelled",
@@ -27,9 +31,17 @@ const lookupLabels = {
 };
 
 export default function RunDetails({ run, busy, onCancel, onDelete }) {
-  const requirements = ["requirements", "evidence_review"].includes(
-    run.workflow,
-  );
+  const requirements = [
+    "requirements",
+    "evidence_review",
+    "research_draft",
+    "research_answer",
+  ].includes(run.workflow);
+  const accepted =
+    run.state === "accepted" &&
+    run.final_review?.basis === "semantic" &&
+    run.final_review.outcome === "accepted" &&
+    draftSourcesAvailable(run.draft, run.evidence_review);
   const result = run.result;
   const candidates = result?.candidates || [];
   return (
@@ -40,7 +52,14 @@ export default function RunDetails({ run, busy, onCancel, onDelete }) {
       <div className="research-detail-heading">
         <div>
           <h2>Recorded research run</h2>
-          <p role="status">{stateLabel(run.state)}</p>
+          <p role="status">
+            {run.state === "accepted" && !accepted
+              ? "Review unavailable"
+              : run.state === "partial" &&
+                  run.final_review?.basis === "semantic"
+                ? `${reviewOutcomeLabel(run.final_review.outcome)} — not accepted`
+                : stateLabel(run.state)}
+          </p>
         </div>
         <div className="research-actions">
           {["queued", "running"].includes(run.state) && (
@@ -83,11 +102,30 @@ export default function RunDetails({ run, busy, onCancel, onDelete }) {
           <dd>{date(run.updated_at)}</dd>
         </div>
       </dl>
-      {requirements && <Assessment assessment={run.assessment} />}
+      {requirements && (
+        <Assessment
+          assessment={run.assessment}
+          hasFinalReview={Boolean(run.final_review)}
+        />
+      )}
+      {run.draft && (
+        <Draft
+          draft={run.draft}
+          assessment={run.assessment}
+          review={run.evidence_review}
+          accepted={accepted}
+          reviewed={run.final_review?.basis === "semantic"}
+        />
+      )}
+      {run.final_review && (
+        <FinalReview review={run.final_review} assessment={run.assessment} />
+      )}
       {run.evidence_review && (
         <EvidenceReview
           review={run.evidence_review}
           assessment={run.assessment}
+          hasDraft={Boolean(run.draft)}
+          hasFinalReview={Boolean(run.final_review)}
         />
       )}
       <section

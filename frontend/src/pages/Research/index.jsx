@@ -11,15 +11,16 @@ export default function Research({ chatId }) {
       <div className="page-heading">
         <div>
           <h1>Research</h1>
-          <p>Assess requirements and review saved evidence.</p>
+          <p>Review an answer against saved evidence.</p>
         </div>
         <span className="badge neutral">Preview</span>
       </div>
       <p className="page-note">
         This preview assesses your request, then reviews a bounded selection of
-        saved evidence with an installed local model. It makes no hosted
-        searches or personal-memory recall, and produces no written or finally
-        reviewed answer.
+        saved evidence with an installed local model, prepares a cited draft,
+        then checks it against your request and the supplied evidence. It makes
+        no hosted searches or personal-memory recall. Review findings and any
+        remaining gaps stay visible.
       </p>
       <form
         className="card entry-form research-form"
@@ -29,7 +30,7 @@ export default function Research({ chatId }) {
             void data.submit(data.request.trim());
         }}
       >
-        <h2>Review saved evidence</h2>
+        <h2>Review saved-evidence answer</h2>
         <label>
           Research request
           <textarea
@@ -43,8 +44,9 @@ export default function Research({ chatId }) {
         </label>
         <p className="form-note">
           The current conversation's sharing restrictions are retained. Material
-          ambiguity stops the run for clarification. Answer writing and final
-          review are later steps.
+          ambiguity stops the run for clarification. Missing evidence and
+          calculation limitations prevent full acceptance. Review does not
+          independently verify the publisher's facts.
         </p>
         <div className="research-actions">
           <button
@@ -52,7 +54,7 @@ export default function Research({ chatId }) {
             disabled={!data.request.trim() || data.formLocked}
             aria-busy={data.busy === "submit" || data.working}
           >
-            Review saved evidence
+            Review saved-evidence answer
           </button>
         </div>
         {data.working && (

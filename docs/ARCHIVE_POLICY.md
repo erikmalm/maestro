@@ -1,6 +1,6 @@
 # Public-source archive policy
 
-This is the archive foundation extracted from draft PR #8. `backend/context_policy.py` contains pure source-policy validation (R8-03a) and capture-manifest validation/projection (R8-03d); `backend/storage.py` provides bounded file access/publication (R8-03b) and local ownership/inventory (R8-03c). `backend/context_store.py` integrates configuration, capture/private indexing and pinned readback (R8-03e). `backend/app.py` adds configuration/status API and runtime ownership (R8-03f). Acquisition, lookup, deletion and reconstruction follow in separate review units.
+Checkpoint: 2026-11-27, main `0740871`. This is the merged archive foundation extracted from superseded PR #8. `backend/context_policy.py` contains pure source-policy validation (R8-03a) and capture-manifest validation/projection (R8-03d); `backend/storage.py` provides bounded file access/publication (R8-03b) and local ownership/inventory (R8-03c). `backend/context_store.py` integrates configuration, capture/private indexing and pinned readback (R8-03e), plus merged #22's bounded local candidate lookup. `backend/app.py` adds configuration/status API and runtime ownership (R8-03f); the merged saved-evidence research stages through #27/PR #54 reuse these storage and source checks. Hosted research acquisition (#28/#29), archive deletion and reconstruction endpoints remain separate work. See the [current delivery sequence](../DEVELOPMENT_PLAN.md#next-delivery-sequence).
 
 New archive settings propose `all_public` with capture disabled, a 24-hour reuse window, 10 GiB and at most 200,000 files/directories. Legacy settings that omit the policy retain `approved_sources`; they require an approved HTTPS scope before enabling capture. Validation accepts byte caps up to 100 GiB and reuse windows from one to 168 hours.
 
@@ -10,7 +10,7 @@ A path scope matches its exact origin and path components, excluding query URLs.
 
 Credential checks inspect bounded percent-encoded and HTML-escaped safety views without changing stored text or URL identity. Invalid or excessively escaped inputs are rejected when they cannot be checked. Callers must supply the known credentials and apply these checks before export.
 
-Retrieval timestamps require a timezone and normalize to UTC. Canonical metadata hashes preserve the metadata values and ignore dictionary key order. Manifest metadata validation does not establish that source claims are correct; general grounding and backend action verification remain a separate milestone.
+Retrieval timestamps require a timezone and normalize to UTC. Canonical metadata hashes preserve the metadata values and ignore dictionary key order. Manifest metadata validation does not establish that source claims are correct. The merged research coverage and final-review stages assess relevance and support separately; neither valid manifests nor model agreement establishes publisher truth. Backend action verification remains future execution work.
 
 The policy performs no network request, file publication or settings mutation. URL eligibility is a conservative export filter; it cannot prove the access policy or factual reliability of a publisher behind a public link.
 
