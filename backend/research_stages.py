@@ -85,6 +85,12 @@ def _owner(store, db, stage):
     return run
 
 
+def _no_acquisition(db, run_id):
+    if db.execute("SELECT 1 FROM acquisition_attempts WHERE run_id=? AND state IN ('pending','dispatched','uncertain')",
+                  (run_id,)).fetchone():
+        raise ValueError("A hosted research acquisition is active or uncertain.")
+
+
 def _states(db):
     records = []
     for table, projection in (("workspace", "json_object('limits',json_extract(value,'$.limits'))"),
@@ -225,6 +231,7 @@ def prepare(store, run_id, claim_token, kind, *, model, schema, assignment, evid
     with store._transaction(db) as connection:
         identity = ResearchStage(run_id, claim_token, uuid.uuid4().hex, uuid.uuid4().hex)
         run = _owner(store, connection, identity)
+        _no_acquisition(connection, run_id)
         workspace, provider = _states(connection)
         config = provider["config"]
         captured_limits = run["budget"].get("parent_limits")
@@ -276,6 +283,7 @@ def authorize(store, stage, workspace, provider_state, db, *, reserved=False):
     if row[3] != ("reserved" if reserved else "prepared"):
         raise ValueError("Research stage was already dispatched or is unavailable.")
     run = _owner(store, db, stage)
+    _no_acquisition(db, stage.run_id)
     config = provider_state["config"]
     spec = json.loads(row[5])
     if (config.get("protocol") != "ollama" or spec["model"] not in provider_state.get("models", [])

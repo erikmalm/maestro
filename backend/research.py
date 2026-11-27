@@ -197,6 +197,8 @@ class ResearchStore:
                    "PRIMARY KEY(run_id,sequence))")
         from backend.research_stages import initialize
         initialize(db)
+        from backend.acquisition import initialize as initialize_acquisitions
+        initialize_acquisitions(db)
 
     @contextmanager
     def _transaction(self, db=None):
@@ -369,6 +371,8 @@ class ResearchStore:
 
     def _terminal(self, db, run, state, kind, summary=None):
         from backend.research_stages import release_finishing
+        from backend.acquisition import retire_run
+        retire_run(self, db, run)
         release_finishing(self, db, run)
         run["permissions"]["memory_derived"] |= self._chat_memory(db, run["chat_id"])
         self._elapsed(run)
@@ -377,6 +381,10 @@ class ResearchStore:
 
     def _purge(self, db, run_id):
         from backend.research_stages import purge
+        from backend.acquisition import retire_run
+        row = self._row(db, run_id)
+        if row is not None and row[4] != "deleted":
+            retire_run(self, db, self._public(db, row), purge=True)
         purge(db, run_id)
         db.execute("DELETE FROM research_events WHERE run_id=?", (run_id,))
         db.execute("UPDATE research_runs SET state='deleted',chat_id=NULL,claim_token=NULL,payload='{}',updated_at=? WHERE id=?",
@@ -682,6 +690,10 @@ class ResearchStore:
         with self._transaction(db) as connection:
             for (run_id,) in connection.execute("SELECT id FROM research_runs WHERE chat_id=?", (chat_id,)).fetchall():
                 from backend.research_stages import purge
+                from backend.acquisition import retire_run
+                row = self._row(connection, run_id)
+                if row[4] != "deleted":
+                    retire_run(self, connection, self._public(connection, row), purge=True)
                 purge(connection, run_id)
             connection.execute("DELETE FROM research_events WHERE run_id IN (SELECT id FROM research_runs WHERE chat_id=?)",
                                (chat_id,))

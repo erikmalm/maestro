@@ -409,7 +409,7 @@ class WebSearchTests(unittest.TestCase):
                     release.set()
                 self.assertEqual(len(calls), 1)
                 self.assertTrue(closed)
-                self.assertEqual(self.service.read_state()["ledger"][-1]["status"], "failed")
+                self.assertEqual(self.service.read_state()["ledger"][-1]["status"], "uncertain")
                 self.assertIsNone(self.service.status()["tested_at"])
         self.assertEqual(self.service.status()["searches_today"], 3)
 

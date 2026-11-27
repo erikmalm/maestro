@@ -1,10 +1,13 @@
 """Bounded Ollama hosted search; its credential never reaches local inference."""
 import asyncio
 from contextlib import closing, contextmanager
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
+import hashlib
 from email.utils import parsedate_to_datetime
 import ipaddress
 import json
+from pathlib import Path
 import re
 import sqlite3
 import uuid
@@ -75,6 +78,42 @@ def safe_url(value):
         return False
 
 
+@dataclass(frozen=True)
+class SearchBooking:
+    """An in-memory capability bound to one durable, opaque quota booking."""
+    request_id: str
+    query: str = field(repr=False)
+    max_results: int
+    test: bool
+    credential_binding: str = field(repr=False)
+    nonce: str = field(repr=False)
+
+
+class SearchFailure(ValueError):
+    def __init__(self, message, *, outcome, dispatched):
+        super().__init__(message)
+        self.outcome, self.dispatched = outcome, dispatched
+
+
+def _binding(key):
+    return hashlib.sha256(key.encode("utf-8")).hexdigest()
+
+
+def _booking_hash(booking):
+    if (not isinstance(booking, SearchBooking)
+            or not isinstance(booking.request_id, str) or not re.fullmatch(r"[a-f0-9]{32}", booking.request_id)
+            or not isinstance(booking.query, str) or not 1 <= len(booking.query.strip()) <= 512
+            or type(booking.max_results) is not int or not 1 <= booking.max_results <= 3
+            or type(booking.test) is not bool
+            or not isinstance(booking.credential_binding, str)
+            or not re.fullmatch(r"[a-f0-9]{64}", booking.credential_binding)
+            or not isinstance(booking.nonce, str) or not re.fullmatch(r"[a-f0-9]{32}", booking.nonce)):
+        raise ValueError("Use a server-created search booking.")
+    material = [booking.request_id, booking.query, booking.max_results, booking.test,
+                booking.credential_binding, booking.nonce]
+    return hashlib.sha256(json.dumps(material, ensure_ascii=False, separators=(",", ":")).encode("utf-8")).hexdigest()
+
+
 class WebSearch:
     def __init__(self, database, timezone):
         self.database, self.timezone = database, timezone
@@ -94,15 +133,29 @@ class WebSearch:
         return {"config": DEFAULT.copy(), "tested_at": None, "paused_until": None, "ledger": []}
 
     @contextmanager
-    def transaction(self):
-        with closing(sqlite3.connect(self.database, timeout=10)) as db, db:
-            db.execute("PRAGMA secure_delete=ON")
-            db.execute("CREATE TABLE IF NOT EXISTS web_search_state (id INTEGER PRIMARY KEY CHECK(id=1), value TEXT NOT NULL)")
-            db.execute("BEGIN IMMEDIATE")
-            row = db.execute("SELECT value FROM web_search_state WHERE id=1").fetchone()
-            state = json.loads(row[0]) if row else self.read_state()
+    def _connection(self, db=None):
+        if db is not None:
+            if not db.in_transaction:
+                raise ValueError("Search changes require an active workspace transaction.")
+            main = next((row[2] for row in db.execute("PRAGMA database_list") if row[1] == "main"), "")
+            if not main or Path(main).resolve() != Path(self.database).resolve():
+                raise ValueError("Search and acquisition must share the same workspace database.")
+            yield db
+            return
+        with closing(sqlite3.connect(self.database, timeout=10)) as connection, connection:
+            connection.execute("PRAGMA secure_delete=ON")
+            connection.execute("BEGIN IMMEDIATE")
+            yield connection
+
+    @contextmanager
+    def transaction(self, db=None):
+        with self._connection(db) as connection:
+            connection.execute("CREATE TABLE IF NOT EXISTS web_search_state (id INTEGER PRIMARY KEY CHECK(id=1), value TEXT NOT NULL)")
+            row = connection.execute("SELECT value FROM web_search_state WHERE id=1").fetchone()
+            state = json.loads(row[0]) if row else {
+                "config": DEFAULT.copy(), "tested_at": None, "paused_until": None, "ledger": []}
             yield state
-            db.execute("INSERT INTO web_search_state VALUES(1,?) ON CONFLICT(id) DO UPDATE SET value=excluded.value", (json.dumps(state),))
+            connection.execute("INSERT INTO web_search_state VALUES(1,?) ON CONFLICT(id) DO UPDATE SET value=excluded.value", (json.dumps(state),))
 
     def summary(self, state=None):
         state = state or self.read_state()
@@ -141,84 +194,180 @@ class WebSearch:
         with self.transaction() as state:
             for entry in state["ledger"]:
                 if entry["status"] == "reserved":
-                    entry["status"] = "interrupted"  # Keep the attempt charged to its search allowance.
+                    # Legacy reservations may already have reached the provider.
+                    entry["status"] = "cancelled" if "booking_hash" in entry else "interrupted"
+                elif entry["status"] == "dispatched":
+                    entry["status"] = "uncertain"
+                # Every booking stays charged, including known predispatch cancellation.
 
-    def search(self, query, test=False):
-        if not isinstance(query, str) or not 1 <= len(query.strip()) <= 512:
+    def _readiness(self, state, query, test):
+        key, _ = credentials.read(ENDPOINT)
+        if not key:
+            raise ValueError("Add and test an Ollama search API key in Settings.")
+        if not key.isascii() or not key.isprintable():
+            raise ValueError("Enter a valid API key without control or non-ASCII characters.")
+        if key in query:
+            raise ValueError("A search query must not contain the Ollama credential.")
+        summary = self.summary(state)
+        if not test and not state["config"]["enabled"]:
+            raise ValueError("Automatic web search is disabled in Settings.")
+        if not test and not state["tested_at"]:
+            raise ValueError("Test the Ollama search key in Settings before automatic search.")
+        if summary["paused_until"]:
+            raise ValueError("Ollama search is paused after a rate limit. Wait until the cooldown ends.")
+        return key, summary
+
+    def reserve(self, query, *, request_id=None, test=False, db=None):
+        if (not isinstance(query, str) or not 1 <= len(query.strip()) <= 512
+                or type(test) is not bool):
             raise ValueError("The model must provide one search query of at most 512 characters.")
-        with self.transaction() as state:
-            key, _ = credentials.read(ENDPOINT)
-            if not key:
-                raise ValueError("Add and test an Ollama search API key in Settings.")
-            if not key.isascii() or not key.isprintable():
-                raise ValueError("Enter a valid API key without control or non-ASCII characters.")
-            if key in query:
-                raise ValueError("A search query must not contain the Ollama credential.")
-            summary = self.summary(state)
-            if not test and not state["config"]["enabled"]:
-                raise ValueError("Automatic web search is disabled in Settings.")
-            if not test and not state["tested_at"]:
-                raise ValueError("Test the Ollama search key in Settings before automatic search.")
+        query = query.strip()
+        request_id = uuid.uuid4().hex if request_id is None else request_id
+        if not isinstance(request_id, str) or not re.fullmatch(r"[a-f0-9]{32}", request_id):
+            raise ValueError("Use a valid search attempt identifier.")
+        with self.transaction(db) as state:
+            if any(entry["id"] == request_id for entry in state["ledger"]):
+                raise ValueError("That search attempt is already booked and cannot be reserved again.")
+            key, summary = self._readiness(state, query, test)
             if not summary["remaining_today"]:
                 raise ValueError("Daily web search limit reached. Adjust the search allowance in Settings.")
-            if summary["paused_until"]:
-                raise ValueError("Ollama search is paused after a rate limit. Wait until the cooldown ends.")
-            if any(entry["status"] == "reserved" for entry in state["ledger"]):
+            if any(entry["status"] in ("reserved", "dispatched") for entry in state["ledger"]):
                 raise ValueError("A web search is already running. Wait for it to finish.")
             if state["ledger"] and (self.now() - datetime.fromisoformat(state["ledger"][-1]["at"])).total_seconds() < 5:
                 raise ValueError("Search requests are spaced at least five seconds apart. Wait before trying again.")
-            request_id = uuid.uuid4().hex
-            state["ledger"].append({"id": request_id, "at": self.now().isoformat(), "status": "reserved"})
-            max_results = state["config"]["max_results"]
+            booking = SearchBooking(request_id, query, state["config"]["max_results"], test,
+                                    _binding(key), uuid.uuid4().hex)
+            state["ledger"].append({"id": request_id, "at": self.now().isoformat(), "status": "reserved",
+                                    "booking_hash": _booking_hash(booking)})
+            return booking
+
+    @staticmethod
+    def _entry(state, booking):
+        expected = _booking_hash(booking)
+        entry = next((entry for entry in state["ledger"] if entry["id"] == booking.request_id), None)
+        if entry is None or entry.get("booking_hash") != expected:
+            raise ValueError("That search booking is unavailable or has changed.")
+        return entry
+
+    def finalize(self, booking, outcome, *, db=None):
+        if outcome not in ("completed", "failed", "uncertain", "cancelled"):
+            raise ValueError("Use a recorded search outcome.")
+        with self.transaction(db) as state:
+            entry = self._entry(state, booking)
+            if entry["status"] not in ("reserved", "dispatched"):
+                return False
+            if outcome in ("completed", "uncertain") and entry["status"] != "dispatched":
+                raise ValueError("An undispatched search cannot have a provider outcome.")
+            if outcome == "cancelled" and entry["status"] != "reserved":
+                raise ValueError("A dispatched search cannot be cancelled as undispatched.")
+            entry["status"] = outcome
+            key, _ = credentials.read(ENDPOINT)
+            if booking.test and key and _binding(key) == booking.credential_binding:
+                state["tested_at"] = self.now().isoformat() if outcome == "completed" else None
+            return True
+
+    def dispatch(self, booking, *, before_dispatch=None, finalize=True):
+        """Claim once, then perform transport outside all workspace write locks.
+
+        A journal callback may validate ownership and mark its attempt dispatched in
+        the same transaction. With finalize=False the caller atomically settles the
+        journal and this ledger after the response, failure or unknown completion.
+        """
+        _booking_hash(booking)
+        claimed = False
+        eligible = False
         try:
+            with self._connection() as db:
+                with self.transaction(db) as state:
+                    entry = self._entry(state, booking)
+                    if entry["status"] != "reserved":
+                        raise SearchFailure("That search attempt was already dispatched or is unavailable.",
+                                            outcome="cancelled", dispatched=False)
+                    eligible = True
+                    key, summary = self._readiness(state, booking.query, booking.test)
+                    if (_binding(key) != booking.credential_binding
+                            or state["config"]["max_results"] != booking.max_results):
+                        raise ValueError("Search credentials or settings changed after reservation.")
+                    if datetime.fromisoformat(entry["at"]).astimezone(self.timezone).date() != self.now().date():
+                        raise ValueError("That search booking expired before dispatch. Start a new attempt.")
+                    if summary["searches_today"] > state["config"]["daily_limit"]:
+                        raise ValueError("Daily web search limit changed before dispatch.")
+                    if before_dispatch is not None:
+                        before_dispatch(db)
+                    entry["status"] = "dispatched"
+            claimed = True
             loop = asyncio.new_event_loop()
             try:
-                response, body = loop.run_until_complete(search_response(key, query.strip(), max_results))
+                response, body = loop.run_until_complete(search_response(key, booking.query, booking.max_results))
             finally:
                 # asyncio.run() waits for uncancellable OS DNS worker threads on shutdown.
                 loop.run_until_complete(loop.shutdown_asyncgens())
                 loop.close()
-            if response.status_code == 429:
-                wait = 60
-                try:
-                    retry = response.headers.get("Retry-After", "60")
-                    wait = int(retry) if retry.isdigit() else int((parsedate_to_datetime(retry) - self.now()).total_seconds())
-                except (TypeError, ValueError, OverflowError):
-                    pass
-                with self.transaction() as state:
-                    state["paused_until"] = (self.now() + timedelta(seconds=max(5, min(wait, 315360000)))).isoformat()
-                raise ValueError("Ollama search rate limit reached. Search is paused; no automatic retry will run.")
-            if response.status_code in (401, 403):
-                with self.transaction() as state:
-                    if credentials.read(ENDPOINT)[0] == key:
-                        state["config"]["enabled"] = False
-                        state["tested_at"] = None
-                raise ValueError("Ollama rejected the search key or account access. Check the key and Ollama account.")
-            if response.status_code != 200:
-                raise ValueError(f"Ollama search returned HTTP {response.status_code}. Check the service before retrying.")
-            data = json.loads(body)
-            if not isinstance(data, dict) or not isinstance(data.get("results"), list):
-                raise ValueError("Ollama search returned an invalid result list.")
-            results = []
-            for item in data["results"][:max_results]:
-                if not isinstance(item, dict) or not all(isinstance(item.get(k), str) for k in ("title", "url", "content")):
-                    continue
-                if len(item["url"]) > 2048 or key in item["url"] or key in unquote(item["url"]) or not safe_url(item["url"]):
-                    continue
-                results.append({"title": credentials.redact(item["title"], key)[:200], "url": item["url"],
-                                "content": credentials.redact(item["content"], key)[:1200]})
-            if not results:
-                raise ValueError("Ollama search returned no usable public sources. No answer was generated from search.")
-            with self.transaction() as state:
-                next(entry for entry in state["ledger"] if entry["id"] == request_id)["status"] = "completed"
-                if test and credentials.read(ENDPOINT)[0] == key:
-                    state["tested_at"] = self.now().isoformat()
-            return {"query": query.strip(), "at": self.now().isoformat(), "sources": results}
-        except Exception as error:
-            with self.transaction() as state:
-                next(entry for entry in state["ledger"] if entry["id"] == request_id)["status"] = "failed"
-                if test and credentials.read(ENDPOINT)[0] == key:
-                    state["tested_at"] = None
-            if isinstance(error, ValueError) and not isinstance(error, (json.JSONDecodeError, UnicodeDecodeError)):
+            receipt = self._response(booking, key, response, body)
+            if finalize:
+                self.finalize(booking, "completed")
+            return receipt
+        except BaseException as error:
+            outcome = "cancelled" if not claimed else "failed" if isinstance(error, ValueError) else "uncertain"
+            if isinstance(error, SearchFailure):
+                outcome = error.outcome
+            if finalize and eligible:
+                self.finalize(booking, outcome)
+            if not isinstance(error, Exception):
                 raise
-            raise ValueError("Ollama search failed or returned unusable data. No automatic retry was attempted.") from None
+            if isinstance(error, SearchFailure):
+                raise
+            if isinstance(error, ValueError) and not isinstance(error, (json.JSONDecodeError, UnicodeDecodeError)):
+                message = str(error)
+            else:
+                message = "Ollama search failed or returned unusable data. No automatic retry was attempted."
+            raise SearchFailure(message, outcome=outcome, dispatched=claimed) from None
+
+    def _response(self, booking, key, response, body):
+        # Imported here because stage/source safety validation reuses this module.
+        from backend.research_stages import safe_stage_content
+
+        if response.status_code == 429:
+            wait = 60
+            try:
+                retry = response.headers.get("Retry-After", "60")
+                wait = int(retry) if retry.isdigit() else int((parsedate_to_datetime(retry) - self.now()).total_seconds())
+            except (TypeError, ValueError, OverflowError):
+                pass
+            with self.transaction() as state:
+                state["paused_until"] = (self.now() + timedelta(seconds=max(5, min(wait, 315360000)))).isoformat()
+            raise ValueError("Ollama search rate limit reached. Search is paused; no automatic retry will run.")
+        if response.status_code in (401, 403):
+            with self.transaction() as state:
+                if credentials.read(ENDPOINT)[0] == key:
+                    state["config"]["enabled"] = False
+                    state["tested_at"] = None
+            raise ValueError("Ollama rejected the search key or account access. Check the key and Ollama account.")
+        if response.status_code != 200:
+            raise ValueError(f"Ollama search returned HTTP {response.status_code}. Check the service before retrying.")
+        data = json.loads(body)
+        if not isinstance(data, dict) or not isinstance(data.get("results"), list):
+            raise ValueError("Ollama search returned an invalid result list.")
+        results = []
+        for item in data["results"][:booking.max_results]:
+            if not isinstance(item, dict) or not all(isinstance(item.get(k), str) for k in ("title", "url", "content")):
+                continue
+            if len(item["url"]) > 2048 or key in item["url"] or key in unquote(item["url"]) or not safe_url(item["url"]):
+                continue
+            source = {"title": credentials.redact(item["title"], key), "url": item["url"],
+                      "content": credentials.redact(item["content"], key)}
+            # Credential rotation while transport is active cannot remove its key
+            # from safety checks. Inspect full redacted text before model limits;
+            # encoded remnants must not become returned or persisted evidence.
+            try:
+                safe_stage_content([source, json.dumps(source, ensure_ascii=False)],
+                                   {"protocol": "ollama"}, secrets=(key,))
+            except ValueError:
+                continue
+            results.append({**source, "title": source["title"][:200], "content": source["content"][:1200]})
+        if not results:
+            raise ValueError("Ollama search returned no usable public sources. No answer was generated from search.")
+        return {"query": booking.query, "at": self.now().isoformat(), "sources": results}
+
+    def search(self, query, test=False):
+        return self.dispatch(self.reserve(query, test=test))
