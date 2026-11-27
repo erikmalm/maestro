@@ -11,7 +11,7 @@ import sqlite3
 import uuid
 from contextlib import closing
 
-from backend.research import _date, _encoded, _identifier, _text
+from backend.research import AMOUNTS, _date, _encoded, _identifier, _text
 from backend.research_requirements import validate_saved_assessment
 from backend.research_evidence import validate_saved_review
 from backend.research_stages import safe_stage_content
@@ -164,6 +164,8 @@ class AcquisitionJournal:
                 if row[0] is None:
                     raise ValueError("Research provider settings are unavailable.")
                 config = json.loads(row[0])
+        if config.get("protocol") != "ollama":
+            raise ValueError("Research acquisition requires the local Ollama provider.")
         spec["provider_config_hash"] = _hash(config)
         safe_stage_content([spec, _encoded(spec, MAX_SPEC)], config)
         return json.loads(_encoded(spec, MAX_SPEC))
@@ -216,7 +218,8 @@ class AcquisitionJournal:
         finishing_seconds = 0 if held else 40
         finishing_calls = 0 if held else 2
         finishing_tokens = 0 if held else 8192
-        if (budget["remaining"]["seconds"] < (0 if reserved else SEARCH_TIMEOUT) + finishing_seconds
+        if (any(budget["consumed"][name] + budget["reserved"][name] > budget["total"][name] for name in AMOUNTS)
+                or budget["remaining"]["seconds"] < (0 if reserved else SEARCH_TIMEOUT) + finishing_seconds
                 or budget["remaining"]["model_calls"] < finishing_calls
                 or budget["remaining"]["tokens"] < finishing_tokens
                 or self.store.clock() + SEARCH_TIMEOUT > _date(budget["deadline"]).timestamp()
@@ -303,11 +306,15 @@ class AcquisitionJournal:
             if receipt is not None:
                 try:
                     self._authorize(db, attempt, record, settled=True)
-                    saved = {"query": receipt["query"], "at": receipt["at"],
-                             "sources": [{"title": value["title"], "url": value["url"],
-                                          "content_hash": hashlib.sha256(value["content"].encode("utf-8")).hexdigest()}
-                                         for value in receipt["sources"]]}
-                    safe_stage_content([saved, _encoded(saved, MAX_SPEC)], {})
+                    candidate = {"query": receipt["query"], "at": receipt["at"],
+                                 "sources": [{"title": value["title"], "url": value["url"],
+                                              "content_hash": hashlib.sha256(value["content"].encode("utf-8")).hexdigest()}
+                                             for value in receipt["sources"]]}
+                    # Only accepted metadata may be persisted or authorize a
+                    # returned response. Screen its body too after key rotation.
+                    safe_stage_content([receipt, _encoded(receipt, 131072), candidate, _encoded(candidate, MAX_SPEC)],
+                                       {"protocol": "ollama"})
+                    saved = candidate
                     state = "response_received"
                 except (ValueError, KeyError):
                     state = "failed"
@@ -315,10 +322,13 @@ class AcquisitionJournal:
                        (state, _encoded(saved, MAX_SPEC) if saved is not None else None, self.store.stamp(), attempt.attempt_id))
             return saved is not None
 
-    def _pins(self, record, references, context_store, retrieved_after):
+    def _context(self, context_store):
         from backend.context_store import ContextStore
         if not isinstance(context_store, ContextStore) or context_store.database != self.store.database:
             raise ValueError("Acquisition evidence must belong to this private workspace.")
+
+    def _pins(self, record, references, context_store, retrieved_after):
+        self._context(context_store)
         if not isinstance(references, list) or not 1 <= len(references) <= record["spec"]["max_results"]:
             raise ValueError("Use the durable saved evidence references.")
         minimum = _date(retrieved_after)
@@ -345,8 +355,12 @@ class AcquisitionJournal:
         record = self.get(attempt.attempt_id)
         if record["state"] != "response_received":
             raise ValueError("No received acquisition is ready to publish.")
+        self._context(context_store)
+        generation = context_store.policy_generation()
         refs = self._pins(record, references, context_store, record["receipt"]["at"])
         with self.store._transaction() as db:
+            if context_store.policy_generation(db) != generation:
+                raise ValueError("Archive policy changed before acquisition publication.")
             current = self._record(db, attempt.attempt_id)
             if current != record:
                 raise ValueError("Acquisition changed before publication.")
@@ -358,12 +372,16 @@ class AcquisitionJournal:
     def reusable(self, attempt, context_store, *, retrieved_after):
         # This first slice deliberately restricts reuse to the same owned run.
         record = self.get(attempt.attempt_id)
+        self._context(context_store)
         with self.store._transaction() as db:
             if record["state"] != "completed" or record["spec"] is None or record["run_id"] != attempt.run_id:
                 raise ValueError("This acquisition has no reusable published evidence.")
             self._authorize(db, attempt, record, settled=True)
+            generation = context_store.policy_generation(db)
         refs = self._pins(record, record["refs"], context_store, retrieved_after)
         with self.store._transaction() as db:
+            if context_store.policy_generation(db) != generation:
+                raise ValueError("Archive policy changed before acquisition reuse.")
             if self._record(db, attempt.attempt_id) != record:
                 raise ValueError("Acquisition changed before reuse.")
             self._authorize(db, attempt, record, settled=True)
