@@ -244,6 +244,49 @@ class ContextContentBoundsTests(unittest.TestCase):
         self.assertEqual(result["skipped_count"], 1)
         self.assertEqual(work.body_bytes, 0)
 
+    def test_enlarged_corrupt_objects_cannot_exceed_the_reserved_read_allowance(self):
+        self.enable()
+        objects = set()
+        for number in range(9):
+            saved = self.capture([{**self.source, "content": f"item{number}"}])["sources"][0]
+            digest = saved["content_hash"]
+            path = self.store.archive / "objects" / "sha256" / digest[:2] / (digest + ".txt")
+            path.write_bytes(path.read_bytes() + b"x" * (SOURCE_BYTES - 5))
+            objects.add(path)
+
+        # Count bytes consumed by the actual file stream: read_archive raises
+        # on oversized objects, so counting only successful returns misses them.
+        opened, reads = Path.open, []
+
+        class TrackedReader:
+            def __init__(self, stream):
+                self.stream = stream
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *error):
+                return self.stream.__exit__(*error)
+
+            def read(self, size=-1):
+                value = self.stream.read(size)
+                reads.append((size, len(value)))
+                return value
+
+        def tracked_open(path, *args, **kwargs):
+            stream = opened(path, *args, **kwargs)
+            return TrackedReader(stream) if path in objects else stream
+
+        work = CandidateWork()
+        with patch.object(Path, "open", tracked_open):
+            result = self.store.lookup_candidates(work=work)
+        self.assertEqual((result["candidates"], result["skipped_count"]), ([], 9))
+        self.assertEqual(work.body_bytes, 45)
+        # Each five-byte reservation permits only one extra rejection sentinel,
+        # rather than a complete 256 KiB read from every corrupt object.
+        self.assertEqual(reads, [(6, 6)] * 9)
+        self.assertLessEqual(sum(actual for _, actual in reads), work.body_bytes + work.examined)
+
     def test_accepted_duplicate_fts_nominations_do_not_reload_full_content(self):
         self.enable()
         saved = self.capture([{**self.source, "content": "public valid " * 2000}])["sources"][0]

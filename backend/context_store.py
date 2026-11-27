@@ -360,7 +360,9 @@ class ContextStore:
         if self._deleted(data["capture_id"]):
             raise ValueError("Invalid or unavailable source capture.")
         obj = data["object"]
-        raw = read_archive(self.archive, obj["path"], SOURCE_BYTES)
+        # The validated size is also the caller's reserved body allowance.
+        # read_archive permits one extra byte only to detect an enlarged object.
+        raw = read_archive(self.archive, obj["path"], obj["bytes"])
         if len(raw) != obj["bytes"] or hashlib.sha256(raw).hexdigest() != obj["sha256"]:
             raise ValueError("An archived source failed its hash check.")
         return data, raw.decode("utf-8")
