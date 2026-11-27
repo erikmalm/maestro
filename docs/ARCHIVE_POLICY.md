@@ -27,7 +27,7 @@ Public HTTP/HTTPS links use their normal ports under `all_public`. Approved scop
 
 A path scope matches its exact origin and path components, excluding query URLs. An explicitly approved query URL matches only that complete normalized URL; changing values, parameter order or encoding requires another approval. Eligibility also excludes known authenticated paths and credential, signed, session or personal query forms.
 
-Credential checks inspect bounded percent-encoded and HTML-escaped safety views without changing stored text or URL identity. Invalid or excessively escaped inputs are rejected when they cannot be checked. Callers must supply the known credentials and apply these checks before export.
+Credential checks inspect bounded percent-encoded and HTML-escaped safety views without changing stored text or URL identity. Invalid or excessively escaped inputs are rejected when they cannot be checked. Callers must supply the known credentials and apply these checks before export. Research-stage screening charges original, serialized and decoded views to a shared 4,194,304-character allowance, with a 65,536-node cap and depth 32. Its JSON-escape-run ceiling derives from that same allowance, so supported newline- or quote-heavy content remains usable without removing credential checks.
 
 Retrieval timestamps require a timezone and normalize to UTC. Canonical metadata hashes preserve the metadata values and ignore dictionary key order. Manifest metadata validation does not establish that source claims are correct. The merged research coverage and final-review stages assess relevance and support separately; neither valid manifests nor model agreement establishes publisher truth. Backend action verification remains future execution work.
 

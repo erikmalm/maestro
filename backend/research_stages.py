@@ -118,7 +118,11 @@ def safe_stage_content(value, config, *, secrets=()):
         return known
     # Shared across original containers and every decoded view. These allow
     # normal maximum context packets while bounding nested/hostile encodings.
-    remaining_nodes, remaining_chars, remaining_json_runs = 65536, 4 * 1024 * 1024, 65536
+    remaining_nodes, remaining_chars = 65536, 4 * 1024 * 1024
+    # Every JSON escape run consumes at least two characters from this same
+    # aggregate allowance. Derive its finite ceiling instead of rejecting a
+    # supported source merely for having many separated newlines or quotes.
+    remaining_json_runs = remaining_chars // 2
     pending, seen_strings, seen_containers = [(value, 0)], set(), set()
     while pending:
         item, depth = pending.pop()

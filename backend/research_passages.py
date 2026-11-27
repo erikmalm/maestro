@@ -336,8 +336,8 @@ def select_packet(candidates, assessment, lookup, *, max_passages=MAX_PASSAGES, 
         _invalid()
     packet = {"version": 1, "offset_unit": "unicode_codepoint", "lookup": _lookup(lookup),
               "selection": {"limited": False, "omitted_count": 0}, "sources": [], "passages": []}
-    # Reserve the longer true flag and bounded omission counter during fitting.
-    if packet_size({**packet, "selection": {"limited": True, "omitted_count": 999999}}) > max_bytes:
+    # Reserve the longer false flag and bounded omission counter during fitting.
+    if packet_size({**packet, "selection": {"limited": False, "omitted_count": 999999}}) > max_bytes:
         _invalid()
     work = _PassageWork()
     records, windows, omitted_candidates, next_candidate = {}, [], 0, 0
@@ -404,7 +404,9 @@ def select_packet(candidates, assessment, lookup, *, max_passages=MAX_PASSAGES, 
         def proposal(length):
             left = max(start, min(anchor - length // 2, end - length))
             result = {**packet,
-                      "selection": {"limited": True, "omitted_count": len(windows)},
+                      # Selected passages only reduce this counter. Reserve
+                      # whole omissions and the longer final boolean too.
+                      "selection": {"limited": False, "omitted_count": len(windows) + omitted_candidates},
                       "sources": packet["sources"] + ([] if identity in source_ids else [proposed_source]),
                       "passages": packet["passages"] + [_passage(identifier, source_id, content, left, left + length)]}
             return result

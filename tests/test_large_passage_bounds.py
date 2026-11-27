@@ -85,6 +85,38 @@ class LargePassageBoundsTests(unittest.TestCase):
         self.assertEqual(passages.validate_packet(packet, self.loader(sources)), packet)
         self.assertEqual(sources, original)
 
+    def test_tight_packet_fitting_reserves_digits_for_omitted_dense_candidates(self):
+        sparse = candidate("Acme revenue FY2025 was USD 42 million.")
+        dense = [candidate("Acme " * 513, number) for number in range(2, 12)]
+        sources = [sparse, *dense]
+        original = deepcopy(sources)
+        single = passages.select_packet([sparse], assessment(), LOOKUP, max_passages=1)
+        # One nominated window has a one-digit counter; the ten whole-source
+        # omissions need two digits even after the usable passage is selected.
+        allowance = passages.packet_size({**single, "selection": {"limited": True, "omitted_count": 1}})
+        packet = passages.select_packet(sources, assessment(), LOOKUP, max_passages=1, max_bytes=allowance)
+        self.assertEqual(len(packet["passages"]), 1)
+        self.assertEqual(packet["selection"], {"limited": True, "omitted_count": 10})
+        self.assertLessEqual(passages.packet_size(packet), allowance)
+        self.assertEqual(packet["sources"][0]["content_hash"], sparse["content_hash"])
+        self.assertEqual(packet["sources"][0]["manifest_hash"], sparse["manifest_hash"])
+        self.assertEqual(passages.validate_packet(packet, self.loader(sources)), packet)
+        self.assertEqual(sources, original)
+
+    def test_tight_packet_fitting_reserves_the_longer_final_boolean(self):
+        source = candidate("Acme revenue FY2025 was USD 42 million.")
+        full = passages.select_packet([source], assessment(), LOOKUP, max_passages=1)
+        self.assertFalse(full["selection"]["limited"])
+        # JSON false is one byte longer than true. A full source that fits a
+        # true placeholder must still yield a bounded, usable fitted packet.
+        allowance = passages.packet_size(full) - 1
+        packet = passages.select_packet([source], assessment(), LOOKUP, max_passages=1, max_bytes=allowance)
+        self.assertEqual(len(packet["passages"]), 1)
+        self.assertEqual(packet["selection"], {"limited": True, "omitted_count": 0})
+        self.assertLessEqual(passages.packet_size(packet), allowance)
+        self.assertLess(len(packet["passages"][0]["text"]), len(source["content"]))
+        self.assertEqual(passages.validate_packet(packet, self.loader([source])), packet)
+
     def test_aggregate_body_allowance_retains_only_complete_candidate_nominations(self):
         first = candidate("ordinary context " * 1000 + "Acme revenue FY2025 USD 41.", 1)
         sources = [first, candidate("Acme revenue FY2025 USD 42.", 2),

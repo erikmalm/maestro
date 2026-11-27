@@ -169,7 +169,9 @@ class ResearchStageJsonScreenTests(unittest.TestCase):
             deep = [deep]
         values = (deep, ["ordinary"] * 65536,
                   [str(index) + "x" * 65530 for index in range(65)],
-                  [str(index) + r"\nX" * 20000 for index in range(4)])
+                  # Original (3), escape (2) and decoded (2) characters per
+                  # unit exceed the shared 4 Mi character allowance together.
+                  [str(index) + r"\nX" * 20000 for index in range(32)])
         with patch.object(credentials, "read", return_value=(None, "synthetic")):
             for value in values:
                 with self.subTest(shape=type(value).__name__):
