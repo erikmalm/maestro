@@ -23,8 +23,9 @@ export type Message = {
   memory_ids?: string[];
   feedback?: MessageFeedback | null;
   cost?: number;
-  input_tokens?: number;
-  output_tokens?: number;
+  input_tokens?: number | null;
+  output_tokens?: number | null;
+  usage_status?: "known" | "pending" | "unknown";
   web_search?: {
     query: string;
     at: string;

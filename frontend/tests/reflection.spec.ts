@@ -680,7 +680,11 @@ test("Workspace usage stays current while background reflection completes", asyn
     if (new URL(request.url()).pathname === "/api/workspace")
       workspaceReads += 1;
   });
+  const navigationRead = page.waitForResponse("**/api/workspace*");
   await page.getByRole("button", { name: "Workspace", exact: true }).click();
+  await (await navigationRead).finished();
+  const readsAfterNavigation = workspaceReads;
+  expect(readsAfterNavigation).toBe(1);
   const heading = page.getByRole("heading", {
     name: "Source conversation",
     exact: true,
@@ -729,7 +733,7 @@ test("Workspace usage stays current while background reflection completes", asyn
     ).toHaveText(value);
   await usage.getByRole("button", { name: "Close dialog" }).click();
   await expect(heading).toBeVisible();
-  expect(workspaceReads).toBe(0);
+  expect(workspaceReads).toBe(readsAfterNavigation);
 });
 
 test("reflection polling refreshes shared usage without reloading workspace and ignores stale totals", async ({

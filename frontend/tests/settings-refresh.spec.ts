@@ -831,15 +831,15 @@ for (const [action, search, path] of [
         page.getByRole("button", { name: "Send message", exact: true }),
       ).toBeDisabled();
     }
-    expect(reads).toBe(2);
+    await expect.poll(() => reads).toBe(search ? 2 : 3);
   });
 }
 
 for (const [name, order, failed] of [
-  ["older response first", [0, 1], -1],
-  ["newer response first", [1, 0], -1],
-  ["superseded failure", [1, 0], 0],
-  ["current failure", [1, 0], 1],
+  ["older response first", [0, 1, 2], -1],
+  ["newer response first", [2, 1, 0], -1],
+  ["superseded failure", [2, 1, 0], 0],
+  ["current failure", [2, 1, 0], 2],
 ] as const) {
   test(`concurrent settings refresh: ${name}`, async ({ page }) => {
     const state = structuredClone(initial);
@@ -876,6 +876,7 @@ for (const [name, order, failed] of [
       .click();
     await expect.poll(() => pending.length).toBe(2);
     await page.getByRole("button", { name: "Workspace", exact: true }).click();
+    await expect.poll(() => pending.length).toBe(3);
 
     let currentModel = "old-model";
     for (const index of order) {
@@ -888,7 +889,7 @@ for (const [name, order, failed] of [
           ? {
               status: 500,
               json: {
-                detail: `${index ? "Current" : "Superseded"} refresh failed.`,
+                detail: `${index === 2 ? "Current" : "Superseded"} refresh failed.`,
               },
             }
           : { json: snapshot },
@@ -900,7 +901,7 @@ for (const [name, order, failed] of [
             requestAnimationFrame(() => requestAnimationFrame(() => resolve())),
           ),
       );
-      if (index === 1 && failed !== 1) currentModel = "new-model";
+      if (index === 2 && failed !== 2) currentModel = "new-model";
       await expect(
         page.locator(".model-trigger, .composer-bottom > small"),
       ).toHaveText(currentModel);
@@ -911,7 +912,7 @@ for (const [name, order, failed] of [
         page.getByText("Superseded refresh failed.", { exact: true }),
       ).toHaveCount(0);
     }
-    if (failed === 1) {
+    if (failed === 2) {
       await expect(page.getByRole("alert")).toContainText(
         "Current refresh failed.",
       );
@@ -961,7 +962,7 @@ test("a delayed limits save keeps newer provider settings", async ({
   await expect(
     page.locator(".model-trigger, .composer-bottom > small"),
   ).toHaveText("new-model");
-  await expect.poll(() => reads).toBe(3);
+  await expect.poll(() => reads).toBe(4);
   await page
     .getByRole("button", { name: "View usage and manage budgets" })
     .click();

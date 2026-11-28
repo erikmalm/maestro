@@ -489,7 +489,7 @@ def reserve(store, stage, workspace, provider_state, request_id, input_bound, ou
     return authorize(store, stage, workspace, provider_state, db, reserved=True)
 
 
-def settle(store, stage, request_id, *, db, input_tokens, output_tokens, outcome, output, workspace, provider_state, dispatched):
+def settle(store, stage, request_id, *, db, input_tokens, output_tokens, outcome, output, workspace, provider_state, dispatched, usage_known=True):
     _transaction(db)
     if outcome not in ("completed", "failed", "uncertain") or type(dispatched) is not bool:
         raise ValueError("Use a recorded research stage outcome.")
@@ -502,6 +502,7 @@ def settle(store, stage, request_id, *, db, input_tokens, output_tokens, outcome
             runrow = store._row(db, stage.run_id)
             if runrow is not None and runrow[4] != "deleted":
                 store._event(db, stage.run_id, "stage_uncertain")
+                store._refresh_chat_usage(db, store._public(db, runrow), (request_id, None, None))
         return False
     if any(type(value) is not int or value < 0 for value in (input_tokens, output_tokens)):
         raise ValueError("Research token usage is unknown.")
@@ -548,6 +549,7 @@ def settle(store, stage, request_id, *, db, input_tokens, output_tokens, outcome
         store._elapsed(run)
         store._save(db, run, runrow[4], token=runrow[7])
         store._event(db, stage.run_id, "stage_finished" if accepted else "stage_failed")
+        store._refresh_chat_usage(db, run, (request_id, input_tokens, output_tokens) if usage_known else (request_id, None, None))
     return accepted
 
 
@@ -561,7 +563,7 @@ def resolve_unknown(store, request_id, db):
     identity = ResearchStage(row[1], token, row[0], row[2])
     amounts = json.loads(row[3])
     settle(store, identity, request_id, db=db, input_tokens=amounts["tokens"], output_tokens=0,
-           outcome="failed", output=None, workspace=None, provider_state=None, dispatched=True)
+           outcome="failed", output=None, workspace=None, provider_state=None, dispatched=True, usage_known=False)
     return True
 
 

@@ -643,6 +643,7 @@ export default function App() {
       url.searchParams.delete("research_run");
       window.history.replaceState(null, "", url);
     }
+    if (next === "workspace" && page !== "workspace") void refreshWorkspace();
     setPage(next);
     setMobileNav(false);
   }
@@ -1047,8 +1048,21 @@ export default function App() {
                     )}
                     {message.cost !== undefined && (
                       <small className="message-usage">
-                        {message.input_tokens} input · {message.output_tokens}{" "}
-                        output tokens · {money(message.cost)} estimated
+                        {message.usage_status === "pending" ? (
+                          "Token usage pending"
+                        ) : message.usage_status === "unknown" ? (
+                          "Token usage unknown"
+                        ) : message.input_tokens == null ||
+                          message.output_tokens == null ? (
+                          "Token usage unavailable"
+                        ) : (
+                          <>
+                            {message.input_tokens} input ·{" "}
+                            {message.output_tokens} output tokens
+                          </>
+                        )}
+                        {" · "}
+                        {money(message.cost)} estimated
                       </small>
                     )}
                     {!!message.memory_ids?.length && (

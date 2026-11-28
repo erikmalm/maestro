@@ -426,18 +426,57 @@ class ResearchStore:
         safe_stage_content([run["request"], reply, memory_ids], {"protocol": "ollama"})
         if not self._chat_exists(db, run["chat_id"]):
             raise ValueError("The originating conversation is unavailable.")
-        entries = db.execute("SELECT json_extract(l.value,'$.model'),coalesce(json_extract(l.value,'$.input_tokens'),0),"
-            "coalesce(json_extract(l.value,'$.output_tokens'),0) FROM provider_state p,json_each(p.value,'$.ledger') l "
-            "WHERE p.id=1 AND json_extract(l.value,'$.research_run_id')=?", (run["id"],)).fetchall()
+        usage = self._chat_usage(db, run["id"])
         commit_chat_exchange(workspace, db, run["chat_id"], run["request"], reply,
-            model=entries[-1][0] if entries else "", cost=0,
-            input_tokens=sum(entry[1] for entry in entries), output_tokens=sum(entry[2] for entry in entries),
+            model=usage["model"], cost=0, input_tokens=usage["input_tokens"], output_tokens=usage["output_tokens"],
             at=self.stamp(), eligible=direct,
-            database=self.database, timezone=self.timezone, routing="reviewed", memory_ids=memory_ids, research_run_id=run["id"])
+            database=self.database, timezone=self.timezone, routing="reviewed", memory_ids=memory_ids,
+            research_run_id=run["id"], usage_status=usage["usage_status"])
         db.execute("UPDATE workspace SET value=? WHERE id=1", (json.dumps(workspace),))
         run["chat_route"]["published"] = True
         run["chat_route"]["memory_ids"] = list(memory_ids)
         run["permissions"]["memory_derived"] |= bool(memory_ids)
+
+    @staticmethod
+    def _chat_usage(db, run_id, receipt=None):
+        entries = db.execute("SELECT json_extract(l.value,'$.id'),json_extract(l.value,'$.model'),"
+            "json_extract(l.value,'$.status'),json_extract(l.value,'$.input_tokens'),json_extract(l.value,'$.output_tokens'),"
+            "coalesce(json_extract(l.value,'$.local_unknown'),0) OR coalesce(json_extract(l.value,'$.background_unknown'),0) "
+            "OR coalesce(json_extract(l.value,'$.local_recovered'),0),json_extract(l.value,'$.model_calls') "
+            "FROM provider_state p,json_each(p.value,'$.ledger') l WHERE p.id=1 "
+            "AND json_extract(l.value,'$.research_run_id')=?", (run_id,)).fetchall()
+        status, inputs, outputs = "known", 0, 0
+        for entry_id, _, state, input_tokens, output_tokens, unknown, calls in entries:
+            if receipt is not None and receipt[0] == entry_id:
+                input_tokens, output_tokens = receipt[1:]
+                current = "known" if input_tokens is not None else "unknown"
+            elif state in ("reserved", "uncertain"):
+                current = "unknown" if unknown or state == "uncertain" else "pending"
+            elif all(type(value) is int and value >= 0 for value in (input_tokens, output_tokens)):
+                current = "known"
+            else:
+                current = "unknown" if unknown or state != "failed" or calls else "known"
+                input_tokens, output_tokens = 0, 0
+            if current == "unknown" or current == "pending" and status == "known":
+                status = current
+            if current == "known":
+                inputs, outputs = inputs + input_tokens, outputs + output_tokens
+        return {"model": entries[-1][1] if entries else "", "usage_status": status,
+                "input_tokens": inputs if status == "known" else None, "output_tokens": outputs if status == "known" else None}
+
+    def _refresh_chat_usage(self, db, run, receipt):
+        if not (run.get("chat_route") or {}).get("published"):
+            return
+        row = db.execute("SELECT '$.chats['||CAST(c.key AS INTEGER)||'].messages['||CAST(m.key AS INTEGER)||']' "
+            "FROM workspace w,json_each(w.value,'$.chats') c,json_each(c.value,'$.messages') m "
+            "WHERE w.id=1 AND json_extract(c.value,'$.id')=? AND json_extract(m.value,'$.research_run_id')=? "
+            "AND json_extract(m.value,'$.role')='assistant' LIMIT 1", (run["chat_id"], run["id"])).fetchone()
+        if row is not None:
+            usage = self._chat_usage(db, run["id"], receipt)
+            # Change only accounting; do not reload or validate unrelated workspace content.
+            db.execute("UPDATE workspace SET value=json_set(value,?,?,?,?,?,?) WHERE id=1",
+                       (row[0] + ".usage_status", usage["usage_status"], row[0] + ".input_tokens", usage["input_tokens"],
+                        row[0] + ".output_tokens", usage["output_tokens"]))
 
     def finish_chat_stage(self, run_id, token, stage, *, memory_ids=(), secrets=()):
         from backend.chat_routing import validate_route, validate_direct

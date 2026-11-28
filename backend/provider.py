@@ -106,7 +106,7 @@ def _settle_research_accounting(database, state, db, pending):
 
 
 def commit_chat_exchange(workspace, db, chat_id, text, reply, *, model, cost, input_tokens, output_tokens,
-                         at, eligible, database, timezone, kind="chat", routing=None, memory_ids=(), web_search=None, research_run_id=None):
+                         at, eligible, database, timezone, kind="chat", routing=None, memory_ids=(), web_search=None, research_run_id=None, usage_status=None):
     """Commit one exchange using the existing chat/reflection/title conventions."""
     chat = next((item for item in workspace["chats"] if item["id"] == chat_id), None)
     if chat is None or research_run_id and any(item.get("research_run_id") == research_run_id for item in chat["messages"]):
@@ -125,6 +125,8 @@ def commit_chat_exchange(workspace, db, chat_id, text, reply, *, model, cost, in
         assistant["web_search"] = web_search
     if research_run_id:
         assistant["research_run_id"] = research_run_id
+    if usage_status is not None:
+        assistant["usage_status"] = usage_status
     chat["updated_at"] = at
     from backend.reflection import ReflectionStore
     ReflectionStore(database, timezone).enqueue(chat_id, workspace, db, eligible=eligible)

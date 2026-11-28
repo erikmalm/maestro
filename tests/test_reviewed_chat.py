@@ -11,6 +11,7 @@ import uuid
 from backend import app as backend
 from backend.memory import MemoryStore
 from backend.provider import LocalUncertain
+from backend.research import MAX_PROVIDER_STATE_BYTES
 from backend.web_search import ENDPOINT, WebSearch
 from tests import test_research_final_review_api as finals
 from tests import test_research_requirements_api as requirements
@@ -299,6 +300,62 @@ class ReviewedChatTests(unittest.TestCase):
         self.assertEqual([kind for kind, _ in self.calls], ["route"])
         self.assertNotIn(self.reply, [item["text"] for item in self.messages()])
         self.assert_usage(run, 1)
+
+    def test_cancelled_direct_message_keeps_usage_pending_then_refreshes_exact_totals(self):
+        snapshots = []
+        def cancel(payload):
+            store, run_id, _ = self.current()
+            store.cancel(run_id)
+            snapshots.append(deepcopy(self.messages()[-1]))
+        self.direct_hook = cancel
+        run = self.submit()
+        self.assertEqual(run["state"], "cancelled")
+        pending, settled = snapshots[0], self.messages()[-1]
+        self.assertEqual(pending.get("usage_status"), "pending")
+        self.assertIsNone(pending["input_tokens"])
+        self.assertIsNone(pending["output_tokens"])
+        self.assertEqual(settled.get("usage_status"), "known")
+        self.assertEqual((settled["input_tokens"], settled["output_tokens"]), (82, 14))
+        self.assertEqual((settled["id"], settled["text"]), (pending["id"], pending["text"]))
+        self.assertEqual(len(self.messages()), 2)
+        self.assert_usage(run, 2)
+
+    def test_cancelled_unknown_usage_stays_unknown_after_conservative_restart_recovery(self):
+        snapshots = []
+        def unknown(payload):
+            store, run_id, _ = self.current()
+            store.cancel(run_id)
+            snapshots.append(deepcopy(self.messages()[-1]))
+            raise LocalUncertain("Synthetic direct completion unknown.", False)
+        self.direct_hook = unknown
+        run = self.submit()
+        message = self.messages()[-1]
+        self.assertEqual(message.get("usage_status"), "unknown")
+        self.assertIsNone(message["input_tokens"])
+        self.assertIsNone(message["output_tokens"])
+        entry = next(item for item in backend.provider().read_state()["ledger"] if item["status"] == "reserved")
+        with patch("backend.provider.background_network", return_value={"models": []}):
+            backend.provider().recover_local(entry["id"], True, entry["connection_config"]["base_url"])
+        recovered = self.requirements.get(run["id"])
+        self.assertEqual(recovered["budget"]["reserved"]["tokens"], 0)
+        self.assertEqual(self.messages()[-1], message)
+        self.assertEqual((message["id"], message["text"]), (snapshots[0]["id"], snapshots[0]["text"]))
+        self.assertEqual(len(self.calls), 2)
+
+    def test_workspace_growth_after_cancellation_cannot_block_known_accounting(self):
+        def cancel_and_grow(payload):
+            store, run_id, _ = self.current()
+            store.cancel(run_id)
+            with backend.workspace_transaction() as state:
+                state["synthetic_padding"] = "x" * MAX_PROVIDER_STATE_BYTES
+        self.direct_hook = cancel_and_grow
+        run = self.submit()
+        self.assertEqual(run["state"], "cancelled")
+        self.assert_usage(run, 2)
+        message = self.messages()[-1]
+        self.assertEqual(message["usage_status"], "known")
+        self.assertEqual((message["input_tokens"], message["output_tokens"]), (82, 14))
+        self.assertEqual(len(self.messages()), 2)
 
     def test_delete_during_direct_reply_prevents_late_exchange_append(self):
         def delete(payload):
