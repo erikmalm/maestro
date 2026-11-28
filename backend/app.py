@@ -282,6 +282,7 @@ class ResearchInput(StrictModel):
     chat_id: str | None = Field(default=None, min_length=1, max_length=100, strict=True)
     # Lookup remains the compatibility default for already-open clients (#31).
     workflow: Literal["lookup", "requirements", "evidence_review", "research_draft", "research_answer"] = "lookup"
+    source_mode: Literal["saved_only", "research"] = "saved_only"
 
 
 _context_lock = threading.RLock()
@@ -451,7 +452,7 @@ def rename_chat(chat_id: str, entry: ChatTitleInput):
 @app.delete("/api/chats/{chat_id}")
 def delete_chat(chat_id: str):
     # The workspace and provider reservation share this immediate SQLite lock.
-    with workspace_transaction(with_db=True) as (state, db):
+    with _archive_config_lock, workspace_transaction(with_db=True) as (state, db):
         selected_chat(state, chat_id)
         if any(entry["status"] == "reserved" and entry.get("thread_id") == chat_id
                for entry in provider().read_state()["ledger"]):
@@ -742,19 +743,19 @@ def _search_context_candidates(entry: ContextCandidateSearch, *, work=None):
         return unavailable
 
 
-def research_permissions(state, chat_id):
+def research_permissions(state, chat_id, source_mode="saved_only"):
     chat = selected_chat(state, chat_id) if chat_id is not None else None
-    return {"source_mode": "saved_only", "hosted_allowed": False, "memory_recall": False,
+    return {"source_mode": source_mode, "hosted_allowed": source_mode == "research", "memory_recall": False,
             "memory_derived": bool(chat and any(message.get("memory_ids") for message in chat["messages"])),
             "chat_id": chat_id}
 
 
-def research_budget(state):
+def research_budget(state, source_mode="saved_only"):
     # Parent allowances are server owned. This preview spends only local elapsed
     # time; production model stages must use the owned research-stage adapter.
     limits = state["limits"]
     total = {"model_calls": 4, "tokens": limits["max_tokens"], "seconds": 120,
-             "estimated_model_usd": limits["run_usd"], "hosted_searches": 0}
+             "estimated_model_usd": limits["run_usd"], "hosted_searches": int(source_mode == "research")}
     search = WebSearch(DATABASE, TIMEZONE).summary()
     daily_limit = min(20, search["config"]["daily_limit"])
     # Measure elapsed seconds on the timeline, including local clock changes.
@@ -1050,6 +1051,85 @@ def execute_evidence_review(run, token, store):
         store.fail(run["id"], token, "evidence_failed")
 
 
+def execute_targeted_acquisition(run, token, store):
+    """Fill one recorded gap through the existing journal, then review saved pins."""
+    from backend.acquisition import AcquisitionJournal
+    from backend.web_search import SEARCH_TIMEOUT, TARGETED_RESPONSE_BYTES
+    from backend.research_stages import acquisition_tokens_fit, _held, _states
+
+    if run["permissions"]["source_mode"] != "research":
+        return
+    gaps = {item["item_id"] for item in run["evidence_review"]["items"]
+            if item["state"] in ("missing", "stale", "conflicting", "unavailable")}
+    if not gaps:
+        return
+    item = next(item for item in run["assessment"]["items"] if item["id"] in gaps)
+    names = {subject["id"]: subject["name"] for subject in run["assessment"]["subjects"]}
+    query = " ".join([*(names[identity] for identity in item["subject_ids"]), item["criterion"],
+                      *(item[field] for field in ("period", "unit", "currency") if item[field])])
+    if len(query) > 512:
+        store.acquisition_event(run["id"], token, "acquisition_unavailable")
+        return
+    received = False
+    try:
+        with _archive_config_lock:
+            archive = context_store()
+            config = archive._candidate_config()
+            if not config["enabled"] or archive.archive is None or archive.path_error:
+                store.acquisition_event(run["id"], token, "acquisition_not_saved")
+                return
+            limits = {"max_response_bytes": TARGETED_RESPONSE_BYTES,
+                      **{name: config[name] for name in ("max_source_bytes", "max_capture_bytes")}}
+        journal = AcquisitionJournal(store)
+        # Remaining allowance already excludes the protected writer/reviewer.
+        # The extra evidence call and search must both fit before booking.
+        with store._transaction() as db:
+            row = store._row(db, run["id"])
+            if row is None or row[4] != "running" or row[7] != token:
+                return
+            current = store._public(db, row)
+            store._elapsed(current)
+            remaining = current["budget"]["remaining"]
+            enough = (remaining["model_calls"] >= 1 and remaining["tokens"] >= 8192
+                      and remaining["seconds"] >= SEARCH_TIMEOUT + 10 and remaining["hosted_searches"] >= 1
+                      and acquisition_tokens_fit(current, _states(db)[1]["config"], _held(db, run["id"])))
+        if not enough:
+            store.acquisition_event(run["id"], token, "acquisition_unavailable")
+            return
+        search = journal.search.summary()
+        attempt = journal.prepare(run["id"], token, item_ids=[item["id"]], query=query,
+                                  max_results=search["config"]["max_results"], limits=limits)
+        booking = journal.reserve(attempt)
+        operation_secrets = source_secrets()
+        receipt = journal.dispatch(attempt, booking)
+        received = True
+        with _archive_config_lock:
+            archive = context_store()
+            with archive._write_lock:
+                config = archive._candidate_config()
+                if not config["enabled"] or any(config[name] != limits[name]
+                                                for name in ("max_source_bytes", "max_capture_bytes")):
+                    store.acquisition_event(run["id"], token, "acquisition_not_saved")
+                    return
+                with store._transaction() as db:
+                    journal._authorize(db, attempt, journal._record(db, attempt.attempt_id), settled=True)
+                captured = archive.capture(receipt["query"], receipt["at"], receipt["sources"], booking.max_results,
+                                           secrets=(*operation_secrets, *source_secrets()))
+                references = [{key: source[key] for key in ("capture_id", "content_hash", "manifest_hash", "retrieved_at")}
+                              for source in captured["sources"] if source.get("capture_id")]
+                if not references:
+                    store.acquisition_event(run["id"], token, "acquisition_not_saved")
+                    return
+                journal.publish(attempt, references, archive)
+        current = store.get(run["id"])
+        if current["state"] == "running":
+            execute_evidence_review(current, token, store)
+    except (OSError, sqlite3.Error, ValueError, KeyError, TypeError, UnicodeError, RuntimeError):
+        # Controlled events retain the saved-only packet and all actual usage;
+        # received excerpts have no citation until durable pins are published.
+        store.acquisition_event(run["id"], token, "acquisition_not_saved" if received else "acquisition_unavailable")
+
+
 def execute_draft_writer(run, token, store):
     from backend.research_draft import (INSTRUCTIONS, MESSAGE, coverage_hash, gap_draft,
                                         has_support, response_schema, validate_response, writer_input)
@@ -1189,6 +1269,11 @@ def execute_research_run(run_id):
                     if workflow in ("research_draft", "research_answer"):
                         current = store.get(run_id)
                         if current["state"] == "running" and current.get("evidence_review") is not None:
+                            if workflow == "research_answer":
+                                execute_targeted_acquisition(current, token, store)
+                                current = store.get(run_id)
+                            if current["state"] != "running":
+                                return
                             execute_draft_writer(current, token, store)
                             if workflow == "research_answer":
                                 current = store.get(run_id)
@@ -1204,7 +1289,7 @@ def execute_research_run(run_id):
                        ("capture_id", "content_hash", "manifest_hash", "retrieved_at", "stale")}
                       for candidate in packet["candidates"]]
         safe_private_content(run["request"], run["query"], json.dumps(references), secrets=source_secrets())
-        permissions = research_permissions(read_workspace(), run["chat_id"])
+        permissions = research_permissions(read_workspace(), run["chat_id"], run["permissions"]["source_mode"])
         permissions["memory_derived"] |= run["permissions"]["memory_derived"]
         store.finish(run_id, token, {
             "lookup_state": packet["state"], "search_limited": packet["search_limited"],
@@ -1222,6 +1307,8 @@ def create_research_run(entry: ResearchInput, background_tasks: BackgroundTasks)
     invalid = "Check the research request and remove credentials before saving."
     if entry.workflow in ("requirements", "evidence_review", "research_draft", "research_answer") and entry.query:
         raise HTTPException(422, "Requirements assessment does not use saved-evidence keywords.")
+    if entry.source_mode == "research" and entry.workflow != "research_answer":
+        raise HTTPException(422, "Only a reviewed research answer may enable targeted acquisition.")
     try:
         operation_secrets = source_secrets()
         safe_private_content(entry.request, entry.query, entry.submission_id, entry.chat_id or "",
@@ -1234,9 +1321,11 @@ def create_research_run(entry: ResearchInput, background_tasks: BackgroundTasks)
     except (OSError, sqlite3.Error, ValueError, TypeError, UnicodeError, RuntimeError):
         raise HTTPException(422, invalid) from None
     with conflict_errors(), workspace_transaction(with_db=True) as (state, db):
-        permissions = research_permissions(state, entry.chat_id)
+        permissions = research_permissions(state, entry.chat_id, entry.source_mode)
+        if permissions["hosted_allowed"] and permissions["memory_derived"]:
+            raise HTTPException(422, "Hosted research cannot use a conversation containing private memory. Choose saved evidence only.")
         run, created = research_store().create(entry.submission_id, entry.request, entry.query, entry.chat_id,
-                                               permissions, research_budget(state), db, workflow=entry.workflow)
+                                               permissions, research_budget(state, entry.source_mode), db, workflow=entry.workflow)
         if created and entry.workflow in ("requirements", "evidence_review", "research_draft", "research_answer"):
             requirements_model()
         try:
@@ -1296,9 +1385,12 @@ def get_research_run(run_id: str):
 @app.post("/api/research/runs/{run_id}/cancel")
 def cancel_research_run(run_id: str):
     try:
-        store = research_store()
-        store.cancel(run_id)
-        return research_view(store.get(run_id))
+        # The sole API owner serializes terminal transitions with acquisition
+        # publication; no SQLite writer is held during archive I/O.
+        with _archive_config_lock:
+            store = research_store()
+            store.cancel(run_id)
+            return research_view(store.get(run_id))
     except (KeyError, ValueError, TypeError, OSError, sqlite3.Error, UnicodeError):
         raise HTTPException(404, "That research run is unavailable.") from None
 
@@ -1306,7 +1398,8 @@ def cancel_research_run(run_id: str):
 @app.delete("/api/research/runs/{run_id}")
 def delete_research_run(run_id: str):
     try:
-        research_store().delete(run_id)
+        with _archive_config_lock:
+            research_store().delete(run_id)
         return {"deleted": True}
     except (KeyError, ValueError, TypeError, OSError, sqlite3.Error, UnicodeError):
         raise HTTPException(404, "That research run is unavailable.") from None

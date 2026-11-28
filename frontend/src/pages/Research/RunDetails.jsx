@@ -139,7 +139,9 @@ export default function RunDetails({ run, busy, onCancel, onDelete }) {
             <dd>
               {run.permissions.source_mode === "saved_only"
                 ? "Saved evidence only"
-                : "Unknown"}
+                : run.permissions.source_mode === "research"
+                  ? "Saved evidence, with up to one web search for a gap"
+                  : "Unknown"}
             </dd>
           </div>
           <div>

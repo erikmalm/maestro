@@ -8,6 +8,14 @@
 .research-form h2 {
   margin-bottom: 4px;
 }
+.research-form .research-search-choice {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+}
+.research-search-choice input {
+  margin-top: 3px;
+}
 .research-actions {
   display: flex;
   flex-wrap: wrap;

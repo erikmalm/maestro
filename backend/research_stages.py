@@ -179,6 +179,42 @@ def _held(db, run_id):
     return json.loads(row[0]) if row else None
 
 
+def acquisition_tokens_fit(run, config, held):
+    """Reject known-impossible stage inputs before spending a hosted search.
+
+    Source text and support metadata are still unknown and fitted after capture.
+    These conservative bounds include the complete known objective/assessment
+    and actual instructions, without constructing fictional source evidence.
+    """
+    from backend import research_evidence, research_draft, research_final_review
+    from backend.provider import research_instructions
+
+    bounds = {}
+    for kind, module in (("evidence_review", research_evidence), ("writer", research_draft),
+                         ("reviewer", research_final_review)):
+        schema = research_evidence.minimum_response_schema(run["assessment"]) if kind == "evidence_review" else {}
+        envelope = {"kind": kind, "objective": run["request"], "assignment": "", "schema": schema,
+                    "allowance": run["budget"], "permitted_actions": [], "permissions": run["permissions"],
+                    "evidence": [], "deadline": run["budget"]["deadline"]}
+        known = {"assessment": run["assessment"]}
+        if kind == "reviewer":
+            known["original_request"] = run["request"]
+        history = [{"role": "user", "content": json.dumps(known, ensure_ascii=False)},
+                   {"role": "user", "content": module.MESSAGE}]
+        bounds[kind] = (len((research_instructions(envelope, module.INSTRUCTIONS) + json.dumps(history)
+                            + json.dumps(schema)).encode("utf-8")) + 3072 + min(4096, config["max_output_tokens"]))
+    held = held if held is not None else {kind: {"tokens": FINISHING_TOKENS} for kind in ("writer", "reviewer")}
+    writer = held.get("writer", {}).get("tokens", 0)
+    reviewer = held.get("reviewer", {}).get("tokens", 0)
+    free = run["budget"]["remaining"]["tokens"]
+    if not run["budget"]["reserved"]["model_calls"]:
+        free -= writer + reviewer
+    return (max(bounds.values()) <= min(config["ollama_context_tokens"], run["budget"]["parent_limits"]["max_tokens"])
+            and free >= bounds["evidence_review"]
+            and free - bounds["evidence_review"] + writer >= bounds["writer"]
+            and free - bounds["evidence_review"] + writer + reviewer - bounds["writer"] >= bounds["reviewer"])
+
+
 def _finishing_holds(run, config, *, dispatch=None):
     if run.get("workflow") in ("research_draft", "research_answer"):
         budget = run["budget"]
@@ -296,8 +332,10 @@ def authorize(store, stage, workspace, provider_state, db, *, reserved=False):
     current_memory = bool(run["permissions"]["memory_derived"] or spec["permissions"]["memory_derived"]
                           or store._chat_memory(db, run["chat_id"]))
     permissions = {**run["permissions"], "memory_derived": current_memory}
-    if (permissions["source_mode"] != "saved_only" or permissions["hosted_allowed"] is not False
-            or permissions["memory_recall"] is not False):
+    if (permissions["source_mode"] not in ("saved_only", "research")
+            or permissions["hosted_allowed"] is not (permissions["source_mode"] == "research")
+            or permissions["memory_recall"] is not False
+            or permissions["source_mode"] == "research" and run.get("workflow") != "research_answer"):
         raise ValueError("Research permissions changed.")
     if current_memory and not run["permissions"]["memory_derived"]:
         run["permissions"]["memory_derived"] = True

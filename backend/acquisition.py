@@ -1,4 +1,4 @@
-"""Internal acquisition journal. Public Research remains saved-evidence-only.
+"""Owned acquisition journal shared by explicit Research and hosted quota accounting.
 
 The future acquisition caller must own a run and a named gap. Booking uses the
 existing hosted ledger; dispatch and journal ownership are claimed together.
@@ -16,7 +16,7 @@ from backend.research import AMOUNTS, _date, _encoded, _identifier, _text
 from backend.research_requirements import validate_saved_assessment
 from backend.research_evidence import validate_saved_review
 from backend.research_stages import safe_stage_content
-from backend.web_search import ENDPOINT, SEARCH_TIMEOUT, WebSearch
+from backend.web_search import ENDPOINT, SEARCH_TIMEOUT, WebSearch, targeted_limits
 
 
 MAX_SPEC = 32768
@@ -132,7 +132,7 @@ class AcquisitionJournal:
             raise ValueError("The acquisition owner or deadline is unavailable.")
         return run
 
-    def _spec(self, db, run, item_ids, query, max_results):
+    def _spec(self, db, run, item_ids, query, max_results, limits=None):
         _text(query, 512)
         if query != query.strip() or type(max_results) is not int or not 1 <= max_results <= 3:
             raise ValueError("Use exact bounded acquisition parameters.")
@@ -156,6 +156,8 @@ class AcquisitionJournal:
                 "criteria": criteria, "permissions": run["permissions"], "chat_id": run["chat_id"],
                 "assessment_hash": _hash(assessment), "review_hash": _hash(review),
                 "parent_limits": run["budget"].get("parent_limits")}
+        if limits is not None:
+            spec["limits"] = targeted_limits(limits)
         config = {}
         if self.store._has_table(db, "provider_state"):
             row = db.execute("SELECT CASE WHEN length(CAST(value AS BLOB))<=? THEN "
@@ -171,12 +173,12 @@ class AcquisitionJournal:
         safe_stage_content([spec, _encoded(spec, MAX_SPEC)], config)
         return json.loads(_encoded(spec, MAX_SPEC))
 
-    def prepare(self, run_id, claim_token, *, item_ids, query, max_results=3):
+    def prepare(self, run_id, claim_token, *, item_ids, query, max_results=3, limits=None):
         attempt = AcquisitionAttempt(run_id, claim_token, uuid.uuid4().hex)
         with self.store._transaction() as db:
             run = self._owner(db, attempt)
-            spec = self._spec(db, run, item_ids, query, max_results)
-            identity = _hash({name: spec[name] for name in ("provider", "query", "max_results", "criteria")})
+            spec = self._spec(db, run, item_ids, query, max_results, limits)
+            identity = _hash({name: spec[name] for name in ("provider", "query", "max_results", "criteria", "limits") if name in spec})
             scope = _hash({name: spec[name] for name in ("permissions", "chat_id")})
             prior = db.execute("SELECT id,run_id,state FROM acquisition_attempts WHERE identity_hash=? AND scope_hash=? "
                                "AND state IN ('prepared','pending','dispatched','uncertain')", (identity, scope)).fetchone()
@@ -196,7 +198,7 @@ class AcquisitionJournal:
         if record["run_id"] != attempt.run_id or record["spec"] is None:
             raise ValueError("This acquisition attempt is unavailable.")
         spec = record["spec"]
-        if self._spec(db, run, spec["item_ids"], spec["query"], spec["max_results"]) != spec:
+        if self._spec(db, run, spec["item_ids"], spec["query"], spec["max_results"], spec.get("limits")) != spec:
             raise ValueError("Acquisition requirements, scope or permissions changed.")
         permissions = run["permissions"]
         if (permissions["source_mode"] not in ("research", "refresh") or permissions["hosted_allowed"] is not True
@@ -219,10 +221,19 @@ class AcquisitionJournal:
         finishing_seconds = 0 if held else 40
         finishing_calls = 0 if held else 2
         finishing_tokens = 0 if held else 8192
+        # Targeted Research must still reassess the acquired saved packet before
+        # writing. Recheck that capacity at booking and actual dispatch; time
+        # spent waiting on a booking cannot consume it unnoticed.
+        reassessment = record["spec"].get("limits") is not None
+        if reassessment:
+            from backend.research_stages import acquisition_tokens_fit, _states
+            held_tokens = json.loads(held[0]) if held else None
+            if not acquisition_tokens_fit(run, _states(db)[1]["config"], held_tokens):
+                raise ValueError("The known research inputs cannot fit reassessment and finishing capacity.")
         if (any(budget["consumed"][name] + budget["reserved"][name] > budget["total"][name] for name in AMOUNTS)
-                or budget["remaining"]["seconds"] < (0 if reserved else SEARCH_TIMEOUT) + finishing_seconds
-                or budget["remaining"]["model_calls"] < finishing_calls
-                or budget["remaining"]["tokens"] < finishing_tokens
+                or budget["remaining"]["seconds"] < (0 if reserved else SEARCH_TIMEOUT) + finishing_seconds + (10 if reassessment else 0)
+                or budget["remaining"]["model_calls"] < finishing_calls + int(reassessment)
+                or budget["remaining"]["tokens"] < finishing_tokens + (8192 if reassessment else 0)
                 or self.store.clock() + SEARCH_TIMEOUT > _date(budget["deadline"]).timestamp()
                 or not reserved and budget["remaining"]["hosted_searches"] < 1
                 or budget["total"]["hosted_searches"] > 1):
@@ -239,6 +250,8 @@ class AcquisitionJournal:
         cap = min(20, state["config"]["daily_limit"], run["budget"]["daily_search"]["limit"])
         if summary["searches_today"] > cap - int(not booked):
             raise ValueError("The shared research daily search allowance is exhausted.")
+        run["budget"]["daily_search"] = {"limit": cap, "used": summary["searches_today"],
+                                           "remaining": max(0, cap - summary["searches_today"])}
 
     def reserve(self, attempt):
         with self.store._transaction() as db:
@@ -247,11 +260,13 @@ class AcquisitionJournal:
                 raise ValueError("This acquisition is already booked or cannot be replayed.")
             run = self._authorize(db, attempt, record)
             self._daily_cap(db, run)
-            booking = self.search.reserve(record["spec"]["query"], request_id=attempt.attempt_id, db=db)
+            booking = self.search.reserve(record["spec"]["query"], request_id=attempt.attempt_id, db=db,
+                                          limits=record["spec"].get("limits"))
             if booking.max_results != record["spec"]["max_results"]:
                 raise ValueError("Acquisition provider parameters changed.")
             run["budget"]["reserved"]["hosted_searches"] += 1
             run["budget"]["reserved"]["seconds"] += SEARCH_TIMEOUT
+            self._daily_cap(db, run, booked=True)
             self.store._elapsed(run)
             self.store._save(db, run, "running", token=attempt.claim_token)
             db.execute("UPDATE acquisition_attempts SET state='pending',ledger_id=?,accounted=1,updated_at=? WHERE id=?",
@@ -273,11 +288,13 @@ class AcquisitionJournal:
                 raise ValueError("This acquisition cannot dispatch again.")
             run = self._authorize(db, attempt, record, reserved=True)
             self._daily_cap(db, run, booked=True)
-            if booking.query != record["spec"]["query"] or booking.max_results != record["spec"]["max_results"]:
+            if (booking.query != record["spec"]["query"] or booking.max_results != record["spec"]["max_results"]
+                    or booking.limits != record["spec"].get("limits")):
                 raise ValueError("The hosted booking differs from this acquisition.")
             self.store._save(db, run, "running", token=attempt.claim_token)
             db.execute("UPDATE acquisition_attempts SET state='dispatched',updated_at=? WHERE id=?",
                        (self.store.stamp(), attempt.attempt_id))
+            self.store._event(db, attempt.run_id, "acquisition_started")
 
         try:
             receipt = self.search.dispatch(booking, before_dispatch=claim, finalize=False)
@@ -313,14 +330,27 @@ class AcquisitionJournal:
                                              for value in receipt["sources"]]}
                     # Only accepted metadata may be persisted or authorize a
                     # returned response. Screen its body too after key rotation.
-                    safe_stage_content([receipt, _encoded(receipt, 131072), candidate, _encoded(candidate, MAX_SPEC)],
-                                       {"protocol": "ollama"})
+                    if record["spec"].get("limits") is None:
+                        safe_stage_content([receipt, _encoded(receipt, 131072), candidate, _encoded(candidate, MAX_SPEC)],
+                                           {"protocol": "ollama"})
+                    else:
+                        # Three bounded sources are screened independently so
+                        # JSON escaping does not multiply one source's work by
+                        # the entire capture batch. Recheck every body after
+                        # transport, including current/retained credentials.
+                        _encoded(receipt, record["spec"]["limits"]["max_response_bytes"])
+                        for source in receipt["sources"]:
+                            safe_stage_content([source, _encoded(source, SOURCE_SCREEN_CHARS)], {"protocol": "ollama"})
+                        safe_stage_content([candidate, _encoded(candidate, MAX_SPEC)], {"protocol": "ollama"})
                     saved = candidate
                     state = "response_received"
                 except (ValueError, KeyError, OSError):
                     state = "failed"
             db.execute("UPDATE acquisition_attempts SET state=?,receipt=?,updated_at=? WHERE id=?",
                        (state, _encoded(saved, MAX_SPEC) if saved is not None else None, self.store.stamp(), attempt.attempt_id))
+            row = self.store._row(db, attempt.run_id)
+            if row is not None and row[4] == "running" and row[7] == attempt.claim_token:
+                self.store._event(db, attempt.run_id, "acquisition_received" if saved is not None else "acquisition_failed")
             return saved is not None
 
     def _context(self, context_store):
@@ -370,6 +400,7 @@ class AcquisitionJournal:
             self._authorize(db, attempt, record, settled=True)
             db.execute("UPDATE acquisition_attempts SET state='completed',refs=?,updated_at=? WHERE id=?",
                        (_encoded(refs, MAX_SPEC), self.store.stamp(), attempt.attempt_id))
+            self.store._event(db, attempt.run_id, "acquisition_saved")
             return True
 
     def reusable(self, attempt, context_store, *, retrieved_after):
