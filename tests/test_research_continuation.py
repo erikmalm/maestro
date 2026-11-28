@@ -111,6 +111,42 @@ class ResearchContinuationTests(unittest.TestCase):
         self.assertEqual(len(self.fixture.inputs), 1)
         self.assert_usage(run, 5)
 
+    def two_item_rewrite(self, change_target):
+        self.evidence.capture(evidence.HISTORICAL + " " + PROFIT)
+        self.evidence.raw["items"].append({**deepcopy(self.evidence.raw["items"][0]),
+                                           "id": "i2", "criterion": "operating profit"})
+        self.evidence.review_builder = lambda selected: {"version": 2, "items": {item["id"]: {
+            "state": "covered", "reason": "The exact quote supplies this fact.",
+            "supports": [self.evidence.support(selected, PROFIT if item["id"] == "i2" else evidence.HISTORICAL)]}
+            for item in selected["assessment"]["items"]}}
+        def writer(selected):
+            correction = "correction" in selected
+            return {"version": 2, "items": {
+                "i1": {"kind": "fact", "text": GOOD if correction and change_target else BAD,
+                       "support_indexes": [0], "gap_reason": None},
+                "i2": {"kind": "fact", "text": "Acme reported FY2025 operating profit of USD 3." if correction else PROFIT,
+                       "support_indexes": [0], "gap_reason": None}}}
+        self.drafts.writer_builder = writer
+        return self.submit(request="Compare Acme revenue and operating profit in USD for FY2025.")
+
+    def test_paraphrasing_an_accepted_item_does_not_progress_an_unchanged_rejected_item(self):
+        run = self.two_item_rewrite(change_target=False)
+        self.assert_usage(run, 5)
+        self.assertEqual(run["state"], "partial")
+        self.assertEqual(run["revision"]["item_ids"], ["i1"])
+        self.assertEqual(run["draft"]["items"][0]["text"], BAD)
+        self.assertEqual(run["draft"]["items"][1]["text"], PROFIT)
+        self.assertEqual(run["final_review"]["outcome"], "writing_defect")
+        self.assertEqual(len(self.fixture.inputs), 1)
+        self.assertIn("revision_no_progress", self.kinds(run))
+
+    def test_changing_the_named_rejected_item_still_receives_final_review(self):
+        run = self.two_item_rewrite(change_target=True)
+        self.assert_usage(run, 6)
+        self.assertEqual(run["state"], "accepted")
+        self.assertEqual(run["draft"]["items"][0]["text"], GOOD)
+        self.assertEqual(len(self.fixture.inputs), 2)
+
     def test_second_rejection_stops_after_one_cycle(self):
         self.fixture.review_builder = lambda selected: {"version": 1, "outcome": "writing_defect", "reason": "Still incorrect.",
             "items": {"i1": {"outcome": "writing_defect", "reason": "Still incorrect."}}}

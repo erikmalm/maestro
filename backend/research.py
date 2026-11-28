@@ -643,11 +643,13 @@ class ResearchStore:
                         or validate_response(json.loads(record[10]), assessment, review) != draft):
                     raise ValueError("The draft differs from the owned writer response.")
             if run["revision"]["count"] and run["draft"] is not None:
-                from backend.research_final_review import draft_hash
                 if draft["state"] == "unavailable":
                     self._terminal(db, run, "partial", "revision_capacity")
                     return False
-                if draft_hash(draft) == run["revision"]["fingerprints"]["draft"]:
+                targets = set(run["revision"]["item_ids"])
+                previous = [item for item in run["draft"]["items"] if item["item_id"] in targets]
+                corrected = [item for item in draft["items"] if item["item_id"] in targets]
+                if corrected == previous:
                     self._terminal(db, run, "partial", "revision_no_progress")
                     return False
             run["draft"] = draft
