@@ -323,10 +323,45 @@ export type ContextCapture = ContextSource & {
   content: string;
   archive_status: "saved";
 };
-export const loadContextSources = (limit = 25, cursor?: string) => {
+export type ContextSearchFilters = {
+  query: string;
+  domain?: string;
+  retrieved_from?: string;
+  retrieved_to?: string;
+};
+export type ContextCandidates = {
+  state: ContextInventory["state"] | "limited";
+  candidates: (ContextCapture & {
+    stale: boolean;
+    match_kind: "exact_query" | "keyword" | "filtered";
+  })[];
+  search_limited: boolean;
+  skipped_count: number;
+  message?: string;
+};
+export const searchContextSources = (
+  filters: ContextSearchFilters,
+  signal?: AbortSignal,
+) =>
+  request<ContextCandidates>(
+    "/context/search",
+    "POST",
+    { ...filters, limit: 20 },
+    signal,
+  );
+export const loadContextSources = (
+  limit = 25,
+  cursor?: string,
+  signal?: AbortSignal,
+) => {
   const query = new URLSearchParams({ limit: String(limit) });
   if (cursor) query.set("cursor", cursor);
-  return request<ContextInventory>(`/context/sources?${query}`);
+  return request<ContextInventory>(
+    `/context/sources?${query}`,
+    "GET",
+    undefined,
+    signal,
+  );
 };
 export const loadContextCapture = (
   id: string,

@@ -3,6 +3,12 @@ import * as api from "../../api";
 
 export const EVIDENCE_SYNC_INTERVAL_MS = 15_000;
 const emptyDetail = () => ({ source: null, loading: false, error: "" });
+const emptyFilters = () => ({
+  query: "",
+  domain: "",
+  retrieved_from: "",
+  retrieved_to: "",
+});
 const sameVersion = (left, right) =>
   left?.capture_id === right?.capture_id &&
   left?.content_hash === right?.content_hash &&
@@ -33,6 +39,9 @@ export default function useEvidence(onRestoreFocus) {
   const [error, setError] = useState("");
   const [selected, setSelected] = useState(null);
   const [detail, setDetail] = useState(emptyDetail);
+  const [filters, setFilters] = useState(emptyFilters);
+  const [appliedFilters, setAppliedFilters] = useState(null);
+  const filtersRef = useRef(null);
   const inventoryRef = useRef(null);
   const selectedRef = useRef(null);
   const loadedPageLimit = useRef(1);
@@ -43,6 +52,7 @@ export default function useEvidence(onRestoreFocus) {
   const selectedOffPage = useRef(false);
   const listBusy = useRef(false);
   const pendingRefresh = useRef(false);
+  const listController = useRef(null);
 
   function cancelDetail() {
     detailRevision.current += 1;
@@ -123,6 +133,9 @@ export default function useEvidence(onRestoreFocus) {
       mode === "append" ? inventoryRef.current?.next_cursor : undefined;
     if (mode === "append" && !cursor) return;
     const revision = ++listRevision.current;
+    const search = filtersRef.current;
+    const controller = new AbortController();
+    listController.current = controller;
     listBusy.current = true;
     pendingRefresh.current = false;
     const foreground = mode !== "refresh" || !inventoryRef.current;
@@ -132,9 +145,25 @@ export default function useEvidence(onRestoreFocus) {
     if (mode === "append") closeSource();
     try {
       let next = mode === "append" ? inventoryRef.current : null;
-      const pages = mode === "refresh" ? loadedPageLimit.current : 1;
+      const pages = !search && mode === "refresh" ? loadedPageLimit.current : 1;
       for (let page = 0; page < pages; page += 1) {
-        const result = await api.loadContextSources(25, cursor);
+        let result;
+        if (search) {
+          const { candidates, ...summary } = await api.searchContextSources(
+            search,
+            controller.signal,
+          );
+          result = {
+            ...summary,
+            sources: candidates.map(({ content, ...source }) => ({
+              ...source,
+              content_bytes: new TextEncoder().encode(content).length,
+            })),
+            next_cursor: null,
+          };
+        } else {
+          result = await api.loadContextSources(25, cursor, controller.signal);
+        }
         if (
           !mounted.current ||
           revision !== listRevision.current ||
@@ -164,7 +193,7 @@ export default function useEvidence(onRestoreFocus) {
       inventoryRef.current = next;
       setInventory(next);
       const current = selectedRef.current;
-      if (current && next.state !== "ready") {
+      if (current && !["ready", "limited"].includes(next.state)) {
         closeSource();
       } else if (current && document.visibilityState === "visible") {
         const listed = next.sources.some((source) =>
@@ -188,6 +217,7 @@ export default function useEvidence(onRestoreFocus) {
           : "Could not load saved sources.",
       );
     } finally {
+      if (listController.current === controller) listController.current = null;
       listBusy.current = false;
       if (mounted.current && revision === listRevision.current) {
         setLoading(false);
@@ -198,6 +228,25 @@ export default function useEvidence(onRestoreFocus) {
       if (mounted.current && document.visibilityState === "visible" && repeat)
         void load();
     }
+  }
+
+  function applyFilters(next) {
+    const search = Object.fromEntries(
+      Object.entries(next)
+        .map(([key, value]) => [key, value.trim()])
+        .filter(([, value]) => value),
+    );
+    filtersRef.current = Object.keys(search).length
+      ? { query: "", ...search }
+      : null;
+    setAppliedFilters(filtersRef.current);
+    listRevision.current += 1;
+    listController.current?.abort();
+    closeSource();
+    inventoryRef.current = null;
+    setInventory(null);
+    setLoading(true);
+    void load();
   }
 
   function openSource(source) {
@@ -235,6 +284,7 @@ export default function useEvidence(onRestoreFocus) {
       window.removeEventListener("focus", focus);
       document.removeEventListener("visibilitychange", visibility);
       listRevision.current += 1;
+      listController.current?.abort();
       cancelDetail();
       pendingRefresh.current = false;
     };
@@ -247,8 +297,18 @@ export default function useEvidence(onRestoreFocus) {
     error,
     selected,
     detail,
+    filters,
+    appliedFilters,
+    updateFilter: (key, value) =>
+      setFilters((previous) => ({ ...previous, [key]: value })),
+    search: () => applyFilters(filters),
+    clearSearch: () => {
+      const next = emptyFilters();
+      setFilters(next);
+      applyFilters(next);
+    },
     loadMore: () => {
-      if (!listBusy.current) void load("append");
+      if (!listBusy.current && !filtersRef.current) void load("append");
     },
     openSource,
     closeSource: () => closeSource(true),
