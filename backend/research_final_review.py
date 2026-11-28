@@ -233,3 +233,13 @@ def review_action(final_review, assessment, review, draft):
     if final_review["outcome"] not in (expected_outcome, "partial"):
         return {"action": "stop", "reason": "review_coverage_disagreement", "item_ids": item_ids}
     return {"action": action, "reason": expected_outcome, "item_ids": item_ids}
+
+
+def evidence_fingerprint(review):
+    """Coverage and accepted support identity, independent of capture/check dates."""
+    sources = {source["id"]: source["content_hash"] for source in review["sources"]}
+    rows = [{"item_id": row["item_id"], "state": row["state"], "supports": [
+        {"content": sources[support["source_id"]], "quote": support["quote"],
+         **{key: support[key] for key in ("temporal_scope", "period", "observation_date", "suitability")}}
+        for support in row["supports"]]} for row in review["items"]]
+    return _hash(rows)

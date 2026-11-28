@@ -21,6 +21,15 @@ class ResearchFinalReviewApiTests(unittest.TestCase):
         self.fixture = drafts.ResearchDraftApiTests("test_covered_calculation_request_publishes_a_fixed_limitation")
         self.addCleanup(self.fixture.doCleanups)
         self.fixture.setUp()
+        if getattr(self, "legacy_allowance", True):
+            # Historical #27/#29 contracts keep their captured four-call,
+            # 120-second allowance and do not enable the new correction policy.
+            budget, create = backend.research_budget, backend.ResearchStore.create
+            self.enterContext(patch.object(backend, "research_budget", side_effect=
+                lambda state, source_mode="saved_only", workflow="lookup": budget(state, source_mode)))
+            def legacy_create(store, *args, **kwargs):
+                return create(store, *args, **{**kwargs, "continuation": False})
+            self.enterContext(patch.object(backend.ResearchStore, "create", new=legacy_create))
         self.client, self.headers = self.fixture.client, self.fixture.headers
         self.inputs, self.review_hook = [], None
         self.review_builder = self.accepted

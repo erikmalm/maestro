@@ -16,6 +16,8 @@ Use `DEVELOPMENT_PLAN.md` and tracker #18 for the existing delivery sequence.
 - Request GitHub/Copilot review for each finished code PR and again after
   substantive fixes. Record the reviewed commit; old resolved threads are not a
   fresh review. Evaluate findings against the acceptance criteria and scope.
+  Use `gh api --method POST repos/erikmalm/maestro/pulls/<number>/copilot-code-review`
+  to request review; poll reviews with GET rather than requesting it again.
 - During the autonomous pilot, obtain the user's approval before merging. Stop
   for product ambiguity, architectural expansion or unresolved review disagreement.
   Resolve routine implementation decisions and test failures autonomously.

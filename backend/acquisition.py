@@ -22,6 +22,15 @@ from backend.web_search import ENDPOINT, SEARCH_TIMEOUT, WebSearch, targeted_lim
 MAX_SPEC = 32768
 
 
+def gap_query(assessment, item_ids):
+    item = next(item for item in assessment["items"] if item["id"] in item_ids)
+    names = {subject["id"]: subject["name"] for subject in assessment["subjects"]}
+    query = " ".join([*(names[identity] for identity in item["subject_ids"]), item["criterion"],
+                      *(item[field] for field in ("period", "unit", "currency") if item[field])])
+    _text(query, 512)
+    return item["id"], query
+
+
 @dataclass(frozen=True)
 class AcquisitionAttempt:
     run_id: str

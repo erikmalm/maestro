@@ -211,6 +211,14 @@ def main(argv=None):
         guards.enter_context(patch.object(httpx.AsyncHTTPTransport, "handle_async_request", new=guarded_async))
         # app creates its configured directory at import time; guard first.
         from backend import app as backend
+        # This trial isolates one reviewer. Keep its recorded pre-continuation
+        # allowance instead of enabling automatic corrections in each case.
+        original_budget, original_create = backend.research_budget, backend.ResearchStore.create
+        guards.enter_context(patch.object(backend, "research_budget", side_effect=lambda state, source_mode="saved_only", workflow="lookup":
+                                         original_budget(state, source_mode)))
+        def isolated_create(store, *values, **options):
+            return original_create(store, *values, **{**options, "continuation": False})
+        guards.enter_context(patch.object(backend.ResearchStore, "create", new=isolated_create))
         for case in cases:
             private, archive = scratch / case["id"] / "private", scratch / case["id"] / "archive"
             private.mkdir(parents=True)

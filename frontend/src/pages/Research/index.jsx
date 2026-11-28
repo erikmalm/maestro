@@ -73,7 +73,9 @@ export default function Research({ chatId }) {
           The current conversation's sharing restrictions are retained. Material
           ambiguity stops the run for clarification. Missing evidence and
           calculation limitations prevent full acceptance. Review does not
-          independently verify the publisher's facts.
+          independently verify the publisher's facts. A clear review finding
+          may trigger one correction within the same allowance; ambiguous
+          findings or unchanged results stop the run.
         </p>
         <div className="research-actions">
           <button
