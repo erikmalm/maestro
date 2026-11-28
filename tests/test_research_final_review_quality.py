@@ -1,5 +1,6 @@
 """No-inference checks for the isolated, seeded final-review trial."""
 from contextlib import redirect_stderr, redirect_stdout
+from copy import deepcopy
 import io
 import json
 import os
@@ -13,6 +14,7 @@ from unittest.mock import patch
 import httpx
 
 from scripts import check_research_final_review as runner
+from backend.research_final_review import review_action
 
 
 MODEL = "synthetic-reviewer:latest"
@@ -61,11 +63,18 @@ class ResearchFinalReviewQualityTests(unittest.TestCase):
                         self.assertIn(item["draft_text"], [row["text"] for row in selected["draft"]["items"]])
                 if mode == "unknown":
                     raise httpx.ReadTimeout("Synthetic unknown completion", request=request)
-                items = {row["item_id"]: {"outcome": "accepted" if row["kind"] != "gap" else "evidence_gap",
+                items = {row["item_id"]: {"outcome": case["expected_item_outcomes"][row["item_id"]],
                                           "reason": "Frozen synthetic reviewer finding."}
                          for row in selected["draft"]["items"]}
                 accepted = (case["expected_acceptance"] or mode == "false_accept") and mode != "false_reject"
+                if mode == "false_accept":
+                    for item in items.values():
+                        item["outcome"] = "accepted"
                 if not accepted and all(row["outcome"] == "accepted" for row in items.values()):
+                    items[next(iter(items))]["outcome"] = "writing_defect"
+                if mode == "wrong_category":
+                    items[next(iter(items))]["outcome"] = "evidence_gap"
+                if mode == "mixed_findings":
                     items[next(iter(items))]["outcome"] = "writing_defect"
                 raw = {"version": 1, "outcome": "accepted" if accepted else "partial",
                        "reason": "Frozen synthetic reviewer finding.", "items": items}
@@ -114,6 +123,43 @@ class ResearchFinalReviewQualityTests(unittest.TestCase):
         self.assertTrue(report["results"][0]["valid_semantic_review"])
         self.assertEqual(report["results"][0]["final_review"]["items"][0]["outcome"], "writing_defect")
         self.assertEqual(observed[0]["draft"]["items"][0]["text"], "Acme revenue for FY2025 was USD 42 million.")
+
+    def test_wrong_unit_rejection_with_wrong_category_is_reported_as_triage_miss(self):
+        code, report, observed = self.trial(["--case", "wrong_unit"], mode="wrong_category")
+        self.assertEqual(code, 1, report)
+        result = report["results"][0]
+        self.assertTrue(result["valid_semantic_review"])
+        self.assertFalse(result["false_acceptance"])
+        self.assertFalse(result["triage_ok"])
+        self.assertEqual(result["observed_item_outcomes"], {"i1": "evidence_gap"})
+        self.assertEqual(result["review_action"]["action"], "stop")
+        self.assertEqual(observed[0]["draft"]["items"][0]["text"], "Acme revenue for FY2025 was USD 42 billion.")
+
+    def test_calculation_stop_has_priority_and_mixed_findings_do_not_choose_an_action(self):
+        code, report, _ = self.trial(["--case", "calculation_gap"])
+        self.assertEqual(code, 0, report)
+        self.assertEqual(report["results"][0]["review_action"],
+                         {"action": "stop", "reason": "calculation_required", "item_ids": ["i2"]})
+        code, report, _ = self.trial(["--case", "missing_mandatory"], mode="mixed_findings")
+        self.assertEqual(code, 1, report)
+        self.assertEqual(report["results"][0]["review_action"],
+                         {"action": "stop", "reason": "mixed_or_unresolved_findings", "item_ids": ["i1", "i2"]})
+
+    def test_action_validation_preserves_exact_bindings_and_legacy_unannotated_grading(self):
+        code, report, _ = self.trial(["--case", "supported_fact"])
+        self.assertEqual(code, 0, report)
+        run = report["results"][0]
+        changed = deepcopy(run["final_review"])
+        changed["draft_hash"] = "0" * 64
+        with self.assertRaisesRegex(ValueError, "final research review"):
+            review_action(changed, run["assessment"], run["evidence_review"], run["draft"])
+        legacy = next(case for case in runner.load_cases() if case["id"] == "supported_fact")
+        legacy = {key: value for key, value in legacy.items() if key not in ("expected_item_outcomes", "expected_action")}
+        # The normal API path already validated this synthetic packet above.
+        with patch.object(runner, "validate_packet"):
+            result = runner.grade(legacy, {**run, "result": None, "budget": {"consumed": run["consumed"], "reserved": run["reserved"]}},
+                                  real_calls=1, seeded_stages=run["synthetic_upstream_stages"], loader=None)
+        self.assertTrue(result["passed"])
 
     def test_unknown_completion_stops_before_another_case_and_preserves_reservations(self):
         code, report, observed = self.trial(mode="unknown")

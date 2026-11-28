@@ -349,6 +349,7 @@ def prepare(store, run_id, claim_token, kind, *, model, schema, assignment, evid
             raise ValueError("Research stage allowance reached; finishing slots remain protected.")
         run["permissions"]["memory_derived"] |= store._chat_memory(connection, run["chat_id"])
         spec = {"model": model, "schema": schema, "assignment": assignment, "evidence": references,
+                "revision": run["revision"]["count"],
                 "permitted_actions": list(permitted_actions), "seconds": seconds,
                 "permissions": {**run["permissions"], "memory_derived": bool(run["permissions"]["memory_derived"] or store._chat_memory(connection, run["chat_id"]))}}
         if packet_hash is not None:
@@ -381,6 +382,8 @@ def authorize(store, stage, workspace, provider_state, db, *, reserved=False):
     _no_acquisition(db, stage.run_id)
     config = provider_state["config"]
     spec = json.loads(row[5])
+    if spec.get("revision", 0) != run["revision"]["count"]:
+        raise ValueError("This stage belongs to an earlier research revision.")
     if (config.get("protocol") != "ollama" or spec["model"] not in provider_state.get("models", [])
             or _hash(config) != row[6] or _hash(workspace["limits"]) != row[7]):
         raise ValueError("Research model settings or parent limits changed.")

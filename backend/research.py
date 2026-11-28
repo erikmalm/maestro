@@ -50,6 +50,11 @@ EVENTS = {
     "acquisition_not_saved": "New evidence is unavailable to this answer because durable saving or publication was not confirmed.",
     "acquisition_unavailable": "Targeted acquisition could not proceed within current permissions, settings or shared allowance.",
     "acquisition_failed": "Targeted acquisition did not return usable evidence. No automatic retry was attempted.",
+    "revision_started": "One justified correction cycle claimed within the original shared allowance.",
+    "revision_no_progress": "Correction stopped because the draft or useful evidence did not change.",
+    "revision_capacity": "Correction stopped because the remaining shared allowance cannot cover it.",
+    "revision_stopped": "Review findings do not permit another bounded correction.",
+    "revision_limit": "Correction stopped after the single permitted revision cycle.",
 }
 FAILURES = {
     "lookup_failed": EVENTS["failed"],
@@ -245,6 +250,7 @@ class ResearchStore:
         result.setdefault("evidence_review", None)
         result.setdefault("draft", None)
         result.setdefault("final_review", None)
+        result.setdefault("revision", {"limit": 0, "count": 0, "action": None, "item_ids": [], "fingerprints": {}})
         if events:
             rows = db.execute("SELECT sequence,at,kind,summary FROM research_events WHERE run_id=? ORDER BY sequence LIMIT ?",
                               (row[0], MAX_EVENTS + 1)).fetchall()
@@ -290,7 +296,7 @@ class ResearchStore:
         except (ValueError, TypeError, RecursionError):
             raise ValueError("Provider usage is unavailable. Research cannot start.") from None
 
-    def create(self, submission_id, request, query, chat_id, permissions, budget, db=None, *, workflow="lookup"):
+    def create(self, submission_id, request, query, chat_id, permissions, budget, db=None, *, workflow="lookup", continuation=False):
         _identifier(submission_id)
         _text(request, MAX_REQUEST)
         _text(query, 512, empty=True)
@@ -298,6 +304,8 @@ class ResearchStore:
             _text(chat_id, 100)
         if workflow not in WORKFLOWS or workflow != "lookup" and query:
             raise ValueError("Use a supported research workflow without lookup keywords for requirements.")
+        if type(continuation) is not bool or continuation and workflow != "research_answer":
+            raise ValueError("Only a research answer may allow bounded correction.")
         identity = [request, query, chat_id]
         # Keep old lookup retries stable; a different workflow cannot reuse one.
         if workflow != "lookup":
@@ -325,7 +333,8 @@ class ResearchStore:
             run_id, stamp = uuid.uuid4().hex, self.stamp()
             payload = {"request": request, "query": query, "permissions": captured, "budget": allowance,
                        "result": None, "workflow": workflow, "assessment": None, "evidence_review": None, "draft": None,
-                       "final_review": None}
+                       "final_review": None, "revision": {"limit": int(continuation), "count": 0,
+                           "action": None, "item_ids": [], "fingerprints": {}}}
             connection.execute("INSERT INTO research_runs VALUES(?,?,?,?,?,?,?,?,?)",
                                (run_id, submission_id, fingerprint, chat_id, "queued", stamp, stamp, None, _encoded(payload)))
             self._event(connection, run_id, "submitted")
@@ -377,7 +386,8 @@ class ResearchStore:
         run["state"], run["updated_at"] = state, self.stamp()
         payload = {name: run[name] for name in ("request", "query", "permissions", "budget", "result")}
         payload.update(workflow=run.get("workflow", "lookup"), assessment=run.get("assessment"),
-                       evidence_review=run.get("evidence_review"), draft=run.get("draft"), final_review=run.get("final_review"))
+                       evidence_review=run.get("evidence_review"), draft=run.get("draft"), final_review=run.get("final_review"),
+                       revision=run["revision"])
         db.execute("UPDATE research_runs SET state=?,updated_at=?,claim_token=?,payload=? WHERE id=?",
                    (state, run["updated_at"], token, _encoded(payload), run["id"]))
 
@@ -463,7 +473,9 @@ class ResearchStore:
                 return False
             if reason in ("evidence_failed", "writer_failed", "reviewer_failed"):
                 kind = {"writer_failed": "writer", "evidence_failed": "evidence_review", "reviewer_failed": "reviewer"}[reason]
-                db.execute("UPDATE research_stages SET output=NULL,state=CASE WHEN state IN ('completed','prepared') THEN 'failed' ELSE state END WHERE run_id=? AND kind=?", (run_id, kind))
+                db.execute("UPDATE research_stages SET output=NULL,state=CASE WHEN state IN ('completed','prepared') THEN 'failed' ELSE state END "
+                           "WHERE run_id=? AND kind=? AND coalesce(json_extract(spec,'$.revision'),0)=?",
+                           (run_id, kind, run["revision"]["count"]))
             self._terminal(db, run, "failed", "failed", FAILURES[reason])
             return True
 
@@ -551,6 +563,8 @@ class ResearchStore:
                 packet = {key: review[key] for key in ("version", "offset_unit", "lookup", "selection", "sources", "passages")}
                 from backend.research_passages import evidence_packet_hash
                 spec = json.loads(record[5])
+                if spec.get("revision", 0) != run["revision"]["count"]:
+                    raise ValueError("Evidence belongs to an earlier revision.")
                 pins = [{key: source[key] for key in ("capture_id", "content_hash", "manifest_hash", "retrieved_at", "stale")}
                         for source in packet["sources"]]
                 if spec.get("packet_hash") != evidence_packet_hash(packet) or spec["evidence"] != pins:
@@ -560,6 +574,14 @@ class ResearchStore:
                     raise ValueError("The evidence decision changed after validation.")
             elif review["passages"] or review["sources"] or any(item["state"] == "covered" for item in review["items"]):
                 raise ValueError("Source acceptance requires an owned model stage.")
+            if run["revision"]["count"] and run["revision"]["action"] == "acquire":
+                from backend.research_final_review import evidence_fingerprint
+                gained = any(item["item_id"] in run["revision"]["item_ids"] and item["state"] == "covered"
+                             for item in review["items"])
+                if not gained or evidence_fingerprint(review) == run["revision"]["fingerprints"]["evidence"]:
+                    self._terminal(db, run, "partial", "revision_no_progress")
+                    return False
+                run["draft"], run["final_review"] = None, None
             run["evidence_review"] = review
             safe_stage_content([run, _encoded(run)], provider_state["config"], secrets=secrets)
             if self.clock() >= _date(run["budget"]["deadline"]).timestamp():
@@ -596,7 +618,8 @@ class ResearchStore:
             if stage is None:
                 if draft["state"] != "unavailable" or draft["reason"] not in ("no_supported_facts", "writer_capacity"):
                     raise ValueError("A written draft requires an owned writer stage.")
-                if db.execute("SELECT 1 FROM research_stages WHERE run_id=? AND kind='writer' AND state IN ('reserved','uncertain','completed')", (run_id,)).fetchone():
+                if db.execute("SELECT 1 FROM research_stages WHERE run_id=? AND kind='writer' AND state IN ('reserved','uncertain','completed') "
+                              "AND coalesce(json_extract(spec,'$.revision'),0)=?", (run_id, run["revision"]["count"])).fetchone():
                     raise ValueError("A dispatched writer cannot be replaced by a no-call outcome.")
                 db.execute("UPDATE research_stages SET state='failed',output=NULL WHERE run_id=? AND kind='writer' AND state='prepared'", (run_id,))
             else:
@@ -606,6 +629,8 @@ class ResearchStore:
                 if record[2] != "writer" or record[3] != "completed" or record[10] is None:
                     raise ValueError("A completed writer stage is required.")
                 spec = json.loads(record[5])
+                if spec.get("revision", 0) != run["revision"]["count"]:
+                    raise ValueError("Draft belongs to an earlier revision.")
                 packet = {key: review[key] for key in ("version", "offset_unit", "lookup", "selection", "sources", "passages")}
                 pins = [{key: source[key] for key in ("capture_id", "content_hash", "manifest_hash", "retrieved_at", "stale")}
                         for source in packet["sources"]]
@@ -617,7 +642,18 @@ class ResearchStore:
                 if (schema_identity(spec["schema"]) != schema_identity(response_schema(assessment, review))
                         or validate_response(json.loads(record[10]), assessment, review) != draft):
                     raise ValueError("The draft differs from the owned writer response.")
+            if run["revision"]["count"] and run["draft"] is not None:
+                if draft["state"] == "unavailable":
+                    self._terminal(db, run, "partial", "revision_capacity")
+                    return False
+                targets = set(run["revision"]["item_ids"])
+                previous = [item for item in run["draft"]["items"] if item["item_id"] in targets]
+                corrected = [item for item in draft["items"] if item["item_id"] in targets]
+                if corrected == previous:
+                    self._terminal(db, run, "partial", "revision_no_progress")
+                    return False
             run["draft"] = draft
+            run["final_review"] = None
             safe_stage_content([run, _encoded(run)], provider_state["config"], secrets=secrets)
             if self.clock() >= _date(run["budget"]["deadline"]).timestamp():
                 raise ValueError("The research deadline has passed.")
@@ -656,7 +692,8 @@ class ResearchStore:
             if stage is None:
                 if final_review["basis"] != "not_run" or final_review["reason_code"] not in ("no_supported_draft", "review_capacity"):
                     raise ValueError("Acceptance requires an owned reviewer stage.")
-                if db.execute("SELECT 1 FROM research_stages WHERE run_id=? AND kind='reviewer' AND state IN ('reserved','uncertain','completed')", (run_id,)).fetchone():
+                if db.execute("SELECT 1 FROM research_stages WHERE run_id=? AND kind='reviewer' AND state IN ('reserved','uncertain','completed') "
+                              "AND coalesce(json_extract(spec,'$.revision'),0)=?", (run_id, run["revision"]["count"])).fetchone():
                     raise ValueError("A dispatched review cannot be replaced by a no-call outcome.")
                 db.execute("UPDATE research_stages SET state='failed',output=NULL WHERE run_id=? AND kind='reviewer' AND state='prepared'", (run_id,))
             else:
@@ -666,6 +703,8 @@ class ResearchStore:
                 if record[2] != "reviewer" or record[3] != "completed" or record[10] is None:
                     raise ValueError("A completed final-review stage is required.")
                 spec = json.loads(record[5])
+                if spec.get("revision", 0) != run["revision"]["count"]:
+                    raise ValueError("Final review belongs to an earlier revision.")
                 packet = {key: review[key] for key in ("version", "offset_unit", "lookup", "selection", "sources", "passages")}
                 pins = [{key: source[key] for key in ("capture_id", "content_hash", "manifest_hash", "retrieved_at", "stale")}
                         for source in packet["sources"]]
@@ -684,9 +723,74 @@ class ResearchStore:
             if self.clock() >= _date(run["budget"]["deadline"]).timestamp():
                 raise ValueError("The research deadline has passed.")
             accepted = final_review["basis"] == "semantic" and final_review["outcome"] == "accepted"
+            if not accepted and self._claim_revision(db, run, provider_state["config"]):
+                self._event(db, run_id, "answer_not_accepted")
+                self._save(db, run, "running", token=token)
+                self._event(db, run_id, "revision_started")
+                return True
             self._terminal(db, run, "accepted" if accepted else "partial",
                            "answer_accepted" if accepted else "answer_not_accepted")
             return True
+
+    def _claim_revision(self, db, run, config):
+        from backend.acquisition import gap_query
+        from backend.research_final_review import draft_hash, evidence_fingerprint, review_action
+        from backend.research_stages import _change, _finishing_holds, _no_acquisition, release_finishing, acquisition_tokens_fit
+
+        revision = run["revision"]
+        if revision["count"] >= revision["limit"]:
+            if revision["count"]:
+                self._event(db, run["id"], "revision_limit")
+            return False
+        action = review_action(run["final_review"], run["assessment"], run["evidence_review"], run["draft"])
+        if action["action"] not in ("rewrite", "acquire"):
+            self._event(db, run["id"], "revision_stopped")
+            return False
+        self._elapsed(run)
+        remaining = run["budget"]["remaining"]
+        acquire = action["action"] == "acquire"
+        query = None
+        if acquire:
+            permissions = run["permissions"]
+            if (not permissions["hosted_allowed"] or permissions["memory_derived"]
+                    or self._chat_memory(db, run["chat_id"]) or remaining["hosted_searches"] < 1):
+                self._event(db, run["id"], "revision_stopped")
+                return False
+            try:
+                _, query = gap_query(run["assessment"], action["item_ids"])
+            except ValueError:
+                self._event(db, run["id"], "revision_stopped")
+                return False
+            if db.execute("SELECT 1 FROM acquisition_attempts WHERE run_id=? AND json_extract(spec,'$.query')=?",
+                          (run["id"], query)).fetchone():
+                self._event(db, run["id"], "revision_no_progress")
+                return False
+        if (remaining["model_calls"] < (3 if acquire else 2) or remaining["seconds"] < (80 if acquire else 40)
+                or remaining["tokens"] < 16384
+                or db.execute("SELECT 1 FROM research_stages WHERE run_id=? AND state IN ('prepared','reserved','uncertain')", (run["id"],)).fetchone()):
+            self._event(db, run["id"], "revision_capacity")
+            return False
+        _no_acquisition(db, run["id"])
+        held = _finishing_holds(run, config)
+        if acquire and not acquisition_tokens_fit(run, config, held):
+            self._event(db, run["id"], "revision_capacity")
+            return False
+        release_finishing(self, db, run)
+        for amounts in held.values():
+            _change(run, amounts, 1)
+        db.execute("INSERT INTO research_finishing VALUES(?,?)", (run["id"], _encoded(held)))
+        run["revision"] = {"limit": revision["limit"], "count": revision["count"] + 1,
+            "action": action["action"], "item_ids": action["item_ids"], "fingerprints": {
+                "draft": draft_hash(run["draft"]), "evidence": evidence_fingerprint(run["evidence_review"]),
+                "defect": hashlib.sha256(_encoded(action).encode()).hexdigest(),
+                "query": hashlib.sha256(query.encode()).hexdigest() if query else None}}
+        return True
+
+    def stop_revision(self, run_id, token):
+        with self._transaction() as db:
+            row = self._row(db, run_id)
+            if row is not None and row[4] == "running" and row[7] == token:
+                self._terminal(db, self._public(db, row), "partial", "revision_no_progress")
 
     def cancel(self, run_id):
         _identifier(run_id)

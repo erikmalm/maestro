@@ -44,6 +44,11 @@ its draft is fact/interpretation with cited support, and your semantic checks pa
 accepted overall requires every item accepted AND the entire original request and mandatory
 constraints satisfied. writing_defect means prose contradicts/misstates adequate evidence;
 evidence_gap means required support is missing/stale/conflicting or acquisition is needed;
+If adequate support says USD 42 million and the draft says USD 42 billion, report writing_defect,
+not evidence_gap. Apply the same distinction to altered figures, periods and currencies.
+An unsupported calculation_required item is unverifiable; more search or rewriting cannot supply
+the deferred calculation. If coverage and your support judgment disagree, explain the disagreement
+as unverifiable rather than guessing which action to take. Classify each item separately.
 partial means useful supported material remains but mandatory work is incomplete; unverifiable
 means support cannot be established. Overall nonacceptance can identify an omitted original-request
 requirement even when all extracted items pass. Explain concrete defects/gaps in bounded reasons.
@@ -208,3 +213,45 @@ def validate_saved_final_review(value, assessment, review, draft):
     if _encoded(value, MAX_SAVED_BYTES) != _encoded(expected, MAX_SAVED_BYTES):
         _invalid()
     return expected
+
+
+def review_action(final_review, assessment, review, draft):
+    """Conservative next-step category; grants no permission or extra allowance."""
+    final_review = validate_saved_final_review(final_review, assessment, review, draft)
+    calculations = [item["item_id"] for item in draft["items"] if item["gap_reason"] == "calculation_required"]
+    if calculations:
+        return {"action": "stop", "reason": "calculation_required", "item_ids": calculations}
+    if final_review["basis"] != "semantic":
+        return {"action": "stop", "reason": "review_unavailable", "item_ids": []}
+    if final_review["outcome"] == "accepted":
+        return {"action": "complete", "reason": "accepted", "item_ids": []}
+    actions, item_ids = set(), []
+    for finding, coverage, prose in zip(final_review["items"], review["items"], draft["items"]):
+        if finding["outcome"] == "accepted":
+            continue
+        item_ids.append(finding["item_id"])
+        if (finding["outcome"] == "writing_defect" and coverage["state"] == "covered"
+                and prose["kind"] in ("fact", "interpretation")):
+            actions.add("rewrite")
+        elif (finding["outcome"] == "evidence_gap"
+              and coverage["state"] in ("missing", "stale", "conflicting", "unavailable")):
+            actions.add("acquire")
+        else:
+            return {"action": "stop", "reason": "review_coverage_disagreement", "item_ids": item_ids}
+    if len(actions) != 1:
+        return {"action": "stop", "reason": "mixed_or_unresolved_findings", "item_ids": item_ids}
+    action = actions.pop()
+    expected_outcome = "writing_defect" if action == "rewrite" else "evidence_gap"
+    if final_review["outcome"] not in (expected_outcome, "partial"):
+        return {"action": "stop", "reason": "review_coverage_disagreement", "item_ids": item_ids}
+    return {"action": action, "reason": expected_outcome, "item_ids": item_ids}
+
+
+def evidence_fingerprint(review):
+    """Coverage and accepted support identity, independent of capture/check dates."""
+    sources = {source["id"]: source["content_hash"] for source in review["sources"]}
+    rows = [{"item_id": row["item_id"], "state": row["state"], "supports": [
+        {"content": sources[support["source_id"]], "quote": support["quote"],
+         **{key: support[key] for key in ("temporal_scope", "period", "observation_date", "suitability")}}
+        for support in row["supports"]]} for row in review["items"]]
+    return _hash(rows)
