@@ -2,7 +2,7 @@
 import unittest
 
 from backend.context_policy import (
-    DEFAULT, MAX_ARCHIVE_ITEMS, approved, configuration, contains_source_secret,
+    CONTENT_LIMITS, DEFAULT, MAX_ARCHIVE_ITEMS, SOURCE_BYTES, SOURCE_SCREEN_CHARS, approved, configuration, contains_source_secret,
     contains_url_secret, decoded_url_variants, eligible, manifest_hash, public_url, timestamp,
 )
 
@@ -29,6 +29,32 @@ class ContextPolicyTests(unittest.TestCase):
         for value in invalid:
             with self.subTest(value=value), self.assertRaises(ValueError):
                 configuration(value)
+
+    def test_legacy_settings_gain_capture_limits_without_widening_source_permissions(self):
+        legacy = {key: value for key, value in DEFAULT.items() if key not in (*CONTENT_LIMITS, "capture_policy")}
+        expected = {**DEFAULT, "capture_policy": "approved_sources"}
+        self.assertEqual(configuration(legacy), expected)
+        self.assertEqual(set(legacy), {"enabled", "public_sources", "reuse_hours", "max_bytes", "max_items"})
+
+    def test_content_limits_are_strict_and_require_coherent_thresholds(self):
+        lowered = {**DEFAULT, "max_source_bytes": 8192, "warn_source_bytes": 1024, "max_capture_bytes": 8192,
+                   "min_free_bytes": 65536}
+        self.assertEqual(configuration(lowered), lowered)
+        for field, value in (("max_source_bytes", SOURCE_BYTES + 1), ("max_capture_bytes", 3 * SOURCE_BYTES + 1),
+                             ("warn_source_bytes", 1023), ("min_free_bytes", 65535),
+                             ("max_source_bytes", True), ("min_free_bytes", 65536.0),
+                             ("max_source_bytes", 8192), ("max_capture_bytes", 8192)):
+            with self.subTest(field=field, value=value), self.assertRaises(ValueError):
+                configuration({**DEFAULT, field: value})
+
+    def test_large_source_screening_preserves_encoded_secret_detection_after_old_cutoff(self):
+        secret = "synthetic-larger-source-secret"
+        prefix = "x" * 140000
+        self.assertFalse(contains_source_secret(prefix + "Safe tail", (secret,)))
+        for encoded in (secret, "".join("%" + format(ord(char), "02X") for char in secret),
+                        "".join("&#x" + format(ord(char), "x") + ";" for char in secret)):
+            with self.subTest(encoded=encoded):
+                self.assertTrue(contains_source_secret(prefix + encoded, (secret,)))
 
     def test_configured_limits_accept_boundaries_and_reject_bool_float_or_outside_values(self):
         for field, minimum, maximum in (("reuse_hours", 1, 168), ("max_bytes", 1024 ** 2, 100 * 1024 ** 3),
@@ -165,7 +191,7 @@ class ContextPolicyTests(unittest.TestCase):
             with self.subTest(invalid=invalid), self.assertRaises(ValueError):
                 decoded_url_variants(invalid)
             self.assertTrue(contains_url_secret(invalid, ("synthetic-secret",)))
-        self.assertTrue(contains_source_secret("x" * 131073, ("synthetic-secret",)))
+        self.assertTrue(contains_source_secret("x" * (SOURCE_SCREEN_CHARS + 1), ("synthetic-secret",)))
         self.assertTrue(contains_source_secret(deeply_encoded, ("synthetic-secret",)))
 
     def test_timestamps_normalize_aware_utc_without_inventing_dates(self):

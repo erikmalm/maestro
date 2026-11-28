@@ -11,6 +11,7 @@ import sqlite3
 import uuid
 from contextlib import closing
 
+from backend.context_policy import SOURCE_SCREEN_CHARS
 from backend.research import AMOUNTS, _date, _encoded, _identifier, _text
 from backend.research_requirements import validate_saved_assessment
 from backend.research_evidence import validate_saved_review
@@ -347,7 +348,9 @@ class AcquisitionJournal:
             if ((source["url"], source["title"], ref["content_hash"]) not in sources or source["retrieved_at"] != ref["retrieved_at"]
                     or _date(ref["retrieved_at"]) != _date(record["receipt"]["at"]) or _date(ref["retrieved_at"]) < minimum):
                 raise ValueError("Saved acquisition evidence no longer meets its original scope or freshness.")
-            safe_stage_content([source, _encoded(source, MAX_SPEC)], {})
+            # Durable source reads use the supported content ceiling rather
+            # than the compact journal metadata specification bound.
+            safe_stage_content([source, _encoded(source, SOURCE_SCREEN_CHARS)], {})
         return json.loads(_encoded(references, MAX_SPEC))
 
     def publish(self, attempt, references, context_store):

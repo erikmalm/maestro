@@ -654,6 +654,26 @@ class AcquisitionJournalTests(unittest.TestCase):
         with self.assertRaises((ValueError, KeyError)):
             self.journal.reusable(attempt, context, retrieved_after="2026-01-01T00:00:00+00:00")
 
+    def test_durable_pin_validation_supports_larger_stored_excerpt_and_checks_its_tail(self):
+        # Storage support is independent of the legacy transport's 1,200-char
+        # clipping. Seed the compact received-source identity directly here.
+        context = ContextStore(self.database, self.root / "archive")
+        context.configure({**CONTEXT_DEFAULT, "enabled": True})
+        source = {**self.source, "content": "Historical context.\n" * 8000 + "Acme revenue was USD 42 million."}
+        saved = context.capture("Acme revenue", self.now().isoformat(), [source], 1)["sources"][0]
+        ref = {name: saved[name] for name in ("capture_id", "content_hash", "manifest_hash", "retrieved_at")}
+        record = {"spec": {"max_results": 1}, "receipt": {"at": saved["retrieved_at"], "sources": [
+            {"url": saved["url"], "title": saved["title"], "content_hash": saved["content_hash"]}]}}
+        self.assertEqual(self.journal._pins(record, [ref], context, saved["retrieved_at"]), [ref])
+        encoded = "".join("\\u" + format(ord(char), "04x") for char in "synthetic-later-tail-key")
+        source["content"] += encoded
+        later = context.capture("Acme revenue", self.now().isoformat(), [source], 1)["sources"][0]
+        later_ref = {name: later[name] for name in ref}
+        record["receipt"]["sources"][0]["content_hash"] = later["content_hash"]
+        with patch("backend.credentials.read", return_value=("synthetic-later-tail-key", "memory")):
+            with self.assertRaises(ValueError):
+                self.journal._pins(record, [later_ref], context, later["retrieved_at"])
+
     def test_publication_rejects_wrong_timestamp_and_foreign_capture(self):
         attempt = self.prepare()
         receipt = self.journal.dispatch(attempt, self.journal.reserve(attempt))

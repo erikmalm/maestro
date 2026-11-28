@@ -272,6 +272,10 @@ export type ContextArchiveConfig = {
   reuse_hours: number;
   max_bytes: number;
   max_items: number;
+  max_source_bytes: number;
+  warn_source_bytes: number;
+  max_capture_bytes: number;
+  min_free_bytes: number;
 };
 export type ContextArchive = {
   configured: boolean;
@@ -288,7 +292,7 @@ export type ContextArchive = {
   missing_count: number;
   corrupt_count: number;
   last_indexed_at: string | null;
-  last_capture: { retrieved_at: string | null } | null;
+  last_capture: { retrieved_at: string | null; warnings?: string[] } | null;
   last_error: string | null;
 };
 export const loadContextArchive = (signal?: AbortSignal) =>

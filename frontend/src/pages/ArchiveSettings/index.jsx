@@ -94,6 +94,16 @@ export default function ArchiveSettings({
                       count(status.archive_bytes),
                     ],
                     ["Archive items", count(status.archive_items)],
+                    ["Maximum source bytes", count(config?.max_source_bytes)],
+                    [
+                      "Source warning threshold in bytes",
+                      count(config?.warn_source_bytes),
+                    ],
+                    ["Maximum capture bytes", count(config?.max_capture_bytes)],
+                    [
+                      "Minimum free bytes after capture",
+                      count(config?.min_free_bytes),
+                    ],
                     ["Missing records", count(status.missing_count)],
                     ["Corrupt records", count(status.corrupt_count)],
                     ["Last capture", date(status.last_capture?.retrieved_at)],
@@ -112,6 +122,11 @@ export default function ArchiveSettings({
               Automatic search capture is planned; the archive may be empty.
             </p>
           )}
+          {status.last_capture?.warnings?.map((warning, index) => (
+            <p className="form-note" role="status" key={index}>
+              {warning}
+            </p>
+          ))}
           {status.last_error && (
             <p className="error-banner" role="alert">
               {status.last_error}

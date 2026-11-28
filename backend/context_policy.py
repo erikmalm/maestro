@@ -12,12 +12,19 @@ from backend.web_search import safe_url
 
 MAX_ARCHIVE_ITEMS = 200000
 SCHEMA = 1
-SOURCE_BYTES = 8192
+# Fixed compatibility/read ceiling. Writable limits can be lowered without
+# making existing capture manifests or their pinned bytes invalid.
+SOURCE_BYTES = 256 * 1024
+CAPTURE_BYTES = 3 * SOURCE_BYTES
+SOURCE_SCREEN_CHARS = 2 * 1024 * 1024
 MANIFEST_BYTES = 16384
 ID = re.compile(r"[a-f0-9]{32}\Z")
 HASH = re.compile(r"[a-f0-9]{64}\Z")
 DEFAULT = {"enabled": False, "capture_policy": "all_public", "public_sources": [], "reuse_hours": 24,
-           "max_bytes": 10 * 1024 ** 3, "max_items": MAX_ARCHIVE_ITEMS}
+           "max_bytes": 10 * 1024 ** 3, "max_items": MAX_ARCHIVE_ITEMS,
+           "max_source_bytes": SOURCE_BYTES, "warn_source_bytes": 64 * 1024,
+           "max_capture_bytes": CAPTURE_BYTES, "min_free_bytes": 64 * 1024 ** 2}
+CONTENT_LIMITS = ("max_source_bytes", "warn_source_bytes", "max_capture_bytes", "min_free_bytes")
 
 
 def decoded_url_variants(value):
@@ -49,9 +56,9 @@ def contains_source_secret(value, secrets):
     secrets = tuple(secret for secret in secrets if secret)
     if not secrets:
         return False
-    # Search responses already have this wire bound. Keep direct callers bounded
-    # too, and fail closed if repeated escaping cannot be checked within it.
-    if not isinstance(value, str) or len(value) > 131072:
+    # Includes the bounded JSON envelope of a supported stored source (control
+    # characters may expand sixfold), independently of the legacy search wire.
+    if not isinstance(value, str) or len(value) > SOURCE_SCREEN_CHARS:
         return True
     for _ in range(8):
         if any(secret in value for secret in secrets):
@@ -195,13 +202,20 @@ def capture_source(manifest, content):
 def configuration(value):
     if not isinstance(value, dict):
         raise ValueError("Invalid context archive settings.")
-    value = {"capture_policy": "approved_sources", **value}
+    value = {"capture_policy": "approved_sources", **{key: DEFAULT[key] for key in CONTENT_LIMITS}, **value}
     if (set(value) != set(DEFAULT) or type(value["enabled"]) is not bool
             or value["capture_policy"] not in ("approved_sources", "all_public")):
         raise ValueError("Invalid context archive settings.")
-    for field, minimum, maximum in (("reuse_hours", 1, 168), ("max_bytes", 1024 * 1024, 100 * 1024 ** 3), ("max_items", 100, MAX_ARCHIVE_ITEMS)):
+    for field, minimum, maximum in (("reuse_hours", 1, 168), ("max_bytes", 1024 * 1024, 100 * 1024 ** 3),
+                                    ("max_items", 100, MAX_ARCHIVE_ITEMS),
+                                    ("max_source_bytes", 8192, SOURCE_BYTES),
+                                    ("warn_source_bytes", 1024, SOURCE_BYTES),
+                                    ("max_capture_bytes", 8192, CAPTURE_BYTES),
+                                    ("min_free_bytes", 65536, 10 * 1024 ** 3)):
         if type(value[field]) is not int or not minimum <= value[field] <= maximum:
             raise ValueError("Context archive limits are outside their supported range.")
+    if not value["warn_source_bytes"] <= value["max_source_bytes"] <= value["max_capture_bytes"]:
+        raise ValueError("The warning limit must not exceed the source limit, or the source limit the capture limit.")
     scopes = value["public_sources"]
     if not isinstance(scopes, list) or len(scopes) > 100:
         raise ValueError("Choose at most 100 approved public source scopes.")
