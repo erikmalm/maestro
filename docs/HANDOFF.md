@@ -27,8 +27,9 @@ Checkpoint: 2026-11-28, Europe/Stockholm. Check live GitHub before acting.
   writing and review. All 922 backend tests pass in 174.357 seconds; 26 Research
   browser tests/build and independent frontend/backend reviews pass. The review
   reproduced and fixed capacity-preflight and terminal/capture races; 17 new test
-  methods cover the acquisition seams. Full browser validation and GitHub review
-  are delivery gates. No live hosted/model acceptance or deployment is claimed.
+  methods cover the acquisition seams. All 115 browser tests and the production
+  build pass on the integrated candidate. GitHub review and bounded live
+  acceptance remain delivery gates; no deployment is claimed.
 
 ## Autonomous pilot
 
