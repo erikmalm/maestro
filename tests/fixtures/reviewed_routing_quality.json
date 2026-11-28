@@ -1,0 +1,68 @@
+{
+  "version": 1,
+  "cases": [
+    {
+      "id": "direct_explanation", "route": "direct",
+      "request": "Explain breadth-first search to a beginner."
+    },
+    {
+      "id": "exact_cited_rewrite", "route": "direct",
+      "history": "Fictional Acme FY2025 revenue was USD 42 million [1](https://example.org/acme-fy2025). Retrieved 2026-11-27.",
+      "request": "Rewrite the prior cited answer in plain English without adding facts, preserving every citation and retrieval date."
+    },
+    {
+      "id": "material_security_currency_ambiguity", "route": "clarify",
+      "request": "Research QZX stock price in kr.", "decision": "clarify",
+      "items": [{"subject": "QZX", "criterion": "stock price", "period": null, "currency": "kr"}],
+      "constraints": [],
+      "clarifications": [{"kind": "security", "quote": "QZX"}, {"kind": "currency", "quote": "kr"}]
+    },
+    {
+      "id": "historical_finance", "route": "research",
+      "request": "Report Novo Nordisk revenue for FY2024 in DKK using annual reports only. Do not search the web.",
+      "decision": "ready",
+      "items": [{"subject": "Novo Nordisk", "criterion": "revenue", "period": "FY2024", "currency": "DKK"}],
+      "constraints": [
+        {"kind": "source", "strength": "require", "quote": "annual reports only", "applies_to": [0]},
+        {"kind": "search", "strength": "forbid", "quote": "Do not search the web", "applies_to": [0]}
+      ],
+      "clarifications": []
+    },
+    {
+      "id": "historical_sport", "route": "research",
+      "request": "Report the winner of the men's 100 metres final at the Tokyo 2020 Olympics using official Olympic sources only. Do not search the web.",
+      "decision": "ready",
+      "items": [{"subject": "Tokyo 2020 Olympics", "criterion": "winner", "period": "2020", "currency": null}],
+      "constraints": [
+        {"kind": "source", "strength": "require", "quote": "official Olympic sources only", "applies_to": [0]},
+        {"kind": "search", "strength": "forbid", "quote": "Do not search the web", "applies_to": [0]}
+      ],
+      "clarifications": []
+    },
+    {
+      "id": "stale_weather", "route": "research", "reference_date": "2026-11-28",
+      "history": "Stockholm weather on 2020-01-01 was dry; that old observation cannot establish current weather.",
+      "request": "Using 2026-11-28 as the reference date, report current Stockholm weather for 2026-11-28.",
+      "decision": "ready",
+      "items": [{"subject": "Stockholm", "criterion": "weather", "period": "2026-11-28", "currency": null, "freshness": "current"}],
+      "constraints": [],
+      "clarifications": []
+    },
+    {
+      "id": "unavailable_research", "route": "research",
+      "request": "Research Acme revenue for FY2025 in millions of USD. Do not search the web.",
+      "decision": "ready",
+      "items": [{"subject": "Acme", "criterion": "revenue", "period": "FY2025", "currency": "USD", "unit": "millions"}],
+      "constraints": [{"kind": "search", "strength": "forbid", "quote": "Do not search the web", "applies_to": [0]}],
+      "clarifications": []
+    },
+    {
+      "id": "memory_derived_current_question", "route": "research", "memory_derived": true,
+      "request": "Report the current population of Stockholm.",
+      "decision": "ready",
+      "items": [{"subject": "Stockholm", "criterion": "population", "period": null, "currency": null, "freshness": "current"}],
+      "constraints": [],
+      "clarifications": []
+    }
+  ]
+}

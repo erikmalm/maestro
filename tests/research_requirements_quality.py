@@ -14,6 +14,7 @@ from backend.research_requirements import validate_saved_assessment
 
 
 CORPUS_PATH = Path(__file__).with_name("fixtures") / "research_requirements_quality.json"
+ROUTING_CORPUS_PATH = CORPUS_PATH.with_name("reviewed_routing_quality.json")
 # These vocabularies intentionally cover only the versioned fixtures. They detect
 # broader spans that accidentally include the other requested qualifier too.
 _QUALIFIER_ATOMS = {
@@ -31,6 +32,32 @@ def load_cases(path=None):
     if not cases or len({case["id"] for case in cases}) != len(cases):
         raise AssertionError("Quality cases need nonempty, unique IDs.")
     return cases
+
+
+def load_routing_cases():
+    return load_cases(ROUTING_CORPUS_PATH)
+
+
+def routing_failures(case, run):
+    """Grade only route/requirements; downstream prose is deliberately synthetic."""
+    route = (run.get("chat_route") or {}).get("decision")
+    failures = []
+    if route not in ("direct", "research", "clarify"):
+        return ["invalid_schema"]
+    if route != case["route"]:
+        failures.append("false_" + route)
+    if route != "direct" and case["route"] != "direct":
+        try:
+            check_assessment(case, run.get("assessment"))
+        except AssertionError as error:
+            failures.append("restriction_error" if "constraint" in str(error) else "assessment_error")
+    if run["state"] != {"direct": "answered", "research": "partial", "clarify": "clarification"}[route]:
+        failures.append("unexpected_state")
+    permissions = run["permissions"]
+    if (permissions["hosted_allowed"] or permissions["memory_recall"]
+            or permissions["memory_derived"] != case.get("memory_derived", False)):
+        failures.append("restriction_error")
+    return list(dict.fromkeys(failures))
 
 
 def _contains(value, phrase):
@@ -118,7 +145,8 @@ def check_assessment(case, assessment):
             and all(subject_matches(subjects[identity], expected["subject"]) for identity in references)
             and all(_qualifier_matches(actual[field], expected.get(field), field, partial)
                     for field in _QUALIFIER_ATOMS)
-            and actual["freshness"] is None
+            and (actual["freshness"] is None if expected.get("freshness") is None
+                 else isinstance(actual["freshness"], str) and _contains(actual["freshness"], expected["freshness"]))
         )
 
     if partial:
