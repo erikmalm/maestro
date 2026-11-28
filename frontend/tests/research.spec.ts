@@ -438,17 +438,35 @@ type Submission = {
   workflow: "research_answer";
   chat_id: string | null;
 };
+type ReviewedSubmission = {
+  submission_id: string;
+  text: string;
+  chat_id: string;
+  model: string;
+};
 type MockState = {
   runs: ResearchRun[];
   posts: Submission[];
+  reviewedPosts: ReviewedSubmission[];
   listReads: number;
   detailReads: number;
   list?: (route: Route) => Promise<void>;
   create?: (route: Route, body: Submission) => Promise<void>;
   detail?: (route: Route, run: ResearchRun | undefined) => Promise<void>;
+  reviewed?: (route: Route, run: ResearchRun) => Promise<void>;
 };
-async function fixture(page: Page, runs: ResearchRun[] = []) {
-  const state: MockState = { runs, posts: [], listReads: 0, detailReads: 0 };
+async function fixture(
+  page: Page,
+  runs: ResearchRun[] = [],
+  localChat = false,
+) {
+  const state: MockState = {
+    runs,
+    posts: [],
+    reviewedPosts: [],
+    listReads: 0,
+    detailReads: 0,
+  };
   await page.clock.install();
   await page.route("**/api/workspace**", async (route) => {
     const response = await route.fetch({
@@ -466,7 +484,40 @@ async function fixture(page: Page, runs: ResearchRun[] = []) {
     ];
     workspace.messages = [];
     workspace.work.config.enabled = false;
+    if (localChat) {
+      Object.assign(workspace.provider.config, {
+        protocol: "ollama",
+        model: "synthetic-ollama:latest",
+        pricing_verified: true,
+      });
+      Object.assign(workspace.provider, {
+        credentials_required: false,
+        models: ["synthetic-ollama:latest", "synthetic-devstral:latest"],
+      });
+    }
     await route.fulfill({ json: workspace });
+  });
+  await page.route("**/api/chat/reviewed", async (route) => {
+    expect(route.request().method()).toBe("POST");
+    expect(route.request().headers()["x-maestro-csrf"]).toBeTruthy();
+    const body = route.request().postDataJSON() as ReviewedSubmission;
+    state.reviewedPosts.push(body);
+    const run: ResearchRun = {
+      ...recorded(firstId, "queued"),
+      submission_id: body.submission_id,
+      request: body.text,
+      query: "",
+      workflow: "research_answer",
+      chat_id: body.chat_id,
+      chat_route: {
+        decision: null,
+        direct_memory_allowed: true,
+        model: body.model,
+      },
+    };
+    state.runs = [run];
+    if (state.reviewed) return state.reviewed(route, run);
+    await route.fulfill({ status: 202, json: { run, created: true } });
   });
   await page.route("**/api/research/runs**", async (route) => {
     const url = new URL(route.request().url());
@@ -540,6 +591,259 @@ async function open(page: Page, suffix = "") {
 }
 const focus = (page: Page) =>
   page.evaluate(() => window.dispatchEvent(new Event("focus")));
+
+test("Workspace review is opt-in, captures the displayed model and reuses recorded-run progress", async ({
+  page,
+}) => {
+  const state = await fixture(page, [], true);
+  await page.goto(`/?chat=${chatId}`);
+  await page
+    .getByRole("textbox", { name: "Message Maestro" })
+    .fill("Explain BFS versus DFS in two sentences.");
+  await page.getByRole("button", { name: "Choose model:" }).click();
+  await page
+    .getByRole("button", { name: "synthetic-devstral:latest", exact: true })
+    .click();
+  expect(state.reviewedPosts).toHaveLength(0);
+  await page.screenshot({
+    path: test.info().outputPath("review-request-desktop.png"),
+    fullPage: true,
+  });
+  await page.setViewportSize({ width: 375, height: 812 });
+  expect(
+    await page.evaluate(
+      () => document.documentElement.scrollWidth <= innerWidth,
+    ),
+  ).toBe(true);
+  await page.screenshot({
+    path: test.info().outputPath("review-request-mobile.png"),
+    fullPage: true,
+  });
+  await page
+    .getByRole("button", { name: "Review request", exact: true })
+    .click();
+  await expect(selected(page).getByRole("status")).toHaveText("Queued");
+  expect(state.reviewedPosts).toHaveLength(1);
+  expect(state.reviewedPosts[0]).toMatchObject({
+    chat_id: chatId,
+    model: "synthetic-devstral:latest",
+    text: "Explain BFS versus DFS in two sentences.",
+  });
+  expect(state.reviewedPosts[0].submission_id).toMatch(/^[a-f0-9]{32}$/);
+  expect(state.posts).toHaveLength(0);
+  expect(page.url()).not.toContain("BFS");
+  state.runs[0] = {
+    ...state.runs[0],
+    state: "answered",
+    chat_route: { ...state.runs[0].chat_route!, decision: "direct" },
+  };
+  await focus(page);
+  await expect(selected(page).getByRole("status")).toHaveText(
+    "Direct reply recorded",
+  );
+  await expect(selected(page)).not.toContainText("Review unavailable");
+  await expect(selected(page)).not.toContainText("No assessment is available");
+  await expect(
+    selected(page).getByRole("link", { name: "Open originating conversation" }),
+  ).toHaveAttribute("href", `/?chat=${chatId}`);
+  await expect(
+    page.getByRole("textbox", { name: "Research request", exact: true }),
+  ).toBeEnabled();
+  const permissions = selected(page).getByRole("region", {
+    name: "Captured sharing permissions",
+  });
+  await expect(permissions).toContainText("Permitted for the local reply");
+  await expect(permissions).toContainText("Not permitted");
+  await selected(page).screenshot({
+    path: test.info().outputPath("direct-reply-mobile.png"),
+  });
+});
+
+test("a lost reviewed-chat receipt reconciles its opaque identity without another submission", async ({
+  page,
+}) => {
+  const state = await fixture(page, [], true);
+  state.reviewed = (route) => route.abort("failed");
+  await page.goto(`/?chat=${chatId}`);
+  const text = "Private synthetic request that must not enter browser storage.";
+  await page.getByRole("textbox", { name: "Message Maestro" }).fill(text);
+  await page
+    .getByRole("button", { name: "Review request", exact: true })
+    .click();
+  await expect(selected(page).getByRole("status")).toHaveText("Queued");
+  await page.reload();
+  await expect(selected(page).getByRole("status")).toHaveText("Queued");
+  expect(state.reviewedPosts).toHaveLength(1);
+  expect(state.posts).toHaveLength(0);
+  expect(
+    await page.evaluate(() =>
+      JSON.stringify({ ...localStorage, ...sessionStorage }),
+    ),
+  ).not.toContain(text);
+});
+
+test("a rejected reviewed-chat admission preserves the draft and clears pending identity", async ({
+  page,
+}) => {
+  const state = await fixture(page, [], true);
+  state.reviewed = async (route) => {
+    state.runs = [];
+    await route.fulfill({
+      status: 422,
+      json: { detail: "Synthetic admission rejected." },
+    });
+  };
+  await page.goto(`/?chat=${chatId}`);
+  const input = page.getByRole("textbox", { name: "Message Maestro" });
+  await input.fill("Keep this synthetic draft.");
+  const refresh = page.waitForResponse("**/api/workspace**");
+  await page
+    .getByRole("button", { name: "Review request", exact: true })
+    .click();
+  await refresh;
+  await expect(page.getByRole("alert")).toContainText(
+    "Synthetic admission rejected.",
+  );
+  await expect(input).toHaveValue("Keep this synthetic draft.");
+  expect(
+    await page.evaluate(() =>
+      sessionStorage.getItem("maestro.research.pending"),
+    ),
+  ).toBeNull();
+});
+
+test("late reviewed-chat admission preserves newer drafts and navigation", async ({
+  page,
+}) => {
+  const state = await fixture(page, [], true);
+  const gate = deferred();
+  state.reviewed = async (route, run) => {
+    await gate.promise;
+    await route.fulfill({ status: 202, json: { run, created: true } });
+  };
+  await page.goto(`/?chat=${chatId}`);
+  const input = page.getByRole("textbox", { name: "Message Maestro" });
+  await input.fill("Original synthetic request.");
+  await page
+    .getByRole("button", { name: "Review request", exact: true })
+    .click();
+  await expect.poll(() => state.reviewedPosts.length).toBe(1);
+  await expect(
+    page.getByRole("button", { name: "Send message", exact: true }),
+  ).toBeDisabled();
+  await input.fill("A newer unsent draft.");
+  await page.getByRole("button", { name: /^Tasks/ }).click();
+  gate.release();
+  await expect(
+    page.getByRole("button", { name: "New chat", exact: true }),
+  ).toBeEnabled();
+  await expect(
+    page.getByRole("heading", { name: "Tasks", exact: true }),
+  ).toBeVisible();
+  await page.getByRole("button", { name: "Workspace", exact: true }).click();
+  await expect(input).toHaveValue("A newer unsent draft.");
+  expect(state.reviewedPosts).toHaveLength(1);
+});
+
+test("a mounted Research viewer unlocks when reviewed-chat admission is definitively rejected", async ({
+  page,
+}) => {
+  const state = await fixture(page, [], true);
+  const gate = deferred();
+  state.reviewed = async (route) => {
+    state.runs = [];
+    await gate.promise;
+    await route.fulfill({
+      status: 422,
+      json: { detail: "Synthetic late rejection." },
+    });
+  };
+  await page.goto(`/?chat=${chatId}`);
+  await page
+    .getByRole("textbox", { name: "Message Maestro" })
+    .fill("Original pending request.");
+  await page
+    .getByRole("button", { name: "Review request", exact: true })
+    .click();
+  await expect.poll(() => state.reviewedPosts.length).toBe(1);
+  await page.getByRole("button", { name: "Research", exact: true }).click();
+  const input = page.getByRole("textbox", {
+    name: "Research request",
+    exact: true,
+  });
+  await expect(input).toBeDisabled();
+  await expect(
+    page.getByText("An earlier submission may already have been recorded.", {
+      exact: false,
+    }),
+  ).toBeVisible();
+  const refresh = page.waitForResponse("**/api/workspace**");
+  gate.release();
+  await refresh;
+  await expect(page.getByRole("alert")).toContainText(
+    "Synthetic late rejection.",
+  );
+  await expect(input).toBeEnabled();
+  await expect(
+    page.getByRole("button", { name: "Start a new submission", exact: true }),
+  ).toHaveCount(0);
+});
+
+test("a late reviewed-chat rejection cannot clear a newer Research submission identity", async ({
+  page,
+}) => {
+  const state = await fixture(page, [], true);
+  const gate = deferred();
+  state.reviewed = async (route) => {
+    state.runs = [];
+    await gate.promise;
+    await route.fulfill({
+      status: 422,
+      json: { detail: "Synthetic older rejection." },
+    });
+  };
+  state.create = async (route) => {
+    state.runs = [];
+    await route.abort("failed");
+  };
+  await page.goto(`/?chat=${chatId}`);
+  await page
+    .getByRole("textbox", { name: "Message Maestro" })
+    .fill("Older reviewed-chat request.");
+  await page
+    .getByRole("button", { name: "Review request", exact: true })
+    .click();
+  await expect.poll(() => state.reviewedPosts.length).toBe(1);
+  await page.getByRole("button", { name: "Research", exact: true }).click();
+  await page
+    .getByRole("button", { name: "Start a new submission", exact: true })
+    .click();
+  const input = page.getByRole("textbox", {
+    name: "Research request",
+    exact: true,
+  });
+  await input.fill("Newer explicit Research request.");
+  await page
+    .getByRole("button", { name: "Review saved-evidence answer", exact: true })
+    .click();
+  await expect.poll(() => state.posts.length).toBe(1);
+  const pendingId = state.posts[0].submission_id;
+  await expect(
+    page.getByRole("button", { name: "Retry same submission", exact: true }),
+  ).toBeVisible();
+  const refresh = page.waitForResponse("**/api/workspace**");
+  gate.release();
+  await refresh;
+  await expect(
+    page.getByRole("alert").filter({ hasText: "Synthetic older rejection." }),
+  ).toBeVisible();
+  expect(
+    await page.evaluate(() =>
+      sessionStorage.getItem("maestro.research.pending"),
+    ),
+  ).toBe(pendingId);
+  await expect(input).toBeDisabled();
+});
 
 test("Research web-search choice is explicit, locks with submission and shows captured restrictions", async ({
   page,

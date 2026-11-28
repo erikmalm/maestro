@@ -597,10 +597,21 @@ textarea {
 }
 .composer-bottom {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
   gap: 12px;
   margin-top: 10px;
+}
+.composer-send-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
+}
+.reviewed-send {
+  font-size: 12px;
+  padding: 8px 10px;
 }
 .composer-bottom small {
   color: var(--muted);

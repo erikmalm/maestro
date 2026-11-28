@@ -6,7 +6,11 @@ import MemorySetup from "./MemorySetup";
 import WorkSetup from "./WorkSetup";
 import ReflectionJournal from "./ReflectionJournal";
 import Evidence from "./pages/Evidence";
-import Research, { researchPageRequested } from "./pages/Research";
+import Research, {
+  researchPageRequested,
+  rememberPendingResearch,
+  resolvePendingResearch,
+} from "./pages/Research";
 import ArchiveSettings from "./pages/ArchiveSettings";
 import useArchiveSettings from "./pages/ArchiveSettings/useArchiveSettings";
 import {
@@ -398,6 +402,8 @@ export default function App() {
   const [page, setPage] = useState<Page>(() =>
     researchPageRequested() ? "research" : "workspace",
   );
+  const currentPage = useRef(page);
+  currentPage.current = page;
   const archive = useArchiveSettings(
     page === "settings" || page === "evidence",
     page === "settings",
@@ -688,6 +694,71 @@ export default function App() {
       })
     )
       setChat((draft) => (draft === submitted ? "" : draft));
+  }
+  async function submitReviewedChat() {
+    if (!workspace || !local || !chat.trim() || busy || !ready) return;
+    if (researchPageRequested()) {
+      navigate("research");
+      return;
+    }
+    const submitted = chat;
+    const submissionId = crypto.randomUUID().replaceAll("-", "");
+    let runId = "";
+    let origin = workspace.active_chat_id;
+    let unconfirmed = false;
+    await perform("chat", async () => {
+      if (!origin) {
+        const next = await api.createChat();
+        applyWorkspace(next);
+        origin = next.active_chat_id;
+      }
+      if (!origin) throw new Error("Could not create a conversation.");
+      rememberPendingResearch(submissionId);
+      unconfirmed = true;
+      try {
+        const { run } = await api.reviewChatMessage({
+          submission_id: submissionId,
+          text: submitted,
+          chat_id: origin,
+          model: selectedModel,
+        });
+        if (
+          !/^[a-f0-9]{32}$/.test(run?.id || "") ||
+          run.submission_id !== submissionId ||
+          run.chat_id !== origin
+        )
+          throw new Error("The submission response was not confirmed.");
+        runId = run.id;
+        unconfirmed = false;
+        resolvePendingResearch(submissionId);
+      } catch (reason) {
+        if (
+          reason instanceof Error &&
+          "status" in reason &&
+          typeof reason.status === "number" &&
+          reason.status < 500
+        ) {
+          unconfirmed = false;
+          resolvePendingResearch(submissionId);
+        }
+        throw reason;
+      }
+      return api.loadWorkspace(origin);
+    });
+    if (runId) {
+      setChat((draft) => (draft === submitted ? "" : draft));
+      setToast("Request recorded. Follow it in Research.");
+    }
+    if (
+      (runId || unconfirmed) &&
+      currentPage.current === "workspace" &&
+      new URLSearchParams(window.location.search).get("chat") === origin
+    ) {
+      const url = new URL(window.location.href);
+      if (runId) url.searchParams.set("research_run", runId);
+      window.history.replaceState(null, "", url);
+      setPage("research");
+    }
   }
   async function saveLimits(limits: Limits) {
     if (await perform("limits", () => api.saveLimits(limits), "Limits saved."))
@@ -1108,18 +1179,30 @@ export default function App() {
                   ) : (
                     <small>{selectedModel || "No model selected"}</small>
                   )}
-                  <button
-                    className="send-button"
-                    type="submit"
-                    aria-label="Send message"
-                    disabled={!chat.trim() || !!busy || !ready}
-                  >
-                    {busy === "chat" ? (
-                      <LoaderCircle size={18} className="spin" />
-                    ) : (
-                      <ArrowRight size={19} />
+                  <div className="composer-send-actions">
+                    {local && (
+                      <button
+                        className="button secondary reviewed-send"
+                        type="button"
+                        disabled={!chat.trim() || !!busy || !ready}
+                        onClick={() => void submitReviewedChat()}
+                      >
+                        Review request
+                      </button>
                     )}
-                  </button>
+                    <button
+                      className="send-button"
+                      type="submit"
+                      aria-label="Send message"
+                      disabled={!chat.trim() || !!busy || !ready}
+                    >
+                      {busy === "chat" ? (
+                        <LoaderCircle size={18} className="spin" />
+                      ) : (
+                        <ArrowRight size={19} />
+                      )}
+                    </button>
+                  </div>
                 </div>
               </form>
               {unavailableModel && (
@@ -1132,6 +1215,13 @@ export default function App() {
                 Chat is saved locally and sent to your configured model provider
                 when you send a message.
               </p>
+              {local && (
+                <p className="composer-note">
+                  Review request uses the saved-evidence workflow when needed.
+                  Initial assessment uses no personal memory. Follow progress in
+                  Research; your search settings apply.
+                </p>
+              )}
               {workspace.provider.config.protocol === "ollama" &&
                 workspace.web_search.config.enabled && (
                   <p className="composer-note">

@@ -105,6 +105,37 @@ def _settle_research_accounting(database, state, db, pending):
         dispatched=pending.dispatched)
 
 
+def commit_chat_exchange(workspace, db, chat_id, text, reply, *, model, cost, input_tokens, output_tokens,
+                         at, eligible, database, timezone, kind="chat", routing=None, memory_ids=(), web_search=None, research_run_id=None):
+    """Commit one exchange using the existing chat/reflection/title conventions."""
+    chat = next((item for item in workspace["chats"] if item["id"] == chat_id), None)
+    if chat is None or research_run_id and any(item.get("research_run_id") == research_run_id for item in chat["messages"]):
+        return False
+    first_exchange = not chat["messages"]
+    chat["messages"].extend([{"id": uuid.uuid4().hex, "role": "user", "kind": kind, "text": text, "demo": False,
+                              "reflection_eligible": eligible},
+        {"id": uuid.uuid4().hex, "role": "assistant", "kind": kind, "text": reply, "demo": False,
+         "model": model, "cost": cost, "input_tokens": input_tokens, "output_tokens": output_tokens}])
+    assistant = chat["messages"][-1]
+    if routing:
+        assistant["chat_routing"] = routing
+    if memory_ids:
+        assistant["memory_ids"] = list(memory_ids)
+    if web_search:
+        assistant["web_search"] = web_search
+    if research_run_id:
+        assistant["research_run_id"] = research_run_id
+    chat["updated_at"] = at
+    from backend.reflection import ReflectionStore
+    ReflectionStore(database, timezone).enqueue(chat_id, workspace, db, eligible=eligible)
+    title_ready = first_exchange and not chat.get("title_attempted")
+    if title_ready:
+        chat["title_attempted"] = True
+        if chat["title_source"] != "manual":
+            chat["title"] = " ".join(text.split())[:80] or "New chat"
+    return title_ready and chat["title_source"] != "manual"
+
+
 def research_instructions(packet, instructions):
     envelope = {name: packet[name] for name in
                 ("kind", "objective", "assignment", "schema", "allowance", "permitted_actions", "permissions", "evidence", "deadline")}
@@ -519,7 +550,7 @@ class Provider:
                              context={"instructions": instructions, "messages": history, "max_output_tokens": max_output_tokens,
                                       "job": job, "schema": schema, "deadline": deadline})
 
-    def generate_research_stage(self, stage, instructions, messages, *, max_output_tokens=None, output_validator=None, pre_dispatch=None):
+    def generate_research_stage(self, stage, instructions, messages, *, max_output_tokens=None, output_validator=None, pre_dispatch=None, private_direct=False):
         """Internal owned local stage; authority and allowances come from storage."""
         from backend.research_stages import ResearchStage
         if (type(stage) is not ResearchStage or output_validator is not None and not callable(output_validator)
@@ -538,14 +569,17 @@ class Provider:
             raise ValueError("Research context is too large. Use a smaller evidence packet.")
         result = self.generate("", None, role="research", context={
             "research": stage, "instructions": instructions, "messages": history,
-            "max_output_tokens": max_output_tokens, "job": None, "output_validator": output_validator, "pre_dispatch": pre_dispatch})
-        return {name: result[name] for name in ("reply", "request_id", "input_tokens", "output_tokens")}
+            "max_output_tokens": max_output_tokens, "job": None, "output_validator": output_validator,
+            "pre_dispatch": pre_dispatch, "private_direct": private_direct})
+        return {name: result[name] for name in (("reply", "request_id", "input_tokens", "output_tokens", "memory_ids")
+                                              if private_direct else ("reply", "request_id", "input_tokens", "output_tokens"))}
 
     def generate(self, text, chat_id, title_for=None, model="", role="chat", context=None):
         """Chat, title and explicit context share dispatch, limits and accounting."""
         title = title_for is not None
         job = context.get("job") if context else None
         research = context.get("research") if context else None
+        direct = bool(context and context.get("private_direct"))
         if research is not None:
             from backend.research import ResearchStore
             from backend.research_stages import ResearchStage
@@ -575,6 +609,11 @@ class Provider:
                 research_secrets = safe_stage_content([], state["config"])
                 workspace = json.loads(db.execute("SELECT value FROM workspace WHERE id=1").fetchone()[0])
                 research_packet = research_store.authorize_stage(research, workspace, state, db)
+                if direct:
+                    if research_packet["kind"] != "direct":
+                        raise ValueError("Private direct context requires an owned direct decision.")
+                    owned = research_store._public(db, research_store._row(db, research.run_id))
+                    chat_id, text = owned["chat_id"], owned["request"]
                 output_schema = research_packet["schema"]
                 deadline = research_deadline(research_packet)
                 research_secrets = screen_research_content(research_packet, context["instructions"], context["messages"],
@@ -641,22 +680,22 @@ class Provider:
             if not title and not context:
                 from backend.reflection import ReflectionStore
                 ReflectionStore(self.database, self.timezone).touch(workspace, db)
-            chat = next((item for item in workspace["chats"] if item["id"] == chat_id), None) if not context else None
-            if chat is None and not context:
+            chat = next((item for item in workspace["chats"] if item["id"] == chat_id), None) if not context or direct else None
+            if chat is None and (not context or direct):
                 raise ValueError("That chat could not be found.")
             if title and chat["title_source"] == "manual":
                 raise ValueError("The chat was already named by you.")
             if not title and not context and (not local or auto_search) and any(message.get("memory_ids") for message in chat["messages"]):
                 raise ValueError("This chat contains replies informed by private local memory. Start a new chat to use a remote provider or hosted web search.")
             memories = []
-            if context:
+            if context and not direct:
                 history = context["messages"]
             elif title:
                 history = [{"role": "user", "content": title_for["text"][:400]}]
             else:
                 history = [{"role": x["role"], "content": x["text"]} for x in chat["messages"] if not x.get("demo", False)]
                 history.append({"role": "user", "content": text})
-                if local and role == "chat" and not auto_search:
+                if local and ((role == "chat" and not auto_search) or direct and research_packet["permissions"]["memory_recall"]):
                     from backend.memory import MemoryStore
                     memories = MemoryStore(self.database, self.timezone).recall(
                         text, chat_id, local=True, limit=work_config["memory_recall_count"],
@@ -864,25 +903,12 @@ class Provider:
                             if generated:
                                 chat.update(title=generated, title_source="generated")
                     elif chat:
-                        first_exchange = not chat["messages"]
                         eligible = local and role == "chat" and not auto_search
-                        chat["messages"].extend([{"id": uuid.uuid4().hex, "role": "user", "kind": role, "text": text, "demo": False,
-                                                  "reflection_eligible": eligible},
-                            {"id": uuid.uuid4().hex, "role": "assistant", "kind": role, "text": reply, "demo": False, "model": config["model"], "cost": cost, "input_tokens": input_tokens, "output_tokens": output_tokens}])
-                        if local and role == "chat":
-                            chat["messages"][-1]["chat_routing"] = routing
-                        chat["updated_at"] = self.stamp()
-                        if memories:
-                            chat["messages"][-1]["memory_ids"] = [item["id"] for item in memories]
-                        if search_result:
-                            chat["messages"][-1]["web_search"] = search_result
-                        from backend.reflection import ReflectionStore
-                        ReflectionStore(self.database, self.timezone).enqueue(chat_id, workspace, db, eligible=eligible)
-                        if first_exchange and not chat.get("title_attempted"):
-                            chat["title_attempted"] = True
-                            if chat["title_source"] != "manual":
-                                chat["title"] = " ".join(text.split())[:80] or "New chat"
-                                title_ready = True
+                        title_ready = commit_chat_exchange(workspace, db, chat_id, text, reply, model=config["model"], cost=cost,
+                            input_tokens=input_tokens, output_tokens=output_tokens, at=self.stamp(), eligible=eligible,
+                            database=self.database, timezone=self.timezone, kind=role,
+                            routing=routing if local and role == "chat" else None,
+                            memory_ids=[item["id"] for item in memories], web_search=search_result)
                     db.execute("UPDATE workspace SET value=? WHERE id=1", (json.dumps(workspace),))
             if not reply:
                 raise ValueError("Provider returned no text. Usage was recorded; try a larger output limit or another chat model.")
