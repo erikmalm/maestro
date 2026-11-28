@@ -15,7 +15,10 @@ Checkpoint: 2026-11-28, Europe/Stockholm. Check live GitHub before acting.
   to 1,200 characters. Public Research on main remains saved-evidence-only.
 - **Candidate #43:** `feat/evidence-search` adds local keyword/domain/UTC-date
   search to the existing Evidence page. No new datastore, dependency or module.
-  All 123 browser tests and the production build pass. A disposable real-backend
+  Baseline 123 browser tests and the production build pass. The PR #58 review
+  found a ready-but-skipped results diagnostic gap; two failing regressions now
+  pass with all 24 Evidence tests and the build. Independent follow-up review is
+  clear; fresh GitHub review is pending. A disposable real-backend
   check verified combined filters, ordering, exact pins and source withdrawal.
   Desktop/mobile layouts were inspected. All data/transports were synthetic;
   zero hosted/model calls. GitHub review and merge are still delivery gates.
@@ -50,6 +53,9 @@ Preserve Argus's existing uncommitted work.
    a separate bounded acceptance step after fixture checks and review.
 4. Continue #30 bounded correction, #38 routing/caller migration, then #31 code
    retirement. Calculations #52, graphs and full-page/PDF acquisition remain later.
+
+The user approved up to seven calls/180 cumulative seconds for #30, with unchanged
+token/spending limits and one hosted search. #29 retains four calls/120 seconds.
 
 Current/refresh claims still require independent origin verification; a newly
 retrieved provider snippet cannot bypass that policy. Keep source pins, dates,

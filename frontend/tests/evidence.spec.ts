@@ -805,7 +805,7 @@ for (const scenario of [
       search_limited: true,
       skipped_count: 2,
     }),
-    text: "Search reached a work or result limit. Narrow the keywords or filters; matches may be incomplete.",
+    text: "Search results may be incomplete. Narrow the keywords or filters to inspect more evidence.",
   },
   {
     name: "disabled storage",
@@ -854,6 +854,46 @@ for (const scenario of [
         page.getByText(/2 unavailable or ineligible records were skipped/),
       ).toBeVisible();
     }
+  });
+}
+
+for (const returned of [[], [source]]) {
+  test(`ready Evidence search with ${returned.length} returned sources preserves skipped-candidate uncertainty`, async ({
+    page,
+  }) => {
+    const message =
+      "Some saved evidence could not be verified or returned. Results may be incomplete.";
+    await evidenceFixture(
+      page,
+      () => ready(),
+      undefined,
+      async () => ({
+        body: matches(returned, {
+          skipped_count: 2,
+          search_limited: false,
+          message,
+        }),
+      }),
+    );
+    await page.getByLabel("Keywords", { exact: true }).fill("Northstar");
+    await page.getByRole("button", { name: "Search saved evidence" }).click();
+    await expect(page.getByText(message, { exact: true })).toBeVisible();
+    await expect(
+      page.getByRole("button", { name: "View saved text" }),
+    ).toHaveCount(returned.length);
+    await expect(
+      page.getByText("No matching saved sources.", { exact: true }),
+    ).toHaveCount(0);
+    if (!returned.length)
+      await expect(
+        page.getByText(
+          "No matching saved sources could be returned. Results may be incomplete.",
+          { exact: true },
+        ),
+      ).toBeVisible();
+    await expect(
+      page.getByRole("button", { name: "Load more sources" }),
+    ).toHaveCount(0);
   });
 }
 

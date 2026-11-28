@@ -37,6 +37,11 @@ export default function Evidence({ archive, onOpenSettings }) {
     filters,
     appliedFilters,
   } = data;
+  const searchIncomplete =
+    appliedFilters &&
+    (inventory?.search_limited ||
+      inventory?.state === "limited" ||
+      inventory?.skipped_count > 0);
   return (
     <main className="page-content evidence-page" ref={page}>
       <div className="page-heading">
@@ -146,10 +151,10 @@ export default function Evidence({ archive, onOpenSettings }) {
       )}
       {inventory && ["ready", "limited"].includes(inventory.state) && (
         <>
-          {(inventory.search_limited || inventory.state === "limited") && (
+          {(searchIncomplete || (appliedFilters && inventory.message)) && (
             <p role="status">
               {inventory.message ||
-                "Search reached a work or result limit. Narrow the keywords or filters; matches may be incomplete."}
+                "Search results may be incomplete. Narrow the keywords or filters to inspect more evidence."}
             </p>
           )}
           {inventory.sources.length ? (
@@ -162,8 +167,8 @@ export default function Evidence({ archive, onOpenSettings }) {
           ) : (
             <p role="status">
               {appliedFilters
-                ? inventory.search_limited || inventory.state === "limited"
-                  ? "No matching saved sources were returned within the search limits."
+                ? searchIncomplete
+                  ? "No matching saved sources could be returned. Results may be incomplete."
                   : "No matching saved sources."
                 : inventory.skipped_count > 0 || inventory.next_cursor
                   ? "No available sources in this page."
