@@ -168,6 +168,52 @@ class TargetedResearchAcquisitionTests(unittest.TestCase):
                     self.assertTrue(run["evidence_review"]["passages"])
                     self.assert_released(run, 4, 1)
 
+    def test_known_finishing_schemas_and_repeated_criteria_stop_before_search(self):
+        for context in (30000, 40000):
+            with self.subTest(context=context), self.isolated_case() as case:
+                with backend.workspace_transaction() as workspace:
+                    workspace["limits"]["max_tokens"] = 500000
+                with backend.provider().transaction() as state:
+                    state["config"].update(ollama_context_tokens=context, max_output_tokens=1024)
+                criterion = "revenue " + "reported " * 300
+                first = deepcopy(case.evidence.raw["items"][0])
+                case.evidence.raw["items"] = [first, {**first, "id": "i2", "criterion": criterion}]
+                request = "Compare Acme revenue and " + criterion + " in USD for FY2025. " + "Public context. " * 200
+                run = case.submit(request=request)
+                if context == 30000:
+                    # Even without new source/prose bytes, the reviewer must
+                    # repeat this request/criterion and its real output schema.
+                    self.assertEqual(case.requests, [])
+                    self.assertIn("acquisition_unavailable", self.kinds(run))
+                    self.assert_released(run, 1, 0)
+                else:
+                    self.assertEqual(run["state"], "accepted")
+                    self.assertEqual(len(case.requests), 1)
+                    self.assertEqual(run["draft"]["items"][1]["criterion"], criterion)
+                    self.assert_released(run, 4, 1)
+
+    def test_minimum_schemas_and_history_projections_bound_real_dispatched_inputs(self):
+        from backend import research_evidence, research_draft, research_final_review
+        from backend.research_stages import _minimum_stage_inputs, stage_input
+
+        run = self.submit()
+        self.assertEqual(run["state"], "accepted")
+        inputs = _minimum_stage_inputs(run["assessment"])
+        for kind, module, prefix in (
+                ("evidence_review", research_evidence, "Server-selected evidence input"),
+                ("writer", research_draft, "Server-selected writing input"),
+                ("reviewer", research_final_review, "Server-selected final review input")):
+            with self.subTest(kind=kind):
+                payload = next(payload for _, path, payload in self.requirements.requests if path == "/api/chat"
+                               and any(message["content"].startswith(prefix) for message in payload["messages"]))
+                schema = module.minimum_response_schema(run["assessment"])
+                self.assertEqual(schema, payload["format"])
+                keys = list(schema["properties"]["items"]["properties"]) if kind == "writer" else ()
+                minimum = stage_input(kind, inputs[kind], item_keys=keys)["history"]
+                actual = [message for message in payload["messages"] if message["role"] == "user"]
+                self.assertLessEqual(len(json.dumps(minimum).encode()), len(json.dumps(actual).encode()))
+                self.assertNotIn("0" * 64, json.dumps(actual))
+
     def test_daily_cap_is_shared_with_legacy_search_and_connection_tests(self):
         with self.search.transaction() as state:
             state["config"]["daily_limit"] = 1
