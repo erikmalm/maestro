@@ -515,6 +515,15 @@ async function fixture(
         model: body.model,
       },
     };
+    const total = { ...allowance, model_calls: 7, tokens: 50000, seconds: 180 };
+    run.budget = {
+      ...run.budget,
+      total,
+      consumed: { ...allowance, seconds: 0 },
+      reserved: { ...allowance, seconds: 0 },
+      remaining: total,
+      deadline: "2026-10-21T12:03:00Z",
+    };
     state.runs = [run];
     if (state.reviewed) return state.reviewed(route, run);
     await route.fulfill({ status: 202, json: { run, created: true } });
@@ -636,6 +645,16 @@ test("Workspace review is opt-in, captures the displayed model and reuses record
     ...state.runs[0],
     state: "answered",
     chat_route: { ...state.runs[0].chat_route!, decision: "direct" },
+    budget: {
+      ...state.runs[0].budget,
+      consumed: { ...allowance, model_calls: 2, tokens: 128, seconds: 2 },
+      remaining: {
+        ...state.runs[0].budget.total,
+        model_calls: 5,
+        tokens: 49872,
+        seconds: 178,
+      },
+    },
   };
   await focus(page);
   await expect(selected(page).getByRole("status")).toHaveText(
@@ -654,6 +673,26 @@ test("Workspace review is opt-in, captures the displayed model and reuses record
   });
   await expect(permissions).toContainText("Permitted for the local reply");
   await expect(permissions).toContainText("Not permitted");
+  const budget = selected(page).getByRole("region", {
+    name: "Allowance table",
+    exact: true,
+  });
+  await budget.focus();
+  await expect(budget).toBeFocused();
+  expect(
+    await budget.evaluate(
+      (element) => element.scrollWidth > element.clientWidth,
+    ),
+  ).toBe(true);
+  expect(
+    await page.evaluate(
+      () => document.documentElement.scrollWidth <= innerWidth,
+    ),
+  ).toBe(true);
+  await page.clock.fastForward(4000);
+  await expect(
+    page.getByText("Request recorded. Follow it in Research.", { exact: true }),
+  ).toHaveCount(0);
   await selected(page).screenshot({
     path: test.info().outputPath("direct-reply-mobile.png"),
   });

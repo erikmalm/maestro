@@ -109,25 +109,27 @@ export default function RunDetails({ run, busy, onCancel, onDelete }) {
       </dl>
       {run.chat_route && (
         <p className="form-note">
-          Selected path:{" "}
-          {{
-            direct: "direct reply",
-            research: "Research",
-            clarify: "clarification",
-          }[run.chat_route.decision] || "assessing request"}
-          .
-          {run.chat_id && (
-            <>
-              {" "}
-              <a href={`/?chat=${encodeURIComponent(run.chat_id)}`}>
-                Open originating conversation
-              </a>
-              .
-            </>
-          )}
-          {direct &&
-            run.state === "answered" &&
-            " The direct reply is saved there; it has no final evidence review."}
+          <span>
+            Selected path:{" "}
+            {{
+              direct: "direct reply",
+              research: "Research",
+              clarify: "clarification",
+            }[run.chat_route.decision] || "assessing request"}
+            .
+            {run.chat_id && (
+              <>
+                {" "}
+                <a href={`/?chat=${encodeURIComponent(run.chat_id)}`}>
+                  Open originating conversation
+                </a>
+                .
+              </>
+            )}
+            {direct &&
+              run.state === "answered" &&
+              " The direct reply is saved there; it has no final evidence review."}
+          </span>
         </p>
       )}
       {requirements && (
@@ -302,7 +304,12 @@ export default function RunDetails({ run, busy, onCancel, onDelete }) {
       {run.budget && (
         <section aria-label="Shared allowance" className="research-section">
           <h3>Shared allowance</h3>
-          <div className="research-table-scroll">
+          <div
+            className="research-table-scroll"
+            tabIndex={0}
+            role="region"
+            aria-label="Allowance table"
+          >
             <table className="research-budget">
               <caption>Recorded shared allowance</caption>
               <thead>

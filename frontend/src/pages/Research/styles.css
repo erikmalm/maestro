@@ -216,6 +216,7 @@
 }
 .research-budget th,
 .research-budget td {
+  white-space: nowrap;
   padding: 9px 8px;
   text-align: right;
   border-bottom: 1px solid var(--line);
@@ -225,7 +226,7 @@
 }
 @media (max-width: 1000px) {
   .research-columns {
-    grid-template-columns: 1fr;
+    grid-template-columns: minmax(0, 1fr);
   }
 }
 @media (max-width: 600px) {
