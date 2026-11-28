@@ -30,7 +30,7 @@ from backend import credentials, provider as provider_module
 from backend.context_policy import DEFAULT as ARCHIVE_DEFAULT
 from backend.memory import MemoryStore
 from backend.provider import DEFAULT, Provider, validate_ollama_url
-from backend.research_final_review import validate_saved_final_review
+from backend.research_final_review import ITEM_OUTCOMES, review_action, validate_saved_final_review
 from backend.research_passages import validate_packet
 from backend.web_search import WebSearch
 from scripts.check_research_evidence import require, source_text
@@ -54,6 +54,12 @@ def load_cases(path=CORPUS):
         require(type(case["expected_acceptance"]) is bool, "Invalid acceptance annotation")
         require(1 <= len(case["sources"]) <= 3 and 1 <= len(case["items"]) <= 4, "Unbounded seeded fixture")
         require(len({item["id"] for item in case["items"]}) == len(case["items"]), "Duplicate item ID")
+        if "expected_item_outcomes" in case:
+            expected = case["expected_item_outcomes"]
+            require(type(expected) is dict and set(expected) == {item["id"] for item in case["items"]}
+                    and all(value in ITEM_OUTCOMES for value in expected.values()), "Invalid item-category annotations")
+        if "expected_action" in case:
+            require(case["expected_action"] in ("complete", "rewrite", "acquire", "stop"), "Invalid action annotation")
         for source in case["sources"]:
             locator = urlsplit(source["url"])
             require(locator.scheme == "https" and locator.hostname == "reports.example.org"
@@ -118,13 +124,20 @@ def grade(case, run, *, real_calls, seeded_stages, loader):
         pass
     accepted = run["state"] == "accepted"
     expected = case["expected_acceptance"]
+    observed_outcomes = {item["item_id"]: item["outcome"] for item in final["items"]} if valid else None
+    action = review_action(final, run["assessment"], run["evidence_review"], run["draft"]) if valid else None
+    triage_ok = (valid and ("expected_item_outcomes" not in case or case["expected_item_outcomes"] == observed_outcomes)
+                 and ("expected_action" not in case or case["expected_action"] == action["action"]))
     accounting = (real_calls == 1 and seeded_stages == ["requirements", "evidence_review", "writer"]
                   and run["budget"]["consumed"]["model_calls"] == 4
                   and run["budget"]["consumed"]["hosted_searches"] == 0
                   and not any(run["budget"]["reserved"].values()) and run["result"] is None)
-    return {"passed": valid and accounting and accepted == expected,
+    return {"passed": valid and accounting and accepted == expected and triage_ok,
             "valid_semantic_review": valid, "accounting_ok": accounting,
             "expected_acceptance": expected, "observed_acceptance": accepted,
+            "expected_item_outcomes": case.get("expected_item_outcomes"), "observed_item_outcomes": observed_outcomes,
+            "expected_action": case.get("expected_action"), "review_action": action,
+            "triage_ok": triage_ok, "triage_miss": valid and not triage_ok,
             "false_acceptance": valid and accepted and not expected,
             "false_rejection": valid and expected and not accepted,
             "invalid_review": not valid}
@@ -266,6 +279,7 @@ def main(argv=None):
         "actual_inference_requests": sum(row["network_reviewer_requests"] for row in results),
         "results": results, "false_acceptances": sum(row["false_acceptance"] for row in results),
         "false_rejections": sum(row["false_rejection"] for row in results), "invalid_reviews": sum(row["invalid_review"] for row in results),
+        "triage_misses": sum(row["triage_miss"] for row in results),
         "passed": len(results) == len(cases) and all(row["passed"] for row in results), "recovery_required": recovery_required}
     if args.report:
         with args.report.open("x", encoding="utf-8") as stream:
