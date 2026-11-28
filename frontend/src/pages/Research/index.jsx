@@ -11,7 +11,9 @@ export default function Research({ chatId }) {
       <div className="page-heading">
         <div>
           <h1>Research</h1>
-          <p>Review an answer against saved evidence.</p>
+          <p>
+            Review an answer against saved evidence, with optional web search.
+          </p>
         </div>
         <span className="badge neutral">Preview</span>
       </div>
@@ -19,8 +21,8 @@ export default function Research({ chatId }) {
         This preview assesses your request, then reviews a bounded selection of
         saved evidence with an installed local model, prepares a cited draft,
         then checks it against your request and the supplied evidence. It makes
-        no hosted searches or personal-memory recall. Review findings and any
-        remaining gaps stay visible.
+        no personal-memory recall. Web search is off by default. Review findings
+        and any remaining gaps stay visible.
       </p>
       <form
         className="card entry-form research-form"
@@ -30,7 +32,11 @@ export default function Research({ chatId }) {
             void data.submit(data.request.trim());
         }}
       >
-        <h2>Review saved-evidence answer</h2>
+        <h2>
+          {data.sourceMode === "research"
+            ? "Review research answer"
+            : "Review saved-evidence answer"}
+        </h2>
         <label>
           Research request
           <textarea
@@ -42,6 +48,27 @@ export default function Research({ chatId }) {
             onChange={(event) => data.updateRequest(event.target.value)}
           />
         </label>
+        <label className="research-search-choice">
+          <input
+            type="checkbox"
+            checked={data.sourceMode === "research"}
+            disabled={data.formLocked}
+            onChange={(event) =>
+              data.updateSourceMode(
+                event.target.checked ? "research" : "saved_only",
+              )
+            }
+            aria-describedby="research-search-note"
+          />
+          Allow one web search for missing evidence
+        </label>
+        <p id="research-search-note" className="form-note">
+          When enabled, Maestro may send a query based on this request to
+          Ollama.com if saved evidence is insufficient. Existing search
+          settings, daily limits and conversation restrictions still apply.
+          Eligible results are saved before writing; search results are
+          excerpts, with no independent verification of the original page.
+        </p>
         <p className="form-note">
           The current conversation's sharing restrictions are retained. Material
           ambiguity stops the run for clarification. Missing evidence and
@@ -54,7 +81,9 @@ export default function Research({ chatId }) {
             disabled={!data.request.trim() || data.formLocked}
             aria-busy={data.busy === "submit" || data.working}
           >
-            Review saved-evidence answer
+            {data.sourceMode === "research"
+              ? "Review research answer"
+              : "Review saved-evidence answer"}
           </button>
         </div>
         {data.working && (

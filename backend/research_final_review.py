@@ -109,6 +109,18 @@ def response_schema(assessment, review, draft):
     assessment, _, draft = _scope(assessment, review, draft)
     if draft["state"] != "unreviewed":
         _invalid()
+    return _response_schema(assessment)
+
+
+def minimum_response_schema(assessment):
+    """Every final review must address all recorded requirement IDs."""
+    assessment = validate_saved_assessment(assessment, assessment["completion_criterion"])
+    if assessment["decision"] != "ready":
+        _invalid()
+    return _response_schema(assessment)
+
+
+def _response_schema(assessment):
     schema = _object({"version": {"type": "integer", "const": WIRE_VERSION},
                       "outcome": {"type": "string", "enum": list(OUTCOMES)},
                       "reason": {"type": "string", "minLength": 1, "maxLength": 1200},

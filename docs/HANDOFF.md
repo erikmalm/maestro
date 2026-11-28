@@ -1,75 +1,41 @@
 # Maestro session handoff
 
-Checkpoint: 2026-11-28, Europe/Stockholm. Check live GitHub before acting.
+Checkpoint: 2026-11-28, Europe/Stockholm. Check live GitHub before acting; this is a checkpoint, not a status feed. Follow `AGENTS.md`.
 
-## Current delivery
+## Delivered on main
 
-- **PR #57 merged as `63979fc`**, with the same file tree as reviewed head
-  `936ee28`. Fresh Copilot review [6096498883](https://github.com/erikmalm/maestro/pull/57#pullrequestreview-6096498883)
-  recommends approval with no open findings. The user explicitly approved merging.
-  Recorded validation: 905 backend tests; 113 browser tests and production build.
-  Independent simplicity review found no additional issue. Keep #36 open; #20's
-  remaining accounting labels are separate.
-- Main now supports complete accepted supplied source text up to 256 KiB, with
-  capture/capacity and processing bounds. Legacy chat still clips search excerpts
-  to 1,200 characters. Public Research on main remains saved-evidence-only.
-- **Candidate #43:** `feat/evidence-search` adds local keyword/domain/UTC-date
-  search to the existing Evidence page. No new datastore, dependency or module.
-  Baseline 123 browser tests and the production build pass. The PR #58 review
-  found a ready-but-skipped results diagnostic gap; two failing regressions now
-  pass with all 24 Evidence tests and the build. Independent follow-up review is
-  clear; fresh GitHub review is pending. A disposable real-backend
-  check verified combined filters, ordering, exact pins and source withdrawal.
-  Desktop/mobile layouts were inspected. All data/transports were synthetic;
-  zero hosted/model calls. GitHub review and merge are still delivery gates.
-- **In progress #29:** `feat/targeted-research-acquisition` adds an explicit,
-  default-off research mode, one gap-driven acquisition, capture, reassessment,
-  writing and review. UI build/26 browser tests and independent frontend review
-  pass; backend implementation, full validation and review are still in progress.
-  Do not treat the branch as a delivered or live-verified acquisition path.
+- Main is `b02b193`: PR #57 bounded capture/storage (`63979fc`), then PR #58 keyword/domain/UTC-date Evidence search. Fresh Copilot reviews recommended approval; the user approved both merges. Main is clean and public Research remains saved-evidence-only.
+- Accepted supplied source text is bounded at 256 KiB. Keep #36 open for remaining acceptance and #20 separate. Legacy chat retains its excerpt clipping.
 
-## Autonomous pilot
+## Candidates
 
-The user authorized focused automatic progress toward the search/evidence-library
-goal. Follow `AGENTS.md`: small demonstrable PRs, independent correctness/simplicity
-review and fresh GitHub review after substantive changes. The user retains merge
-approval. Resolve routine implementation issues; stop for material product or
-architecture decisions. Copilot quota was increased; keep review requests sensible.
+- **PR #59 / #29**, `feat/targeted-research-acquisition`, tested runtime `a25eee7`: explicit default-off acquisition, durable capture, reassessment, writing and review. All **925 backend tests passed (200.296s)**; full **127 browser tests/build** and desktop/mobile checks pass. The known-envelope and minimum finishing-schema/history findings are fixed, including repeated qualifiers; **162 focused checks** and independent follow-up review pass. Fresh GitHub review and live acquisition/reuse remain gates.
+- **PR #60 / #30**, `feat/research-review-triage`, stacked on #59: one justified rewrite or evidence-gap correction in the original run. New answers capture the approved **7 calls / 180 cumulative seconds**; token/spend caps and one hosted search stay unchanged. Old runs retain captured policies; #29 alone keeps 4 calls/120 seconds. The targeted-row no-progress finding is fixed locally: accepted-row paraphrases cannot replace an unchanged rejection. All **70 focused checks**, **39 combined acquisition/correction checks** and independent integration review pass. Final broad validation, fresh GitHub review and real-model triage measurement remain; no improved model classification is yet claimed.
 
-Argus was inspected read-only at `C:\GitHub\argus`. It already owns market,
-financial and private portfolio records. Future integration should use its API;
-this milestone adds no financial actions or finance-specific store to Maestro.
-Preserve Argus's existing uncommitted work.
+## Preserved live-test gate
 
-## Next actions and bounds
+The first deliberate acceptance at `a8e925f` stopped during cold model loading after 45 seconds: **one local transport, zero hosted searches, unknown completion**. Preserve its reservation and report:
 
-1. Finish #43 review and obtain merge approval. Refresh its branch against main.
-2. Finish #29 with the existing journal/store/provider services. Preserve four
-   model calls, 120 seconds, one hosted search/run and the shared daily cap.
-   Protect reassessment plus writing/review capacity at actual dispatch. Capture
-   survives answer failure; failed/disabled saving has no invented capture IDs.
-3. Verify acquired content beyond character 1,200 and a repeat that reuses its
-   exact saved version without another hosted request. Live verification remains
-   a separate bounded acceptance step after fixture checks and review.
-4. Continue #30 bounded correction, #38 routing/caller migration, then #31 code
-   retirement. Calculations #52, graphs and full-page/PDF acquisition remain later.
+`%TEMP%/maestro-pr59-live-6ubiikvu/report.json`
 
-The user approved up to seven calls/180 cumulative seconds for #30, with unchanged
-token/spending limits and one hosted search. #29 retains four calls/120 seconds.
+A user question is pending: restart shared Ollama, recover this reservation through the supported API, preload the model, then retry once with at most one hosted search. **No restart approval has arrived.** Do not restart, clear the reservation or perform more inference until resolved. Restarting may interrupt other local AI apps. The prepared private acceptance script is `%TEMP%/maestro-pr59-live-plan-20261128/accept_targeted_research.py`; its default expected head is old, so inspect and supply the final reviewed head explicitly before any approved retry. It must stop on another unknown completion and retain its workspace.
 
-Current/refresh claims still require independent origin verification; a newly
-retrieved provider snippet cannot bypass that policy. Keep source pins, dates,
-privacy and credential fences. Do not migrate or seed personal storage. The
-intermittent Windows shutdown issue remains tracked separately in #56.
+## Next steps
 
-## Working locations
+1. Finish #59 fresh review; after approved recovery, demonstrate one acquisition plus repeat reuse of the exact saved pins. Obtain user merge approval only when ready.
+2. Finish #60 validation/review and bounded local triage trial. Merge #59 first, retarget #60 to main and retain user merge approval.
+3. Continue #38 routing, then #31 obsolete program-code retirement. #38's issue records the prepared scope and eight frozen routing cases. Combine route and requirements in one memory-free assessment under the same owner/budget; default cutover follows measured results and human guidance.
+
+## Working bounds
+
+Reuse existing services; no new dependency, datastore or generic engine. Current/refresh claims still require independent origin verification. Preserve source versions, private memory and history; no personal migration or deployment. Graphs, calculations #52, full-page/PDF capture and financial actions are outside this milestone.
+
+Argus at `C:\GitHub\argus` was inspected read-only. It owns market/financial/portfolio records; future integration should consume its API. Preserve its uncommitted work.
 
 | Checkout | Purpose |
 | --- | --- |
-| `C:\GitHub\maestro` | Synced main at `63979fc` |
-| `C:\GitHub\maestro-bounded-source-content` | Preserved reviewed #57 branch |
-| `C:\GitHub\maestro-evidence-search` | #43 candidate and pilot instructions |
-| `C:\GitHub\maestro-targeted-research-acquisition` | #29 implementation |
+| `C:\GitHub\maestro` | Synced main |
+| `C:\GitHub\maestro-targeted-research-acquisition` | PR #59 |
+| `C:\GitHub\maestro-review-triage` | PR #60 |
 
-Use the project's pinned `.venv` for backend checks. Browser suites use port 8777;
-coordinate runs across worktrees and never stop another user's preview to free it.
+Other worktrees remain preserved; use `git worktree list` to locate them. Use the pinned `.venv` for backend checks. Browser suites share port 8777: coordinate runs and never stop another user's preview. The intermittent native shutdown issue is tracked in #56.

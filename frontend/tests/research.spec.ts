@@ -433,6 +433,7 @@ function deferred() {
 type Submission = {
   submission_id: string;
   request: string;
+  source_mode?: "saved_only" | "research";
   query: string;
   workflow: "research_answer";
   chat_id: string | null;
@@ -539,6 +540,113 @@ async function open(page: Page, suffix = "") {
 }
 const focus = (page: Page) =>
   page.evaluate(() => window.dispatchEvent(new Event("focus")));
+
+test("Research web-search choice is explicit, locks with submission and shows captured restrictions", async ({
+  page,
+}) => {
+  const state = await fixture(page);
+  state.create = async (route, body) => {
+    const run = {
+      ...recorded(firstId, "queued"),
+      ...body,
+      permissions: {
+        ...recorded().permissions,
+        source_mode: "research" as const,
+        hosted_allowed: false,
+        memory_derived: true,
+      },
+    };
+    state.runs = [run];
+    await route.fulfill({ status: 202, json: { run, created: true } });
+  };
+  await open(page);
+  const choice = page.getByRole("checkbox", {
+    name: "Allow one web search for missing evidence",
+  });
+  await expect(choice).not.toBeChecked();
+  await page
+    .getByRole("textbox", { name: "Research request", exact: true })
+    .fill("Investigate the fictional Northstar report for FY2025.");
+  await choice.check();
+  await page
+    .getByRole("button", { name: "Review research answer", exact: true })
+    .click();
+  await expect(selected(page).getByRole("status")).toHaveText("Queued");
+  expect(state.posts[0].source_mode).toBe("research");
+  await expect(choice).toBeDisabled();
+  const permissions = selected(page).getByRole("region", {
+    name: "Captured sharing permissions",
+  });
+  await expect(permissions).toContainText(
+    "Saved evidence, with up to one web search for a gap",
+  );
+  await expect(permissions).toContainText("Not permitted");
+  await expect(permissions).toContainText(
+    "Memory-derived conversation restrictions retained",
+  );
+  await page.screenshot({
+    path: test.info().outputPath("research-search-desktop.png"),
+    fullPage: true,
+  });
+  await page.setViewportSize({ width: 375, height: 812 });
+  await expect(choice).toBeVisible();
+  expect(
+    await page.evaluate(
+      () => document.documentElement.scrollWidth <= innerWidth,
+    ),
+  ).toBe(true);
+  await page.screenshot({
+    path: test.info().outputPath("research-search-mobile.png"),
+    fullPage: true,
+  });
+});
+
+test("an unconfirmed search-enabled submission retries its original mode and identity", async ({
+  page,
+}) => {
+  const state = await fixture(page);
+  state.create = async (route, body) => {
+    if (state.posts.length === 1)
+      return route.fulfill({
+        status: 503,
+        json: { detail: "Synthetic uncertain response" },
+      });
+    const run = {
+      ...recorded(),
+      ...body,
+      permissions: {
+        ...recorded().permissions,
+        source_mode: "research" as const,
+        hosted_allowed: true,
+      },
+    };
+    state.runs = [run];
+    await route.fulfill({ json: { run, created: false } });
+  };
+  await open(page);
+  const choice = page.getByRole("checkbox", {
+    name: "Allow one web search for missing evidence",
+  });
+  await page
+    .getByRole("textbox", { name: "Research request", exact: true })
+    .fill("Inspect fictional historical Northstar evidence.");
+  await choice.check();
+  await page
+    .getByRole("button", { name: "Review research answer", exact: true })
+    .click();
+  await expect(choice).toBeDisabled();
+  await page.getByRole("button", { name: "Retry same submission" }).click();
+  await expect(
+    page.getByText("Existing submission restored.", { exact: true }),
+  ).toBeVisible();
+  expect(state.posts).toHaveLength(2);
+  expect(state.posts[1]).toEqual(state.posts[0]);
+  expect(state.posts[1].source_mode).toBe("research");
+  expect(
+    await page.evaluate(() => Object.values(sessionStorage)),
+  ).not.toContain("research");
+  await expect(choice).toBeEnabled();
+});
 
 test("Research records requested items and constraints through explicit saved-evidence review", async ({
   page,

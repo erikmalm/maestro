@@ -656,7 +656,7 @@ export type ResearchRun = {
   created_at: string;
   updated_at: string;
   permissions: {
-    source_mode: "saved_only";
+    source_mode: "saved_only" | "research";
     hosted_allowed: boolean;
     memory_recall: boolean;
     memory_derived: boolean;
@@ -690,6 +690,7 @@ export type ResearchRun = {
 export const createResearchRun = (body: {
   submission_id: string;
   request: string;
+  source_mode?: "saved_only" | "research";
   query: string;
   workflow?:
     | "lookup"

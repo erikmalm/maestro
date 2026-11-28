@@ -33,6 +33,7 @@ const terminalStates = new Set([
 
 export default function useResearchRuns(chatId) {
   const [request, setRequest] = useState("");
+  const [sourceMode, setSourceMode] = useState("saved_only");
   const [runs, setRuns] = useState([]);
   const [skipped, setSkipped] = useState(0);
   const [selectedId, setSelectedId] = useState(initialSelection);
@@ -242,6 +243,7 @@ export default function useResearchRuns(chatId) {
       query: "",
       workflow: "research_answer",
       chat_id: chatId || null,
+      ...(sourceMode === "research" ? { source_mode: sourceMode } : {}),
     };
     pendingBody.current = body;
     submission.current ||= {
@@ -329,6 +331,17 @@ export default function useResearchRuns(chatId) {
   }
   return {
     request,
+    sourceMode,
+    updateSourceMode: (value) => {
+      if (
+        writing.current ||
+        pending.current ||
+        activeRuns.current.size ||
+        !historyRead.current
+      )
+        return;
+      setSourceMode(value === "research" ? "research" : "saved_only");
+    },
     updateRequest: (value) => {
       if (
         writing.current ||

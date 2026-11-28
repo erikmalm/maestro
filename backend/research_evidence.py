@@ -253,8 +253,18 @@ def _response_scope(assessment, packet):
 def response_schema(assessment, packet):
     """Bind the model's version 2 object-map response to this exact input scope."""
     assessment, passages = _response_scope(assessment, packet)
+    return _response_schema(assessment, list(passages))
+
+
+def minimum_response_schema(assessment):
+    """Sizing only: the smallest usable passage-ID scope, without source text."""
+    assessment = validate_saved_assessment(assessment, assessment["completion_criterion"])
+    return _response_schema(assessment, ["p1"])
+
+
+def _response_schema(assessment, passage_ids):
     support = deepcopy(_SUPPORT_SCHEMA)
-    support["properties"]["passage_id"] = {**deepcopy(_ID_SCHEMA), "enum": list(passages)}
+    support["properties"]["passage_id"] = {**deepcopy(_ID_SCHEMA), "enum": passage_ids}
     row = _object({
         "state": _string(16, STATES), "reason": _string(800),
         "supports": {"type": "array", "maxItems": 4, "items": support,

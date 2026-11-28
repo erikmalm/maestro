@@ -44,6 +44,12 @@ EVENTS = {
     "requirements_started": "Assessing the research requirements with the local model.",
     "requirements_recorded": "Requirements recorded. Evidence assessment, writing and final review have not run.",
     "clarification_needed": "Clarification is needed before dependent research. No answer was produced.",
+    "acquisition_started": "Searching the web once for a recorded evidence gap.",
+    "acquisition_received": "Hosted search returned source excerpts; durable saving has not been confirmed.",
+    "acquisition_saved": "Eligible search excerpts were saved and pinned. Reassessing saved evidence.",
+    "acquisition_not_saved": "New evidence is unavailable to this answer because durable saving or publication was not confirmed.",
+    "acquisition_unavailable": "Targeted acquisition could not proceed within current permissions, settings or shared allowance.",
+    "acquisition_failed": "Targeted acquisition did not return usable evidence. No automatic retry was attempted.",
 }
 FAILURES = {
     "lookup_failed": EVENTS["failed"],
@@ -96,10 +102,11 @@ def _date(value):
 def _permissions(value, chat_id):
     if (not isinstance(value, dict)
             or set(value) != {"source_mode", "hosted_allowed", "memory_recall", "memory_derived", "chat_id"}
-            or value["source_mode"] != "saved_only" or value["hosted_allowed"] is not False
+            or value["source_mode"] not in ("saved_only", "research")
+            or value["hosted_allowed"] is not (value["source_mode"] == "research")
             or value["memory_recall"] is not False or type(value["memory_derived"]) is not bool
             or value["chat_id"] != chat_id):
-        raise ValueError("Use the local research preview permissions.")
+        raise ValueError("Use the explicit research permissions.")
     _encoded(value, 2048)
     return dict(value)
 
@@ -120,8 +127,8 @@ def _budget(value):
             if (type(amount) not in ((int,) if integer else (int, float)) or not math.isfinite(amount)
                     or not 0 <= amount <= maxima[name]):
                 raise ValueError("Use a valid research allowance.")
-    if result["total"]["hosted_searches"] != 0:
-        raise ValueError("The research preview cannot acquire hosted evidence.")
+    if result["total"]["hosted_searches"] > 1:
+        raise ValueError("Research permits at most one hosted acquisition.")
     for name in AMOUNTS:
         if result["consumed"][name] + result["reserved"][name] > result["total"][name]:
             raise ValueError("Research usage exceeds its allowance.")
@@ -295,6 +302,8 @@ class ResearchStore:
         # Keep old lookup retries stable; a different workflow cannot reuse one.
         if workflow != "lookup":
             identity.append(workflow)
+        if permissions.get("source_mode") == "research":
+            identity.append("research")
         fingerprint = hashlib.sha256(_encoded(identity).encode("utf-8")).hexdigest()
         with self._transaction(db) as connection:
             previous = self._row(connection, submission_id=submission_id)
@@ -306,6 +315,9 @@ class ResearchStore:
                 return self._public(connection, previous), False
             captured = _permissions(permissions, chat_id)
             allowance = _budget(budget)
+            if ((captured["source_mode"] == "research" and workflow != "research_answer")
+                    or allowance["total"]["hosted_searches"] != int(captured["hosted_allowed"])):
+                raise ValueError("Only a research answer may opt into one hosted acquisition.")
             if not self._chat_exists(connection, chat_id):
                 raise KeyError("The originating chat is unavailable.")
             if self.owns_foreground(connection) or self._provider_busy(connection):
@@ -453,6 +465,16 @@ class ResearchStore:
                 kind = {"writer_failed": "writer", "evidence_failed": "evidence_review", "reviewer_failed": "reviewer"}[reason]
                 db.execute("UPDATE research_stages SET output=NULL,state=CASE WHEN state IN ('completed','prepared') THEN 'failed' ELSE state END WHERE run_id=? AND kind=?", (run_id, kind))
             self._terminal(db, run, "failed", "failed", FAILURES[reason])
+            return True
+
+    def acquisition_event(self, run_id, token, kind):
+        if kind not in ("acquisition_not_saved", "acquisition_unavailable"):
+            raise ValueError("Use a recorded acquisition outcome.")
+        with self._transaction() as db:
+            row = self._row(db, run_id)
+            if row is None or row[4] != "running" or row[7] != token:
+                return False
+            self._event(db, run_id, kind)
             return True
 
     def finish_requirements(self, run_id, token, stage, *, secrets=()):
