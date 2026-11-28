@@ -51,7 +51,10 @@ def validate_direct(raw, request):
 
 
 def admission_scope(route):
-    return {key: route[key] for key in ("model", "direct_memory_allowed", "memory_policy")}
+    scope = {key: route[key] for key in ("model", "direct_memory_allowed", "memory_policy")}
+    if "requested_model" in route:
+        scope["requested_model"] = route["requested_model"]
+    return scope
 
 
 def validate_saved_chat(run, database, *, secrets=()):

@@ -217,6 +217,45 @@ class ReviewedChatTests(unittest.TestCase):
         self.assertEqual(run["chat_id"], self.chat_id)
         self.assert_usage(run, 2)
 
+    def test_omitted_model_is_captured_before_a_queued_default_change(self):
+        payload = self.payload()
+        payload.pop("model")
+        original = backend.requirements_model()
+        with patch.object(backend, "execute_research_run"):
+            admitted = self.post(payload)
+        self.assertEqual(admitted["run"]["chat_route"]["model"], original)
+        self.assertEqual(admitted["run"]["chat_route"]["requested_model"], "")
+        with backend.provider().transaction() as state:
+            changed = "synthetic-new-default:latest"
+            state["models"].append(changed)
+            state["config"].update(model=changed, orchestrator_model=changed)
+        backend.execute_research_run(admitted["run"]["id"])
+        run = self.requirements.get(admitted["run"]["id"])
+        self.assertEqual(run["state"], "answered")
+        self.assertEqual([payload["model"] for _, payload in self.calls], [original, original])
+        repeated = self.post(payload)
+        self.assertFalse(repeated["created"])
+        self.assertEqual(repeated["run"]["id"], run["id"])
+        self.assertEqual(len(self.calls), 2)
+        explicit = self.client.post("/api/chat/reviewed", json={**payload, "model": original}, headers=self.headers)
+        self.assertEqual(explicit.status_code, 409)
+
+    def test_legacy_empty_model_capture_stops_instead_of_resolving_current_settings(self):
+        payload = self.payload(model="")
+        with patch.object(backend, "execute_research_run"):
+            admitted = self.post(payload)
+        with backend.research_store()._transaction() as db:
+            row = backend.research_store()._row(db, admitted["run"]["id"])
+            saved = json.loads(row[8])
+            saved["chat_route"]["model"] = ""
+            saved["chat_route"].pop("requested_model")
+            db.execute("UPDATE research_runs SET payload=? WHERE id=?", (json.dumps(saved), row[0]))
+        backend.execute_research_run(admitted["run"]["id"])
+        run = self.requirements.get(admitted["run"]["id"])
+        self.assertEqual(run["state"], "failed")
+        self.assertEqual(self.calls, [])
+        self.assertFalse(self.post(payload)["created"])
+
     def test_explicit_forbid_search_constraint_survives_automatic_research_routing(self):
         self.route = "research"
         self.search()

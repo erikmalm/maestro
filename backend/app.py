@@ -893,7 +893,8 @@ def requirements_model(state=None, run=None):
     """Use the selected local connection without testing or downloading models."""
     state = provider().read_state() if state is None else state
     config = state["config"]
-    model = ((run.get("chat_route") or {}).get("model") if run else "") or config.get("orchestrator_model") or config.get("model")
+    route = run.get("chat_route") if run else None
+    model = route.get("model") if route is not None else config.get("orchestrator_model") or config.get("model")
     if config.get("protocol") != "ollama" or not model or model not in state.get("models", []):
         raise ValueError("Choose an installed Local Ollama model in Settings and test the connection before research.")
     return model
@@ -1674,12 +1675,13 @@ def reviewed_chat(entry: ReviewedChatInput, background_tasks: BackgroundTasks):
             if previous[4] == "deleted":
                 raise ValueError("This reviewed submission was deleted. Use a new submission ID.")
             run = store._public(db, previous)
-            if (not run.get("chat_route") or run["chat_route"]["model"] != entry.model
+            if (not run.get("chat_route")
+                    or run["chat_route"].get("requested_model", run["chat_route"]["model"]) != entry.model
                     or run["request"] != entry.text or run["chat_id"] != entry.chat_id):
                 raise ValueError("This submission belongs to a different request or model.")
             created = False
         else:
-            requirements_model(run={"chat_route": {"model": entry.model}})
+            selected_model = requirements_model(run={"chat_route": {"model": entry.model}} if entry.model else None)
             policy = config_value(state)
             try:
                 search = WebSearch(DATABASE, TIMEZONE).status()
@@ -1690,7 +1692,8 @@ def reviewed_chat(entry: ReviewedChatInput, background_tasks: BackgroundTasks):
             permissions = research_permissions(state, entry.chat_id)
             if hosted and not permissions["memory_derived"]:
                 permissions = research_permissions(state, entry.chat_id, "research")
-            route = {"model": entry.model, "decision": None, "published": False, "memory_ids": [],
+            route = {"model": selected_model, "requested_model": entry.model,
+                     "decision": None, "published": False, "memory_ids": [],
                      "direct_memory_allowed": bool(policy["memory_recall_count"] and policy["memory_recall_characters"]),
                      "memory_policy": {name: policy[name] for name in ("memory_recall_count", "memory_recall_characters")}}
             run, created = store.create(entry.submission_id, entry.text, "", entry.chat_id, permissions,

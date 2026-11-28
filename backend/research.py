@@ -321,6 +321,8 @@ class ResearchStore:
                 raise ValueError("Reviewed chat requires its original conversation.")
             _encoded(chat_route, 2048)
             identity.append(["reviewed_chat", chat_route["model"], chat_route["direct_memory_allowed"], chat_route["memory_policy"]])
+            if "requested_model" in chat_route:
+                identity.append(["requested_model", chat_route["requested_model"]])
         fingerprint = hashlib.sha256(_encoded(identity).encode("utf-8")).hexdigest()
         with self._transaction(db) as connection:
             previous = self._row(connection, submission_id=submission_id)
