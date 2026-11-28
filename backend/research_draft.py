@@ -124,9 +124,20 @@ def _object(properties):
 
 def response_schema(assessment, review):
     _, review = _scope(assessment, review, supported=True)
+    return _response_schema([row["item_id"] for row in review["items"] if row["state"] == "covered"])
+
+
+def minimum_response_schema(assessment):
+    """Sizing only: a writer needs at least one covered requirement ID."""
+    assessment = validate_saved_assessment(assessment, assessment["completion_criterion"])
+    if assessment["decision"] != "ready":
+        _invalid()
+    return _response_schema([min((item["id"] for item in assessment["items"]), key=len)])
+
+
+def _response_schema(item_ids):
     schema = _object({"version": {"type": "integer", "const": WIRE_VERSION},
-                      "items": _object({row["item_id"]: {"$ref": "#/$defs/row"}
-                                        for row in review["items"] if row["state"] == "covered"})})
+                      "items": _object({identity: {"$ref": "#/$defs/row"} for identity in item_ids})})
     schema["$defs"] = {"row": _object({
         "kind": {"type": "string", "enum": ["fact", "interpretation", "gap"]},
         "text": {"type": "string", "maxLength": MAX_TEXT},

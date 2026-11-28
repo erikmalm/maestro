@@ -204,6 +204,38 @@ def stage_input(kind, selected, *, item_keys=()):
                         {"role": "user", "content": message}]}
 
 
+def _minimum_stage_inputs(assessment):
+    """Sizing-only lower bounds; never dispatch or persist these projections.
+
+    Blank decisions/text and empty containers stand for unknown data, not
+    accepted evidence. Retain guaranteed wrappers and every known qualifier copy.
+    """
+    from backend import research_draft, research_final_review
+
+    checked_at = datetime.now(timezone.utc).isoformat(timespec="microseconds")
+    opaque_hash = "0" * 64  # Only the fixed serialized width is used here.
+    packet = {"version": 1, "offset_unit": "unicode_codepoint",
+              "lookup": {"state": "", "search_limited": True, "skipped_count": 0},
+              "selection": {"limited": True, "omitted_count": 0}, "sources": [], "passages": []}
+    coverage = {**packet, "checked_at": checked_at,
+                "items": [{"item_id": item["id"], "model_state": "", "state": "", "reason": "",
+                           "suitability_reason": "", "supports": []} for item in assessment["items"]]}
+    draft = {"version": research_draft.WIRE_VERSION, "state": "unreviewed", "reason": "draft_requires_review",
+             "packet_hash": opaque_hash, "coverage_hash": opaque_hash,
+             "items": [{"item_id": item["id"], **{key: item[key] for key in research_draft.QUALIFIERS},
+                        "coverage_state": "", "kind": "", "text": "", "supports": [], "gap_reason": ""}
+                       for item in assessment["items"]]}
+    return {
+        "evidence_review": {"assessment": assessment, "packet": packet, "checked_at": checked_at},
+        "writer": {"version": research_draft.WIRE_VERSION, "assessment": assessment, "coverage": coverage,
+                   "packet_hash": opaque_hash, "coverage_hash": opaque_hash},
+        "reviewer": {"version": research_final_review.WIRE_VERSION,
+                     "original_request": assessment["completion_criterion"], "assessment": assessment,
+                     "coverage": coverage, "draft": draft,
+                     **{key: opaque_hash for key in ("assessment_hash", "packet_hash", "coverage_hash", "draft_hash")}},
+    }
+
+
 def acquisition_tokens_fit(run, config, held):
     """Reject known-impossible stage inputs before spending a hosted search.
 
@@ -215,16 +247,12 @@ def acquisition_tokens_fit(run, config, held):
     from backend.provider import research_instructions
 
     bounds = {}
+    inputs = _minimum_stage_inputs(run["assessment"])
     for kind, module in (("evidence_review", research_evidence), ("writer", research_draft),
                          ("reviewer", research_final_review)):
-        schema = research_evidence.minimum_response_schema(run["assessment"]) if kind == "evidence_review" else {}
-        known = {"assessment": run["assessment"]}
-        if kind == "evidence_review":
-            known["checked_at"] = datetime.now(timezone.utc).isoformat(timespec="microseconds")
-        if kind == "reviewer":
-            known["original_request"] = run["request"]
-        item_keys = [min((item["id"] for item in run["assessment"]["items"]), key=len)] if kind == "writer" else ()
-        selected = stage_input(kind, known, item_keys=item_keys)
+        schema = module.minimum_response_schema(run["assessment"])
+        item_keys = list(schema["properties"]["items"]["properties"]) if kind == "writer" else ()
+        selected = stage_input(kind, inputs[kind], item_keys=item_keys)
         envelope = {"kind": kind, "objective": run["request"], "assignment": selected["assignment"], "schema": schema,
                     "allowance": run["budget"], "permitted_actions": selected["permitted_actions"], "permissions": run["permissions"],
                     "evidence": [], "deadline": run["budget"]["deadline"]}
