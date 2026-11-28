@@ -5,6 +5,7 @@ from copy import deepcopy
 import hashlib
 import json
 import sqlite3
+import time
 
 from backend.context_policy import HASH, ID, SOURCE_BYTES, public_url, timestamp
 
@@ -14,10 +15,56 @@ MAX_PASSAGES = 6
 MAX_PASSAGE_CHARACTERS = 1200
 MAX_PACKET_BYTES = 7000
 MAX_CANDIDATES = 20
+PASSAGE_SECONDS = 2
+PASSAGE_SQL_STEPS = 10000000
+PASSAGE_INPUT_BYTES = 2 * 1024 * 1024
+# FTS5 highlight may spend quadratic native work merging dense matching spans.
+# Its implementation does not call SQLite's VM progress handler while running.
+MAX_HIGHLIGHT_MATCHES = 512
 SOURCE_FIELDS = ("capture_id", "content_hash", "manifest_hash", "title", "url", "retrieved_at",
                  "published_at", "modified_at", "stale", "completeness")
 LOOKUP_STATES = ("ready", "limited", "disabled", "unconfigured", "unavailable")
 _STOPWORDS = frozenset("a an and are as at be by compare for from give how in is it of on or research the to what which with".split())
+
+
+class _PassageLimit(Exception):
+    pass
+
+
+class _DenseCandidate(Exception):
+    pass
+
+
+class _PassageWork:
+    def __init__(self):
+        self.deadline = time.monotonic() + PASSAGE_SECONDS
+        self.steps = 0
+        self.input_bytes = 0
+        self.limited = False
+
+    def out_of_time(self):
+        expired = time.monotonic() >= self.deadline
+        self.limited = self.limited or expired
+        return expired
+
+    def expired(self):
+        return self.out_of_time() or self.limited
+
+    def check(self):
+        if self.expired():
+            raise _PassageLimit()
+
+    def consume(self, amount):
+        self.check()
+        if self.input_bytes + amount > PASSAGE_INPUT_BYTES:
+            self.limited = True
+            raise _PassageLimit()
+        self.input_bytes += amount
+
+    def progress(self):
+        self.steps += 1000
+        self.limited = self.limited or self.steps >= PASSAGE_SQL_STEPS
+        return int(self.expired())
 
 
 def _invalid():
@@ -95,9 +142,13 @@ def _source(value, *, stale=None):
     return result
 
 
-def _content(value, source):
+def _content(value, source, *, work=None):
+    if work is not None:
+        work.check()
     content = _text(value.get("content"), SOURCE_BYTES, empty=True, nul=True)
     raw = content.encode("utf-8")
+    if work is not None:
+        work.consume(len(raw))
     if not 1 <= len(raw) <= SOURCE_BYTES or hashlib.sha256(raw).hexdigest() != source["content_hash"]:
         _invalid()
     return content
@@ -151,7 +202,7 @@ def _terms(assessment, tokenize):
     return terms
 
 
-def _patterns(db, content, terms):
+def _patterns(db, content, terms, work):
     # The default FTS5 tokenizer is the archive's unicode61, including its
     # legacy multi-accent rules. Never approximate it with Unicode casefolding.
     # highlight drops embedded NULs; an equal-length separator view preserves
@@ -160,19 +211,26 @@ def _patterns(db, content, terms):
     tokens = _tokenize(db, view)
     positions = {}
     for position, token in enumerate(tokens):
+        if position % 256 == 0:
+            work.check()
         positions.setdefault(token, []).append(position)
     # Only tokens present in this <= SOURCE_BYTES body enter the expression;
     # the complete assessment is retained without the lookup's 17-token cap.
     wanted = {token for term in terms for token in term} & positions.keys()
     if not wanted:
         return []
+    if sum(len(positions[token]) for token in wanted) > MAX_HIGHLIGHT_MATCHES:
+        raise _DenseCandidate()
     marker = "\x01maestro-passage"
     while marker in view:
+        work.check()
         marker += "\x01"
     opening, closing_marker = marker + "<", marker + ">"
     expression = " OR ".join('"' + token.replace('"', '""') + '"' for token in sorted(wanted))
+    work.check()
     marked = db.execute("SELECT highlight(passage_text,0,?,?) FROM passage_text WHERE passage_text MATCH ?",
                         (opening, closing_marker, expression)).fetchone()[0]
+    work.check()
     chunks = marked.split(opening)
     restored, spans, offset = [chunks[0]], [], len(chunks[0])
     for chunk in chunks[1:]:
@@ -188,6 +246,7 @@ def _patterns(db, content, terms):
     token_spans = dict(zip(matching_positions, spans))
     patterns = []
     for term, weight in terms.items():
+        work.check()
         hits = [(token_spans[start][0], token_spans[start + len(term) - 1][1])
                 for start in positions.get(term[0], ()) if tokens[start:start + len(term)] == term]
         if hits:
@@ -204,7 +263,7 @@ def _hits(patterns, start, end):
     return hits
 
 
-def _windows(content, patterns):
+def _windows(content, patterns, work):
     width = min(MAX_PASSAGE_CHARACTERS, len(content))
     # Overlapping windows cover the complete saved text. Their count depends on
     # source length, not the potentially large number of repeated keyword hits.
@@ -212,6 +271,7 @@ def _windows(content, patterns):
     starts.add(len(content) - width)
     windows = []
     for start in sorted(starts):
+        work.check()
         end = start + width
         hits = _hits(patterns, start, end)
         if not hits:
@@ -222,6 +282,7 @@ def _windows(content, patterns):
     ranked = sorted(windows, key=lambda item: (-item[0], -item[1], item[2]))
     distinct = []
     for window in ranked:
+        work.check()
         start, end = window[2:4]
         if any(max(0, min(end, other[3]) - max(start, other[2])) >= 0.8 * min(end - start, other[3] - other[2])
                for other in distinct):
@@ -265,8 +326,9 @@ def select_packet(candidates, assessment, lookup, *, max_passages=MAX_PASSAGES, 
     """Select relevant windows anywhere in verified saved text, without changing it.
 
     Selection is a bounded nomination, never a claim that lookup was exhaustive.
-    Omitted count describes distinct nominated windows excluded by packet caps;
-    limited also covers windows shortened to fit the packet byte allowance.
+    Omitted count includes nominated windows excluded by packet caps and whole
+    candidates omitted by work limits. No partial source prefix is nominated.
+    Limited also covers windows shortened to fit the packet byte allowance.
     """
     _integer(max_passages, 1, MAX_PASSAGES)
     _integer(max_bytes, 1, MAX_PACKET_BYTES)
@@ -274,29 +336,58 @@ def select_packet(candidates, assessment, lookup, *, max_passages=MAX_PASSAGES, 
         _invalid()
     packet = {"version": 1, "offset_unit": "unicode_codepoint", "lookup": _lookup(lookup),
               "selection": {"limited": False, "omitted_count": 0}, "sources": [], "passages": []}
-    # Reserve the longer true flag and bounded omission counter during fitting.
-    if packet_size({**packet, "selection": {"limited": True, "omitted_count": 999999}}) > max_bytes:
+    # Reserve the longer false flag and bounded omission counter during fitting.
+    if packet_size({**packet, "selection": {"limited": False, "omitted_count": 999999}}) > max_bytes:
         _invalid()
-    records, windows = {}, []
-    with closing(sqlite3.connect(":memory:")) as db:
-        db.execute("PRAGMA temp_store=MEMORY")
-        db.execute("CREATE VIRTUAL TABLE passage_text USING fts5(value)")
-        db.execute("CREATE VIRTUAL TABLE passage_terms USING fts5vocab(passage_text, instance)")
-        terms = _terms(assessment, lambda value: _tokenize(db, value))
-        for position, candidate in enumerate(candidates):
-            source = _source(candidate)
-            content = _content(candidate, source)
-            identity = source["capture_id"]
-            if identity in records:
-                if records[identity][:2] != (source, content):
-                    _invalid()
-                continue
-            patterns = _patterns(db, content, terms)
-            records[identity] = (source, content, patterns)
-            for score, hits, start, end, anchor, minimum in _windows(content, patterns):
-                windows.append((-score, -hits, position, start, end, anchor, minimum, identity))
+    work = _PassageWork()
+    records, windows, omitted_candidates, next_candidate = {}, [], 0, 0
+    try:
+        with closing(sqlite3.connect(":memory:")) as db:
+            db.set_progress_handler(work.progress, 1000)
+            db.execute("PRAGMA temp_store=MEMORY")
+            db.execute("CREATE VIRTUAL TABLE passage_text USING fts5(value)")
+            db.execute("CREATE VIRTUAL TABLE passage_terms USING fts5vocab(passage_text, instance)")
+
+            def tokenize(value):
+                work.check()
+                result = _tokenize(db, value)
+                work.check()
+                return result
+
+            terms = _terms(assessment, tokenize)
+            for position, candidate in enumerate(candidates):
+                next_candidate = position
+                work.check()
+                source = _source(candidate)
+                content = _content(candidate, source, work=work)
+                identity = source["capture_id"]
+                if identity in records:
+                    if records[identity][:2] != (source, content):
+                        _invalid()
+                    next_candidate = position + 1
+                    continue
+                try:
+                    patterns = _patterns(db, content, terms, work)
+                    nominated = _windows(content, patterns, work)
+                except _DenseCandidate:
+                    omitted_candidates += 1
+                    next_candidate = position + 1
+                    continue
+                work.check()
+                records[identity] = (source, content, patterns)
+                for score, hits, start, end, anchor, minimum in nominated:
+                    windows.append((-score, -hits, position, start, end, anchor, minimum, identity))
+                next_candidate = position + 1
+    except (_PassageLimit, sqlite3.OperationalError):
+        if not work.limited:
+            raise
+        omitted_candidates += len(candidates) - next_candidate
     source_ids, shortened = {}, False
     for _, _, _, start, end, anchor, minimum, identity in sorted(windows):
+        # Completed candidate nominations remain exact; fitting never borrows
+        # more elapsed time after the shared work allowance expires.
+        if work.out_of_time():
+            break
         if len(packet["passages"]) >= max_passages:
             break
         source, content, patterns = records[identity]
@@ -313,7 +404,9 @@ def select_packet(candidates, assessment, lookup, *, max_passages=MAX_PASSAGES, 
         def proposal(length):
             left = max(start, min(anchor - length // 2, end - length))
             result = {**packet,
-                      "selection": {"limited": True, "omitted_count": len(windows)},
+                      # Selected passages only reduce this counter. Reserve
+                      # whole omissions and the longer final boolean too.
+                      "selection": {"limited": False, "omitted_count": len(windows) + omitted_candidates},
                       "sources": packet["sources"] + ([] if identity in source_ids else [proposed_source]),
                       "passages": packet["passages"] + [_passage(identifier, source_id, content, left, left + length)]}
             return result
@@ -323,6 +416,8 @@ def select_packet(candidates, assessment, lookup, *, max_passages=MAX_PASSAGES, 
         if packet_size(chosen) > max_bytes:
             low, high, fitting = minimum, full_length - 1, None
             while low <= high:
+                if work.out_of_time():
+                    break
                 length = (low + high) // 2
                 proposed = proposal(length)
                 if packet_size(proposed) <= max_bytes:
@@ -335,8 +430,8 @@ def select_packet(candidates, assessment, lookup, *, max_passages=MAX_PASSAGES, 
         if identity not in source_ids:
             source_ids[identity] = source_id
         packet["sources"], packet["passages"] = chosen["sources"], chosen["passages"]
-    omitted = len(windows) - len(packet["passages"])
-    packet["selection"] = {"limited": bool(omitted or shortened), "omitted_count": omitted}
+    omitted = len(windows) - len(packet["passages"]) + omitted_candidates
+    packet["selection"] = {"limited": bool(omitted or shortened or work.limited), "omitted_count": omitted}
     if packet_size(packet) > max_bytes:
         _invalid()
     return packet
@@ -348,6 +443,7 @@ def validate_packet(packet, load_capture_callback):
     The loader must enforce current eligibility and credential screening. Stale
     is lookup-time metadata; if the loader supplies stale, it must match too.
     """
+    work = _PassageWork()
     _shape(packet, ("version", "offset_unit", "lookup", "selection", "sources", "passages"))
     if type(packet["version"]) is not int or packet["version"] != 1 or packet["offset_unit"] != "unicode_codepoint":
         _invalid()
@@ -373,16 +469,21 @@ def validate_packet(packet, load_capture_callback):
             _invalid()
         identities.add(source["capture_id"])
         try:
+            work.check()
             current = load_capture_callback(source["capture_id"], source["content_hash"], source["manifest_hash"])
+            work.check()
             refreshed = _source(current, stale=source["stale"] if "stale" not in current else None)
             if refreshed != source:
                 _invalid()
-            content = _content(current, refreshed)
+            content = _content(current, refreshed, work=work)
+            work.check()
         except Exception:
             _invalid()
         sources[value["id"]], captures[value["id"]] = {"id": value["id"], **refreshed}, content
     passages, used, spans = [], set(), set()
     for number, value in enumerate(packet["passages"], 1):
+        if work.expired():
+            _invalid()
         _shape(value, ("id", "source_id", "start", "end", "text", "passage_hash"))
         if value["id"] != "p" + str(number) or not isinstance(value["source_id"], str) or value["source_id"] not in sources:
             _invalid()
@@ -399,6 +500,8 @@ def validate_packet(packet, load_capture_callback):
         used.add(value["source_id"])
         passages.append(expected)
     if used != set(sources):
+        _invalid()
+    if work.expired():
         _invalid()
     return {"version": 1, "offset_unit": "unicode_codepoint", "lookup": lookup,
             "selection": deepcopy(packet["selection"]), "sources": list(sources.values()), "passages": passages}

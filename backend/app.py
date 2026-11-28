@@ -257,6 +257,10 @@ class ContextArchiveConfig(StrictModel):
     reuse_hours: int = Field(default=24, ge=1, le=168, strict=True)
     max_bytes: int = Field(default=10737418240, ge=1048576, le=107374182400, strict=True)
     max_items: int = Field(default=200000, ge=100, le=200000, strict=True)
+    max_source_bytes: int = Field(default=262144, ge=8192, le=262144, strict=True)
+    warn_source_bytes: int = Field(default=65536, ge=1024, le=262144, strict=True)
+    max_capture_bytes: int = Field(default=786432, ge=8192, le=786432, strict=True)
+    min_free_bytes: int = Field(default=67108864, ge=65536, le=10737418240, strict=True)
 
 
 class ContextArchiveEnabled(StrictModel):

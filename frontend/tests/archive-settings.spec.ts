@@ -7,6 +7,10 @@ const originalConfig = {
   reuse_hours: 31,
   max_bytes: 123456789,
   max_items: 2345,
+  max_source_bytes: 262144,
+  warn_source_bytes: 65536,
+  max_capture_bytes: 786432,
+  min_free_bytes: 67108864,
 };
 const initial = {
   configured: true,
@@ -40,7 +44,7 @@ type Archive = Omit<
   path_error: string | null;
   path: string | null;
   last_error: string | null;
-  last_capture: { retrieved_at: string } | null;
+  last_capture: { retrieved_at: string; warnings?: string[] } | null;
 };
 type Reply = { body: Archive | { detail: string }; status?: number };
 
@@ -96,7 +100,10 @@ test("archive paths and zero counts connect Evidence to settings; keyboard toggl
 }) => {
   let server: Archive = {
     ...structuredClone(initial),
-    last_capture: { retrieved_at: "2026-10-16T14:30:00Z" },
+    last_capture: {
+      retrieved_at: "2026-10-16T14:30:00Z",
+      warnings: ["A large source was retained in full."],
+    },
   };
   const requests = await archiveFixture(
     page,
@@ -135,6 +142,17 @@ test("archive paths and zero counts connect Evidence to settings; keyboard toggl
   await expect(
     card.getByText(initial.index_path, { exact: true }),
   ).toBeVisible();
+  await expect(
+    card.getByText("A large source was retained in full.", { exact: true }),
+  ).toBeVisible();
+  for (const label of [
+    "Maximum source bytes",
+    "Source warning threshold in bytes",
+    "Maximum capture bytes",
+    "Minimum free bytes after capture",
+  ]) {
+    await expect(card.getByText(label, { exact: true })).toBeVisible();
+  }
   await expect(
     card
       .locator("dl > div")
