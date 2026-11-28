@@ -20,14 +20,14 @@ Checkpoint: 2026-11-28, Europe/Stockholm. Check live GitHub before acting.
   build, disposable real-backend filters/pins/withdrawal, and desktop/mobile checks.
 - **Candidate #29:** `feat/targeted-research-acquisition` adds an explicit,
   default-off research mode, one gap-driven acquisition, capture, reassessment,
-  writing and review. All 922 backend tests pass in 174.357 seconds; 26 Research
+  writing and review. All 923 backend tests pass in 203.159 seconds; 26 Research
   browser tests/build and independent frontend/backend reviews pass. The review
-  reproduced and fixed capacity-preflight and terminal/capture races; 17 new test
+  reproduced and fixed capacity-preflight and terminal/capture races; 18 new test
   methods cover the acquisition seams. All 127 browser tests and the production
   build pass after #58 integration. Copilot's capacity finding is fixed by shared
   stage-input construction. The failing-before boundary now spends zero searches;
   a roomier control completes four stages/one search. All 137 focused checks and
-  independent follow-up review pass. Full backend and fresh GitHub review remain.
+  independent follow-up review pass. Fresh GitHub review remains required.
   The first
   deliberate live attempt at `a8e925f` stopped during cold model loading after
   45 seconds: one local transport, zero hosted searches, unknown completion.
