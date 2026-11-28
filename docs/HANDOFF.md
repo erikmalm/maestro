@@ -23,8 +23,12 @@ Checkpoint: 2026-11-28, Europe/Stockholm. Check live GitHub before acting.
   writing and review. All 922 backend tests pass in 174.357 seconds; 26 Research
   browser tests/build and independent frontend/backend reviews pass. The review
   reproduced and fixed capacity-preflight and terminal/capture races; 17 new test
-  methods cover the acquisition seams. All 115 browser tests and the production
-  build pass before #58 integration. GitHub review remains pending. The first
+  methods cover the acquisition seams. All 127 browser tests and the production
+  build pass after #58 integration. Copilot's capacity finding is fixed by shared
+  stage-input construction. The failing-before boundary now spends zero searches;
+  a roomier control completes four stages/one search. All 137 focused checks and
+  independent follow-up review pass. Full backend and fresh GitHub review remain.
+  The first
   deliberate live attempt at `a8e925f` stopped during cold model loading after
   45 seconds: one local transport, zero hosted searches, unknown completion.
   Preserve its reservation; do not retry or clear it without supported recovery.
