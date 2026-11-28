@@ -41,6 +41,19 @@ const ready = (sources = [source], next_cursor: string | null = null) => ({
   next_cursor,
   skipped_count: 0,
 });
+const matches = (sources = [source], options = {}) => ({
+  state: "ready",
+  candidates: sources.map((item) => ({
+    ...item,
+    content: savedText,
+    archive_status: "saved",
+    stale: false,
+    match_kind: "keyword",
+  })),
+  search_limited: false,
+  skipped_count: 0,
+  ...options,
+});
 type Inventory = ReturnType<typeof ready>;
 type SourceReply = { status?: number; body: unknown };
 
@@ -58,10 +71,25 @@ async function evidenceFixture(
   detail = async (_url: URL): Promise<SourceReply> => ({
     body: { ...source, content: savedText },
   }),
+  search?: (
+    body: Record<string, unknown>,
+  ) => SourceReply | Promise<SourceReply>,
 ) {
   const listings: URL[] = [];
   const openings: URL[] = [];
+  const searches: { url: URL; body: Record<string, unknown> }[] = [];
   await page.clock.install();
+  if (search)
+    await page.route("**/api/context/search", async (route) => {
+      expect(route.request().method()).toBe("POST");
+      const body = route.request().postDataJSON();
+      searches.push({ url: new URL(route.request().url()), body });
+      const response = await search(body);
+      await route.fulfill({
+        status: response.status ?? 200,
+        json: response.body,
+      });
+    });
   await page.route("**/api/context/sources**", async (route) => {
     const url = new URL(route.request().url());
     expect(route.request().method()).toBe("GET");
@@ -82,7 +110,7 @@ async function evidenceFixture(
   await expect(
     page.getByRole("heading", { name: "Evidence", exact: true }),
   ).toBeVisible();
-  return { listings, openings };
+  return { listings, openings, searches };
 }
 
 async function returnToEvidence(page: Page) {
@@ -672,5 +700,284 @@ test("polling and focus share one inventory request and pause when hidden or unm
   } finally {
     release();
     releaseFresh();
+  }
+});
+
+test("Evidence search posts local filters, preserves result order and opens only the pinned saved version", async ({
+  page,
+}) => {
+  const requests = await evidenceFixture(
+    page,
+    () => ready([anotherSource], "inventory-page"),
+    undefined,
+    async () => ({ body: matches([source, anotherSource]) }),
+  );
+  await page.getByLabel("Keywords", { exact: true }).fill("Northstar revenue");
+  await page.getByLabel("Exact source domain").fill("reports.example.org");
+  await page.getByLabel("Retrieved from (UTC)").fill("2026-10-01");
+  await page.getByLabel("Retrieved through (UTC)").fill("2026-10-05");
+  await page.getByLabel("Keywords", { exact: true }).press("Enter");
+  await expect(page.getByRole("rowheader").first()).toContainText(source.title);
+  await expect(
+    page.getByText(/Exact-query matches first, then keyword rank/),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: "Load more sources" }),
+  ).toHaveCount(0);
+  expect(requests.searches).toHaveLength(1);
+  expect(requests.searches[0].url.search).toBe("");
+  expect(requests.searches[0].body).toEqual({
+    query: "Northstar revenue",
+    domain: "reports.example.org",
+    retrieved_from: "2026-10-01",
+    retrieved_to: "2026-10-05",
+    limit: 20,
+  });
+  await expect(page.getByLabel("Saved source content")).toHaveCount(0);
+  expect(requests.openings).toHaveLength(0);
+  await page.getByRole("button", { name: "View saved text" }).first().click();
+  await expect(page.getByLabel("Saved source content")).toHaveText(savedText);
+  expect(requests.openings[0].searchParams.get("content_hash")).toBe(
+    source.content_hash,
+  );
+  expect(requests.openings[0].searchParams.get("manifest_hash")).toBe(
+    source.manifest_hash,
+  );
+  await page.getByRole("button", { name: "Clear filters" }).click();
+  await expect(page.getByLabel("Keywords", { exact: true })).toHaveValue("");
+  await expect(page.getByLabel("Exact source domain")).toHaveValue("");
+  await expect(page.getByLabel("Retrieved from (UTC)")).toHaveValue("");
+  await expect(page.getByLabel("Retrieved through (UTC)")).toHaveValue("");
+  await expect(page.getByLabel("Saved source content")).toHaveCount(0);
+  await expect(
+    page.getByRole("button", { name: "Load more sources" }),
+  ).toBeVisible();
+});
+
+test("domain-only Evidence search stays local and revalidates applied filters while edits remain drafts", async ({
+  page,
+}) => {
+  let revoked = false;
+  const requests = await evidenceFixture(
+    page,
+    () => ready(),
+    async () =>
+      revoked
+        ? {
+            status: 404,
+            body: { detail: "Saved source is no longer available." },
+          }
+        : { body: { ...source, content: savedText } },
+    async () => ({ body: matches() }),
+  );
+  await page.getByLabel("Exact source domain").fill("reports.example.org");
+  await page.getByRole("button", { name: "Search saved evidence" }).click();
+  await expect(
+    page.getByText(/Filtered versions, newest retrieval first/),
+  ).toBeVisible();
+  await page.getByRole("button", { name: "View saved text" }).click();
+  await expect(page.getByLabel("Saved source content")).toHaveText(savedText);
+  await page.getByLabel("Exact source domain").fill("unsubmitted.example.org");
+  revoked = true;
+  await page.clock.fastForward(15_000);
+  await expect(
+    page.getByText("Saved source is no longer available.", { exact: true }),
+  ).toBeVisible();
+  await expect(page.getByLabel("Saved source content")).toHaveCount(0);
+  expect(requests.searches).toHaveLength(2);
+  expect(requests.searches.map((entry) => entry.body)).toEqual([
+    { query: "", domain: "reports.example.org", limit: 20 },
+    { query: "", domain: "reports.example.org", limit: 20 },
+  ]);
+  expect(requests.listings).toHaveLength(1);
+});
+
+for (const scenario of [
+  {
+    name: "empty matches",
+    body: matches([]),
+    text: "No matching saved sources.",
+  },
+  {
+    name: "limited matches",
+    body: matches([source], {
+      state: "limited",
+      search_limited: true,
+      skipped_count: 2,
+    }),
+    text: "Search results may be incomplete. Narrow the keywords or filters to inspect more evidence.",
+  },
+  {
+    name: "disabled storage",
+    body: matches([], { state: "disabled" }),
+    text: "Source saving is disabled.",
+  },
+  {
+    name: "unconfigured storage",
+    body: matches([], { state: "unconfigured" }),
+    text: "No source archive is configured.",
+  },
+  {
+    name: "unavailable storage",
+    body: matches([], {
+      state: "unavailable",
+      message:
+        "Saved evidence is unavailable. Check the archive and local index, then retry.",
+    }),
+    text: "Saved evidence is unavailable. Check the archive and local index, then retry.",
+  },
+  {
+    name: "rejected search",
+    body: { detail: "Check the saved-evidence search fields and try again." },
+    status: 422,
+    text: "Check the saved-evidence search fields and try again.",
+  },
+]) {
+  test(`Evidence search distinguishes ${scenario.name}`, async ({ page }) => {
+    await evidenceFixture(
+      page,
+      () => ready(),
+      undefined,
+      async () => ({ body: scenario.body, status: scenario.status }),
+    );
+    await page.getByLabel("Keywords", { exact: true }).fill("Northstar");
+    await page.getByRole("button", { name: "Search saved evidence" }).click();
+    await expect(page.getByText(scenario.text, { exact: true })).toBeVisible();
+    await expect(
+      page.getByRole("button", { name: "Load more sources" }),
+    ).toHaveCount(0);
+    if (scenario.name === "limited matches") {
+      await expect(
+        page.getByRole("button", { name: "View saved text" }),
+      ).toBeVisible();
+      await expect(
+        page.getByText(/2 unavailable or ineligible records were skipped/),
+      ).toBeVisible();
+    }
+  });
+}
+
+for (const returned of [[], [source]]) {
+  test(`ready Evidence search with ${returned.length} returned sources preserves skipped-candidate uncertainty`, async ({
+    page,
+  }) => {
+    const message =
+      "Some saved evidence could not be verified or returned. Results may be incomplete.";
+    await evidenceFixture(
+      page,
+      () => ready(),
+      undefined,
+      async () => ({
+        body: matches(returned, {
+          skipped_count: 2,
+          search_limited: false,
+          message,
+        }),
+      }),
+    );
+    await page.getByLabel("Keywords", { exact: true }).fill("Northstar");
+    await page.getByRole("button", { name: "Search saved evidence" }).click();
+    await expect(page.getByText(message, { exact: true })).toBeVisible();
+    await expect(
+      page.getByRole("button", { name: "View saved text" }),
+    ).toHaveCount(returned.length);
+    await expect(
+      page.getByText("No matching saved sources.", { exact: true }),
+    ).toHaveCount(0);
+    if (!returned.length)
+      await expect(
+        page.getByText(
+          "No matching saved sources could be returned. Results may be incomplete.",
+          { exact: true },
+        ),
+      ).toBeVisible();
+    await expect(
+      page.getByRole("button", { name: "Load more sources" }),
+    ).toHaveCount(0);
+  });
+}
+
+test("a late search cannot replace a newer search or restore an old saved-text response", async ({
+  page,
+}) => {
+  const heldSearch = deferred();
+  const heldDetail = deferred();
+  const requests = await evidenceFixture(
+    page,
+    () => ready(),
+    async () => {
+      await heldDetail.promise;
+      return { body: { ...source, content: savedText } };
+    },
+    async (body) => {
+      if (body.query === "old") {
+        await heldSearch.promise;
+        return { body: matches([anotherSource]) };
+      }
+      return { body: matches([source]) };
+    },
+  );
+  try {
+    await page.getByRole("button", { name: "View saved text" }).click();
+    await expect.poll(() => requests.openings.length).toBe(1);
+    await page.getByLabel("Keywords", { exact: true }).fill("old");
+    await page.getByRole("button", { name: "Search saved evidence" }).click();
+    await expect.poll(() => requests.searches.length).toBe(1);
+    await page.getByLabel("Keywords", { exact: true }).fill("new");
+    await page.getByRole("button", { name: "Search saved evidence" }).click();
+    await expect.poll(() => requests.searches.length).toBe(2);
+    await expect(page.getByRole("rowheader")).toContainText(source.title);
+    heldSearch.release();
+    heldDetail.release();
+    await page.clock.runFor(50);
+    await expect(page.getByRole("rowheader")).toContainText(source.title);
+    await expect(
+      page.getByRole("rowheader").filter({ hasText: anotherSource.title }),
+    ).toHaveCount(0);
+    await expect(page.getByLabel("Saved source content")).toHaveCount(0);
+  } finally {
+    heldSearch.release();
+    heldDetail.release();
+  }
+});
+
+test("clearing a pending search restores all loaded inventory pages and remains usable on narrow screens", async ({
+  page,
+}) => {
+  const held = deferred();
+  const requests = await evidenceFixture(
+    page,
+    (url) =>
+      url.searchParams.has("cursor")
+        ? ready([anotherSource])
+        : ready([source], "second-page"),
+    undefined,
+    async () => {
+      await held.promise;
+      return { body: matches([]) };
+    },
+  );
+  await page.setViewportSize({ width: 375, height: 812 });
+  try {
+    await page.getByRole("button", { name: "Load more sources" }).click();
+    await expect(page.getByRole("rowheader")).toHaveCount(2);
+    await page.getByLabel("Keywords", { exact: true }).fill("Northstar");
+    await page.getByRole("button", { name: "Search saved evidence" }).click();
+    await expect.poll(() => requests.searches.length).toBe(1);
+    await page.getByRole("button", { name: "Clear filters" }).click();
+    await expect(page.getByRole("rowheader")).toHaveCount(2);
+    expect(
+      requests.listings.slice(-2).map((url) => url.searchParams.get("cursor")),
+    ).toEqual([null, "second-page"]);
+    held.release();
+    await page.clock.runFor(50);
+    await expect(page.getByRole("rowheader")).toHaveCount(2);
+    expect(
+      await page.evaluate(
+        () => document.documentElement.scrollWidth <= innerWidth,
+      ),
+    ).toBe(true);
+  } finally {
+    held.release();
   }
 });

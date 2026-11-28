@@ -13,23 +13,37 @@ Checkpoint: 2026-11-28, Europe/Stockholm. Check live GitHub before acting.
 - Main now supports complete accepted supplied source text up to 256 KiB, with
   capture/capacity and processing bounds. Legacy chat still clips search excerpts
   to 1,200 characters. Public Research on main remains saved-evidence-only.
-- **Candidate #43:** `feat/evidence-search` adds local keyword/domain/UTC-date
-  search to the existing Evidence page. No new datastore, dependency or module.
-  Baseline 123 browser tests and the production build pass. The PR #58 review
-  found a ready-but-skipped results diagnostic gap; two failing regressions now
-  pass with all 24 Evidence tests and the build. Independent follow-up review is
-  clear; fresh GitHub review is pending. A disposable real-backend
-  check verified combined filters, ordering, exact pins and source withdrawal.
-  Desktop/mobile layouts were inspected. All data/transports were synthetic;
-  zero hosted/model calls. GitHub review and merge are still delivery gates.
+- **#43 delivered in PR #58, merged as `b02b193` with user approval.** Evidence
+  supports local keyword/domain/UTC-date search. Fresh Copilot review of `8b10ae9`
+  recommends approval with no open findings. Validation: 123 browser tests at the
+  baseline, all 24 Evidence tests after the incomplete-results fix, 16 API checks,
+  build, disposable real-backend filters/pins/withdrawal, and desktop/mobile checks.
 - **Candidate #29:** `feat/targeted-research-acquisition` adds an explicit,
   default-off research mode, one gap-driven acquisition, capture, reassessment,
   writing and review. All 922 backend tests pass in 174.357 seconds; 26 Research
   browser tests/build and independent frontend/backend reviews pass. The review
   reproduced and fixed capacity-preflight and terminal/capture races; 17 new test
-  methods cover the acquisition seams. All 115 browser tests and the production
-  build pass on the integrated candidate. GitHub review and bounded live
-  acceptance remain delivery gates; no deployment is claimed.
+  methods cover the acquisition seams. All 127 browser tests and the production
+  build pass after #58 integration. Copilot's capacity finding is fixed by shared
+  stage-input construction. The failing-before boundary now spends zero searches;
+  a roomier control completes four stages/one search. All 137 focused checks and
+  independent follow-up review pass. Full backend and fresh GitHub review remain.
+  The first
+  deliberate live attempt at `a8e925f` stopped during cold model loading after
+  45 seconds: one local transport, zero hosted searches, unknown completion.
+  Preserve its reservation; do not retry or clear it without supported recovery.
+  Report: `%TEMP%/maestro-pr59-live-6ubiikvu/report.json`. A request to restart the
+  shared Ollama server, recover and retry once is pending user confirmation.
+  No live acquisition/reuse success or deployment is claimed.
+- **Candidate #30:** `feat/research-review-triage` permits one justified rewrite
+  or evidence-gap correction in the existing run. New answers capture the
+  user-approved seven calls/180 seconds; old runs keep their original policy.
+  No token/spend/search cap increases. All 941 tests loaded before dependency
+  integration passed (198.635s); all final 17 continuation tests passed (8.820s).
+  After integrating #29's capacity fix, all 35 continuation/acquisition checks and
+  the build pass; independent integration review is clear. Full final validation,
+  GitHub review and a bounded local triage trial remain. Improved live-model
+  classification is not yet measured. No new service, dependency or datastore.
 
 ## Autonomous pilot
 
@@ -46,15 +60,15 @@ Preserve Argus's existing uncommitted work.
 
 ## Next actions and bounds
 
-1. Finish #43 review and obtain merge approval. Refresh its branch against main.
-2. Finish #29 with the existing journal/store/provider services. Preserve four
+1. Finish #29 review and the #58 integration checks. Recover the live test only
+   after the user's answer, then demonstrate acquisition/reuse before merge approval.
+2. Preserve #29's four
    model calls, 120 seconds, one hosted search/run and the shared daily cap.
    Protect reassessment plus writing/review capacity at actual dispatch. Capture
    survives answer failure; failed/disabled saving has no invented capture IDs.
 3. Verify acquired content beyond character 1,200 and a repeat that reuses its
-   exact saved version without another hosted request. Live verification remains
-   a separate bounded acceptance step after fixture checks and review.
-4. Continue #30 bounded correction, #38 routing/caller migration, then #31 code
+   exact saved version without another hosted request; fixture checks cover both.
+4. Finish #30 validation/review, #38 routing/caller migration, then #31 code
    retirement. Calculations #52, graphs and full-page/PDF acquisition remain later.
 
 The user approved up to seven calls/180 cumulative seconds for #30, with unchanged
@@ -69,10 +83,11 @@ intermittent Windows shutdown issue remains tracked separately in #56.
 
 | Checkout | Purpose |
 | --- | --- |
-| `C:\GitHub\maestro` | Synced main at `63979fc` |
+| `C:\GitHub\maestro` | Synced main at `b02b193` |
 | `C:\GitHub\maestro-bounded-source-content` | Preserved reviewed #57 branch |
-| `C:\GitHub\maestro-evidence-search` | #43 candidate and pilot instructions |
+| `C:\GitHub\maestro-evidence-search` | Preserved reviewed #43 branch |
 | `C:\GitHub\maestro-targeted-research-acquisition` | #29 implementation |
+| `C:\GitHub\maestro-review-triage` | #30 correction implementation, based on #29 |
 
 Use the project's pinned `.venv` for backend checks. Browser suites use port 8777;
 coordinate runs across worktrees and never stop another user's preview to free it.

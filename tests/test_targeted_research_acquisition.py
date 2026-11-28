@@ -144,6 +144,30 @@ class TargetedResearchAcquisitionTests(unittest.TestCase):
                 self.assertEqual(case.requests, [])
                 self.assert_released(run, 1, 0)
 
+    def test_known_reassessment_envelope_stops_near_context_search_but_roomier_control_completes(self):
+        for context in (22590, 50000):
+            with self.subTest(context=context), self.isolated_case() as case:
+                with backend.workspace_transaction() as workspace:
+                    workspace["limits"]["max_tokens"] = 500000
+                with backend.provider().transaction() as state:
+                    state["config"].update(ollama_context_tokens=context, max_output_tokens=1024)
+                criterion = "revenue " + "reported " * 100
+                first = deepcopy(case.evidence.raw["items"][0])
+                case.evidence.raw["items"] = [first] + [
+                    {**first, "id": f"i{index}", "criterion": criterion} for index in range(2, 9)]
+                run = case.submit(request="Compare Acme " + criterion + " in USD for FY2025.")
+                if context == 22590:
+                    # The old empty assignment/actions and unprefixed history
+                    # permitted a search here, then discarded its whole packet.
+                    self.assertEqual(case.requests, [])
+                    self.assertIn("acquisition_unavailable", self.kinds(run))
+                    self.assert_released(run, 1, 0)
+                else:
+                    self.assertEqual(run["state"], "accepted")
+                    self.assertEqual(len(case.requests), 1)
+                    self.assertTrue(run["evidence_review"]["passages"])
+                    self.assert_released(run, 4, 1)
+
     def test_daily_cap_is_shared_with_legacy_search_and_connection_tests(self):
         with self.search.transaction() as state:
             state["config"]["daily_limit"] = 1
