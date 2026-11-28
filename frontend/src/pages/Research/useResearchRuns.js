@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import * as api from "../../api";
 
 const PENDING_KEY = "maestro.research.pending";
+const PENDING_RESOLVED = "maestro:research-pending-resolved";
 const opaqueId = (value) => (/^[a-f0-9]{32}$/.test(value || "") ? value : null);
 const initialSelection = () =>
   opaqueId(new URLSearchParams(window.location.search).get("research_run"));
@@ -16,6 +17,11 @@ function pendingIdentity(value) {
   }
   return null;
 }
+export const rememberPendingResearch = (id) => pendingIdentity(id);
+export function resolvePendingResearch(id) {
+  if (pendingIdentity() === id) pendingIdentity(null);
+  window.dispatchEvent(new CustomEvent(PENDING_RESOLVED, { detail: id }));
+}
 export const researchPageRequested = () =>
   Boolean(initialSelection() || pendingIdentity());
 const message = (reason, fallback) =>
@@ -23,6 +29,7 @@ const message = (reason, fallback) =>
 const activeStates = new Set(["queued", "running"]);
 const terminalStates = new Set([
   "accepted",
+  "answered",
   "draft",
   "partial",
   "clarification",
@@ -217,11 +224,18 @@ export default function useResearchRuns(chatId) {
 
   useEffect(() => {
     mounted.current = true;
+    const resolved = (event) => {
+      if (pending.current !== event.detail || pendingBody.current) return;
+      pending.current = null;
+      setPendingId(null);
+      void refresh();
+    };
     const sync = () => {
       void refresh();
     };
     const timer = setInterval(sync, 2500);
     window.addEventListener("focus", sync);
+    window.addEventListener(PENDING_RESOLVED, resolved);
     document.addEventListener("visibilitychange", sync);
     void refresh();
     return () => {
@@ -229,6 +243,7 @@ export default function useResearchRuns(chatId) {
       fence();
       clearInterval(timer);
       window.removeEventListener("focus", sync);
+      window.removeEventListener(PENDING_RESOLVED, resolved);
       document.removeEventListener("visibilitychange", sync);
     };
   }, []);

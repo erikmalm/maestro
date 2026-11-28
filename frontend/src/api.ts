@@ -23,8 +23,9 @@ export type Message = {
   memory_ids?: string[];
   feedback?: MessageFeedback | null;
   cost?: number;
-  input_tokens?: number;
-  output_tokens?: number;
+  input_tokens?: number | null;
+  output_tokens?: number | null;
+  usage_status?: "known" | "pending" | "unknown";
   web_search?: {
     query: string;
     at: string;
@@ -642,6 +643,11 @@ export type ResearchRun = {
   evidence_review?: ResearchEvidenceReview | null;
   draft?: ResearchDraft | null;
   final_review?: ResearchFinalReview | null;
+  chat_route?: {
+    decision: "direct" | "research" | "clarify" | null;
+    direct_memory_allowed: boolean;
+    model?: string;
+  } | null;
   chat_id: string | null;
   state:
     | "queued"
@@ -649,6 +655,7 @@ export type ResearchRun = {
     | "partial"
     | "draft"
     | "accepted"
+    | "answered"
     | "clarification"
     | "cancelled"
     | "interrupted"
@@ -711,6 +718,17 @@ export const loadResearchRuns = (signal?: AbortSignal) =>
     "GET",
     undefined,
     signal,
+  );
+export const reviewChatMessage = (body: {
+  submission_id: string;
+  text: string;
+  chat_id: string;
+  model: string;
+}) =>
+  request<{ run: ResearchRun; created: boolean }>(
+    "/chat/reviewed",
+    "POST",
+    body,
   );
 export const loadResearchRun = (id: string, signal?: AbortSignal) =>
   request<ResearchRun>(

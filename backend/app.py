@@ -192,6 +192,13 @@ class TextInput(StrictModel):
     role: Literal["chat", "orchestrator"] = "chat"
 
 
+class ReviewedChatInput(StrictModel):
+    submission_id: str = Field(pattern=r"^[a-f0-9]{32}$", strict=True)
+    text: str = Field(min_length=1, max_length=32000, strict=True)
+    chat_id: str = Field(min_length=1, max_length=100, strict=True)
+    model: str = Field(default="", max_length=200, pattern=r"^[A-Za-z0-9_./:-]*$")
+
+
 class ChatTitleInput(StrictModel):
     title: str = Field(min_length=1, max_length=120)
 
@@ -784,6 +791,9 @@ def safe_research_run(run, *, secrets):
     # that the browser reconstructs from the response.
     safe_private_content(run["request"], run["query"], run["submission_id"], run["chat_id"] or "",
                          json.dumps(run, ensure_ascii=False), secrets=secrets)
+    if run.get("chat_route") is not None or run.get("state") == "answered":
+        from backend.chat_routing import validate_saved_chat
+        validate_saved_chat(run, DATABASE, secrets=secrets)
     if (run.get("workflow") in ("requirements", "evidence_review", "research_draft", "research_answer")
             or any(run.get(field) is not None for field in ("assessment", "evidence_review", "draft", "final_review"))):
         from backend.research_requirements import validate_saved_assessment
@@ -879,11 +889,12 @@ def research_view(run):
         raise HTTPException(404, "That research run is unavailable.") from None
 
 
-def requirements_model(state=None):
+def requirements_model(state=None, run=None):
     """Use the selected local connection without testing or downloading models."""
     state = provider().read_state() if state is None else state
     config = state["config"]
-    model = config.get("orchestrator_model") or config.get("model")
+    route = run.get("chat_route") if run else None
+    model = route.get("model") if route is not None else config.get("orchestrator_model") or config.get("model")
     if config.get("protocol") != "ollama" or not model or model not in state.get("models", []):
         raise ValueError("Choose an installed Local Ollama model in Settings and test the connection before research.")
     return model
@@ -912,6 +923,32 @@ def execute_requirements(run, token, store):
     except Exception:
         # Invalid/truncated/late model output is a controlled terminal outcome;
         # it cannot become an ordinary answer or launch dependent work.
+        store.fail(run["id"], token, "requirements_failed")
+
+
+def execute_chat_route(run, token, store):
+    from backend.chat_routing import SCHEMA, INSTRUCTIONS, MESSAGE, validate_route, DIRECT_SCHEMA, DIRECT_INSTRUCTIONS, validate_direct
+    try:
+        operation_secrets = source_secrets()
+        with provider().transaction(with_db=True) as (state, db):
+            stage = store.prepare_stage(run["id"], token, "route", model=requirements_model(state, run),
+                schema=SCHEMA, assignment="Choose direct, research with complete requirements, or material clarification.",
+                permitted_actions=["route_request", "report_gap"], seconds=45, db=db)
+        provider().generate_research_stage(stage, INSTRUCTIONS, [{"role": "user", "content": MESSAGE}],
+            max_output_tokens=4096, output_validator=validate_route)
+        if not store.finish_chat_stage(run["id"], token, stage, secrets=(*operation_secrets, *source_secrets())):
+            return
+        current = store.get(run["id"])
+        if current["state"] == "running" and current["chat_route"]["decision"] == "direct":
+            with provider().transaction(with_db=True) as (state, db):
+                stage = store.prepare_stage(run["id"], token, "direct", model=requirements_model(state, current),
+                    schema=DIRECT_SCHEMA, assignment="Answer directly using only eligible local conversation and recall.",
+                    permitted_actions=["reply_directly"], seconds=min(90, max(1, int(current["budget"]["remaining"]["seconds"]))), db=db)
+            result = provider().generate_research_stage(stage, DIRECT_INSTRUCTIONS, [{"role": "user", "content": "Return the direct reply."}],
+                max_output_tokens=4096, output_validator=validate_direct, private_direct=True)
+            store.finish_chat_stage(run["id"], token, stage, memory_ids=result["memory_ids"],
+                                    secrets=(*operation_secrets, *source_secrets()))
+    except Exception:
         store.fail(run["id"], token, "requirements_failed")
 
 
@@ -1011,7 +1048,7 @@ def execute_evidence_review(run, token, store):
                 else:
                     seconds = max(1, min(45, int(datetime.fromisoformat(run["budget"]["deadline"]).timestamp() -
                                                     datetime.now(TIMEZONE).timestamp() - 12)))
-                stage = store.prepare_stage(run["id"], token, "evidence_review", model=requirements_model(state),
+                stage = store.prepare_stage(run["id"], token, "evidence_review", model=requirements_model(state, run),
                     schema=schema, assignment=selected["assignment"],
                     evidence=[{key: source[key] for key in ("capture_id", "content_hash", "manifest_hash", "retrieved_at", "stale")}
                               for source in packet["sources"]],
@@ -1159,7 +1196,7 @@ def execute_draft_writer(run, token, store):
                 # Preparation captures settings/ownership. Its authorized
                 # ceiling includes only this writer's hold plus free allowance;
                 # the reviewer's captured capacity remains protected.
-                stage = store.prepare_stage(run["id"], token, "writer", model=requirements_model(state),
+                stage = store.prepare_stage(run["id"], token, "writer", model=requirements_model(state, run),
                     schema=schema, assignment=selected["assignment"],
                     evidence=[{key: source[key] for key in ("capture_id", "content_hash", "manifest_hash", "retrieved_at", "stale")}
                               for source in packet["sources"]], permitted_actions=selected["permitted_actions"],
@@ -1171,7 +1208,7 @@ def execute_draft_writer(run, token, store):
                 fits = (seconds >= 1 and size + output <= min(workspace["limits"]["max_tokens"],
                         state["config"]["ollama_context_tokens"], envelope["finishing_token_limit"]))
                 if fits:
-                    stage = store.prepare_stage(run["id"], token, "writer", model=requirements_model(state),
+                    stage = store.prepare_stage(run["id"], token, "writer", model=requirements_model(state, run),
                         schema=schema, assignment=envelope["assignment"], evidence=envelope["evidence"],
                         permitted_actions=selected["permitted_actions"], seconds=seconds, db=db,
                         packet_hash=evidence_packet_hash(packet), coverage_hash=coverage_hash(review))
@@ -1215,7 +1252,7 @@ def execute_final_review(run, token, store):
             history = inputs["history"]
             with provider().transaction(with_db=True) as (state, db):
                 workspace = json.loads(db.execute("SELECT value FROM workspace WHERE id=1").fetchone()[0])
-                options = {"model": requirements_model(state), "schema": schema,
+                options = {"model": requirements_model(state, run), "schema": schema,
                     "assignment": inputs["assignment"],
                     "evidence": [{key: source[key] for key in ("capture_id", "content_hash", "manifest_hash", "retrieved_at", "stale")}
                                  for source in packet["sources"]],
@@ -1281,7 +1318,16 @@ def execute_research_run(run_id):
         return
     run, token = claimed
     if workflow in ("requirements", "evidence_review", "research_draft", "research_answer"):
-        execute_requirements(run, token, store)
+        if run.get("chat_route"):
+            execute_chat_route(run, token, store)
+            try:
+                current = store.get(run_id)
+            except (KeyError, ValueError):
+                return
+            if current["state"] != "running" or current["chat_route"]["decision"] != "research":
+                return
+        else:
+            execute_requirements(run, token, store)
         if workflow in ("evidence_review", "research_draft", "research_answer"):
             try:
                 current = store.get(run_id)
@@ -1612,6 +1658,51 @@ def chat(entry: TextInput):
         provider().chat(entry.text, chat_id, entry.model, entry.role)
     state = read_workspace()
     return snapshot(state, chat_id if any(item["id"] == chat_id for item in state["chats"]) else None)
+
+
+@app.post("/api/chat/reviewed", status_code=202)
+def reviewed_chat(entry: ReviewedChatInput, background_tasks: BackgroundTasks):
+    try:
+        operation_secrets = source_secrets()
+        safe_private_content(entry.text, entry.chat_id, entry.model, entry.submission_id, secrets=operation_secrets)
+    except (OSError, ValueError, sqlite3.Error):
+        raise HTTPException(422, "Check the reviewed request and remove credentials before saving.") from None
+    store = research_store()
+    with conflict_errors(), workspace_transaction(with_db=True) as (state, db):
+        selected_chat(state, entry.chat_id)
+        previous = store._row(db, submission_id=entry.submission_id)
+        if previous is not None:
+            if previous[4] == "deleted":
+                raise ValueError("This reviewed submission was deleted. Use a new submission ID.")
+            run = store._public(db, previous)
+            if (not run.get("chat_route")
+                    or run["chat_route"].get("requested_model", run["chat_route"]["model"]) != entry.model
+                    or run["request"] != entry.text or run["chat_id"] != entry.chat_id):
+                raise ValueError("This submission belongs to a different request or model.")
+            created = False
+        else:
+            selected_model = requirements_model(run={"chat_route": {"model": entry.model}} if entry.model else None)
+            policy = config_value(state)
+            try:
+                search = WebSearch(DATABASE, TIMEZONE).status()
+                hosted = bool(search["config"]["enabled"] and search["tested_at"] and search["credentials_present"]
+                              and search["remaining_today"] and not search["paused_until"])
+            except (ValueError, OSError):
+                hosted = False
+            permissions = research_permissions(state, entry.chat_id)
+            if hosted and not permissions["memory_derived"]:
+                permissions = research_permissions(state, entry.chat_id, "research")
+            route = {"model": selected_model, "requested_model": entry.model,
+                     "decision": None, "published": False, "memory_ids": [],
+                     "direct_memory_allowed": bool(policy["memory_recall_count"] and policy["memory_recall_characters"]),
+                     "memory_policy": {name: policy[name] for name in ("memory_recall_count", "memory_recall_characters")}}
+            run, created = store.create(entry.submission_id, entry.text, "", entry.chat_id, permissions,
+                research_budget(state, permissions["source_mode"], "research_answer"), db,
+                workflow="research_answer", continuation=True, chat_route=route)
+        safe_research_run(run, secrets=(*operation_secrets, *source_secrets()))
+    if created:
+        background_tasks.add_task(execute_research_run, run["id"])
+    return {"run": run if created else research_view(run), "created": created}
 
 
 @app.put("/api/limits")

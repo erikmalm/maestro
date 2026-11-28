@@ -2,7 +2,11 @@ import useResearchRuns from "./useResearchRuns";
 import RunDetails, { stateLabel } from "./RunDetails";
 import "./styles.css";
 
-export { researchPageRequested } from "./useResearchRuns";
+export {
+  researchPageRequested,
+  rememberPendingResearch,
+  resolvePendingResearch,
+} from "./useResearchRuns";
 
 export default function Research({ chatId }) {
   const data = useResearchRuns(chatId);
@@ -18,11 +22,11 @@ export default function Research({ chatId }) {
         <span className="badge neutral">Preview</span>
       </div>
       <p className="page-note">
-        This preview assesses your request, then reviews a bounded selection of
-        saved evidence with an installed local model, prepares a cited draft,
-        then checks it against your request and the supplied evidence. It makes
-        no personal-memory recall. Web search is off by default. Review findings
-        and any remaining gaps stay visible.
+        Research reviews a bounded selection of saved evidence, drafts a cited
+        answer and checks it against your request. Initial assessment and
+        Research stages use no personal memory. Direct local chat replies may
+        use enabled memory settings. Each run records its sharing permissions,
+        limits and findings.
       </p>
       <form
         className="card entry-form research-form"
@@ -73,9 +77,9 @@ export default function Research({ chatId }) {
           The current conversation's sharing restrictions are retained. Material
           ambiguity stops the run for clarification. Missing evidence and
           calculation limitations prevent full acceptance. Review does not
-          independently verify the publisher's facts. A clear review finding
-          may trigger one correction within the same allowance; ambiguous
-          findings or unchanged results stop the run.
+          independently verify the publisher's facts. A clear review finding may
+          trigger one correction within the same allowance; ambiguous findings
+          or unchanged results stop the run.
         </p>
         <div className="research-actions">
           <button

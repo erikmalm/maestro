@@ -15,9 +15,9 @@ from backend.research import AMOUNTS, MAX_PROVIDER_STATE_BYTES, _encoded, _ident
 from backend.web_search import ENDPOINT
 
 
-KINDS = ("requirements", "evidence_review", "writer", "reviewer")
+KINDS = ("requirements", "evidence_review", "writer", "reviewer", "route", "direct")
 STAGE_ACTIONS = {"requirements": "emit_requirements", "evidence_review": "assess_evidence",
-                 "writer": "write_answer", "reviewer": "review_answer"}
+                 "writer": "write_answer", "reviewer": "review_answer", "route": "route_request", "direct": "reply_directly"}
 MAX_STAGES = 8
 FINISHING_TOKENS = 8192
 FINISHING_SECONDS = 5
@@ -352,6 +352,9 @@ def prepare(store, run_id, claim_token, kind, *, model, schema, assignment, evid
                 "revision": run["revision"]["count"],
                 "permitted_actions": list(permitted_actions), "seconds": seconds,
                 "permissions": {**run["permissions"], "memory_derived": bool(run["permissions"]["memory_derived"] or store._chat_memory(connection, run["chat_id"]))}}
+        if kind in ("route", "direct"):
+            from backend.chat_routing import admission_scope
+            spec["chat_scope"] = admission_scope(run["chat_route"])
         if packet_hash is not None:
             spec["packet_hash"] = packet_hash
         if coverage_hash is not None:
@@ -395,6 +398,18 @@ def authorize(store, stage, workspace, provider_state, db, *, reserved=False):
             or permissions["memory_recall"] is not False
             or permissions["source_mode"] == "research" and run.get("workflow") != "research_answer"):
         raise ValueError("Research permissions changed.")
+    if row[2] in ("route", "direct"):
+        from backend.chat_routing import admission_scope
+        route = run.get("chat_route")
+        expected = None if row[2] == "route" else "direct"
+        if not route or route["decision"] != expected or spec.get("chat_scope") != admission_scope(route):
+            raise ValueError("The owned chat route changed.")
+        if row[2] == "direct":
+            from backend.work_config import config_value
+            current = config_value(workspace)
+            if route["memory_policy"] != {name: current[name] for name in ("memory_recall_count", "memory_recall_characters")}:
+                raise ValueError("Direct-memory settings changed after admission.")
+            permissions.update(source_mode="saved_only", hosted_allowed=False, memory_recall=route["direct_memory_allowed"])
     if current_memory and not run["permissions"]["memory_derived"]:
         run["permissions"]["memory_derived"] = True
         store._save(db, run, "running", token=stage.claim_token)
@@ -474,7 +489,7 @@ def reserve(store, stage, workspace, provider_state, request_id, input_bound, ou
     return authorize(store, stage, workspace, provider_state, db, reserved=True)
 
 
-def settle(store, stage, request_id, *, db, input_tokens, output_tokens, outcome, output, workspace, provider_state, dispatched):
+def settle(store, stage, request_id, *, db, input_tokens, output_tokens, outcome, output, workspace, provider_state, dispatched, usage_known=True):
     _transaction(db)
     if outcome not in ("completed", "failed", "uncertain") or type(dispatched) is not bool:
         raise ValueError("Use a recorded research stage outcome.")
@@ -487,6 +502,7 @@ def settle(store, stage, request_id, *, db, input_tokens, output_tokens, outcome
             runrow = store._row(db, stage.run_id)
             if runrow is not None and runrow[4] != "deleted":
                 store._event(db, stage.run_id, "stage_uncertain")
+                store._refresh_chat_usage(db, store._public(db, runrow), (request_id, None, None))
         return False
     if any(type(value) is not int or value < 0 for value in (input_tokens, output_tokens)):
         raise ValueError("Research token usage is unknown.")
@@ -533,6 +549,7 @@ def settle(store, stage, request_id, *, db, input_tokens, output_tokens, outcome
         store._elapsed(run)
         store._save(db, run, runrow[4], token=runrow[7])
         store._event(db, stage.run_id, "stage_finished" if accepted else "stage_failed")
+        store._refresh_chat_usage(db, run, (request_id, input_tokens, output_tokens) if usage_known else (request_id, None, None))
     return accepted
 
 
@@ -546,7 +563,7 @@ def resolve_unknown(store, request_id, db):
     identity = ResearchStage(row[1], token, row[0], row[2])
     amounts = json.loads(row[3])
     settle(store, identity, request_id, db=db, input_tokens=amounts["tokens"], output_tokens=0,
-           outcome="failed", output=None, workspace=None, provider_state=None, dispatched=True)
+           outcome="failed", output=None, workspace=None, provider_state=None, dispatched=True, usage_known=False)
     return True
 
 

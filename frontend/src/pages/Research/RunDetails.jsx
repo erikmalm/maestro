@@ -15,6 +15,7 @@ export const stateLabel = (state) =>
     running: "Running",
     draft: "Draft — not finally reviewed",
     accepted: "Reviewed answer",
+    answered: "Direct reply recorded",
     partial: "Partial — no reviewed answer",
     clarification: "Clarification needed — no reviewed answer",
     cancelled: "Cancelled",
@@ -31,12 +32,14 @@ const lookupLabels = {
 };
 
 export default function RunDetails({ run, busy, onCancel, onDelete }) {
-  const requirements = [
+  const structured = [
     "requirements",
     "evidence_review",
     "research_draft",
     "research_answer",
   ].includes(run.workflow);
+  const direct = run.chat_route?.decision === "direct";
+  const requirements = structured && !direct;
   const accepted =
     run.state === "accepted" &&
     run.final_review?.basis === "semantic" &&
@@ -51,7 +54,9 @@ export default function RunDetails({ run, busy, onCancel, onDelete }) {
     >
       <div className="research-detail-heading">
         <div>
-          <h2>Recorded research run</h2>
+          <h2>
+            {run.chat_route ? "Recorded request run" : "Recorded research run"}
+          </h2>
           <p role="status">
             {run.state === "accepted" && !accepted
               ? "Review unavailable"
@@ -85,7 +90,7 @@ export default function RunDetails({ run, busy, onCancel, onDelete }) {
           <dt>Request</dt>
           <dd className="research-request">{run.request}</dd>
         </div>
-        {!requirements && (
+        {!structured && (
           <div>
             <dt>Saved-evidence keywords</dt>
             <dd>{run.query || "No keywords — bounded saved inventory"}</dd>
@@ -102,6 +107,31 @@ export default function RunDetails({ run, busy, onCancel, onDelete }) {
           <dd>{date(run.updated_at)}</dd>
         </div>
       </dl>
+      {run.chat_route && (
+        <p className="form-note">
+          <span>
+            Selected path:{" "}
+            {{
+              direct: "direct reply",
+              research: "Research",
+              clarify: "clarification",
+            }[run.chat_route.decision] || "assessing request"}
+            .
+            {run.chat_id && (
+              <>
+                {" "}
+                <a href={`/?chat=${encodeURIComponent(run.chat_id)}`}>
+                  Open originating conversation
+                </a>
+                .
+              </>
+            )}
+            {direct &&
+              run.state === "answered" &&
+              " The direct reply is saved there; it has no final evidence review."}
+          </span>
+        </p>
+      )}
       {requirements && (
         <Assessment
           assessment={run.assessment}
@@ -137,23 +167,33 @@ export default function RunDetails({ run, busy, onCancel, onDelete }) {
           <div>
             <dt>Sources</dt>
             <dd>
-              {run.permissions.source_mode === "saved_only"
-                ? "Saved evidence only"
-                : run.permissions.source_mode === "research"
-                  ? "Saved evidence, with up to one web search for a gap"
-                  : "Unknown"}
+              {direct
+                ? "Local direct reply"
+                : run.permissions.source_mode === "saved_only"
+                  ? "Saved evidence only"
+                  : run.permissions.source_mode === "research"
+                    ? "Saved evidence, with up to one web search for a gap"
+                    : "Unknown"}
             </dd>
           </div>
           <div>
             <dt>Hosted search permission</dt>
             <dd>
-              {run.permissions.hosted_allowed ? "Permitted" : "Not permitted"}
+              {!direct && run.permissions.hosted_allowed
+                ? "Permitted"
+                : "Not permitted"}
             </dd>
           </div>
           <div>
             <dt>Personal memory recall</dt>
             <dd>
-              {run.permissions.memory_recall ? "Permitted" : "Not permitted"}
+              {(
+                direct
+                  ? run.chat_route.direct_memory_allowed
+                  : run.permissions.memory_recall
+              )
+                ? "Permitted for the local reply"
+                : "Not permitted"}
             </dd>
           </div>
           <div>
@@ -183,7 +223,7 @@ export default function RunDetails({ run, busy, onCancel, onDelete }) {
           <p className="form-note">No recorded activity is available yet.</p>
         )}
       </section>
-      {!requirements && (
+      {!structured && (
         <section
           aria-label="Saved-version receipt"
           className="research-section"
@@ -264,7 +304,12 @@ export default function RunDetails({ run, busy, onCancel, onDelete }) {
       {run.budget && (
         <section aria-label="Shared allowance" className="research-section">
           <h3>Shared allowance</h3>
-          <div className="research-table-scroll">
+          <div
+            className="research-table-scroll"
+            tabIndex={0}
+            role="region"
+            aria-label="Allowance table"
+          >
             <table className="research-budget">
               <caption>Recorded shared allowance</caption>
               <thead>

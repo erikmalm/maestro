@@ -55,6 +55,9 @@ EVENTS = {
     "revision_capacity": "Correction stopped because the remaining shared allowance cannot cover it.",
     "revision_stopped": "Review findings do not permit another bounded correction.",
     "revision_limit": "Correction stopped after the single permitted revision cycle.",
+    "direct_started": "Writing an owned local direct reply; hosted search is unavailable.",
+    "chat_answered": "Direct reply saved to the originating conversation.",
+    "chat_withheld": "The conversation result was withheld because its current safety checks failed.",
 }
 FAILURES = {
     "lookup_failed": EVENTS["failed"],
@@ -250,6 +253,7 @@ class ResearchStore:
         result.setdefault("evidence_review", None)
         result.setdefault("draft", None)
         result.setdefault("final_review", None)
+        result.setdefault("chat_route", None)
         result.setdefault("revision", {"limit": 0, "count": 0, "action": None, "item_ids": [], "fingerprints": {}})
         if events:
             rows = db.execute("SELECT sequence,at,kind,summary FROM research_events WHERE run_id=? ORDER BY sequence LIMIT ?",
@@ -296,7 +300,7 @@ class ResearchStore:
         except (ValueError, TypeError, RecursionError):
             raise ValueError("Provider usage is unavailable. Research cannot start.") from None
 
-    def create(self, submission_id, request, query, chat_id, permissions, budget, db=None, *, workflow="lookup", continuation=False):
+    def create(self, submission_id, request, query, chat_id, permissions, budget, db=None, *, workflow="lookup", continuation=False, chat_route=None):
         _identifier(submission_id)
         _text(request, MAX_REQUEST)
         _text(query, 512, empty=True)
@@ -312,6 +316,13 @@ class ResearchStore:
             identity.append(workflow)
         if permissions.get("source_mode") == "research":
             identity.append("research")
+        if chat_route is not None:
+            if workflow != "research_answer" or chat_id is None:
+                raise ValueError("Reviewed chat requires its original conversation.")
+            _encoded(chat_route, 2048)
+            identity.append(["reviewed_chat", chat_route["model"], chat_route["direct_memory_allowed"], chat_route["memory_policy"]])
+            if "requested_model" in chat_route:
+                identity.append(["requested_model", chat_route["requested_model"]])
         fingerprint = hashlib.sha256(_encoded(identity).encode("utf-8")).hexdigest()
         with self._transaction(db) as connection:
             previous = self._row(connection, submission_id=submission_id)
@@ -333,7 +344,7 @@ class ResearchStore:
             run_id, stamp = uuid.uuid4().hex, self.stamp()
             payload = {"request": request, "query": query, "permissions": captured, "budget": allowance,
                        "result": None, "workflow": workflow, "assessment": None, "evidence_review": None, "draft": None,
-                       "final_review": None, "revision": {"limit": int(continuation), "count": 0,
+                       "final_review": None, "chat_route": chat_route, "revision": {"limit": int(continuation), "count": 0,
                            "action": None, "item_ids": [], "fingerprints": {}}}
             connection.execute("INSERT INTO research_runs VALUES(?,?,?,?,?,?,?,?,?)",
                                (run_id, submission_id, fingerprint, chat_id, "queued", stamp, stamp, None, _encoded(payload)))
@@ -388,6 +399,7 @@ class ResearchStore:
         payload.update(workflow=run.get("workflow", "lookup"), assessment=run.get("assessment"),
                        evidence_review=run.get("evidence_review"), draft=run.get("draft"), final_review=run.get("final_review"),
                        revision=run["revision"])
+        payload["chat_route"] = run.get("chat_route")
         db.execute("UPDATE research_runs SET state=?,updated_at=?,claim_token=?,payload=? WHERE id=?",
                    (state, run["updated_at"], token, _encoded(payload), run["id"]))
 
@@ -398,8 +410,123 @@ class ResearchStore:
         release_finishing(self, db, run)
         run["permissions"]["memory_derived"] |= self._chat_memory(db, run["chat_id"])
         self._elapsed(run)
+        if run.get("chat_route") and not run["chat_route"]["published"]:
+            try:
+                self._publish_chat(db, run, "Reviewed request outcome: [View result and findings](?research_run=" + run["id"] + ").")
+            except (ValueError, OSError):
+                self._event(db, run["id"], "chat_withheld")
         self._save(db, run, state)
         self._event(db, run["id"], kind, summary)
+
+    def _publish_chat(self, db, run, reply, *, memory_ids=(), direct=False):
+        from backend.provider import commit_chat_exchange
+        from backend.research_stages import _states, safe_stage_content
+        workspace, provider = _states(db)
+        workspace = json.loads(db.execute("SELECT value FROM workspace WHERE id=1").fetchone()[0])
+        safe_stage_content([run["request"], reply, memory_ids], {"protocol": "ollama"})
+        if not self._chat_exists(db, run["chat_id"]):
+            raise ValueError("The originating conversation is unavailable.")
+        usage = self._chat_usage(db, run["id"])
+        commit_chat_exchange(workspace, db, run["chat_id"], run["request"], reply,
+            model=usage["model"], cost=0, input_tokens=usage["input_tokens"], output_tokens=usage["output_tokens"],
+            at=self.stamp(), eligible=direct,
+            database=self.database, timezone=self.timezone, routing="reviewed", memory_ids=memory_ids,
+            research_run_id=run["id"], usage_status=usage["usage_status"])
+        db.execute("UPDATE workspace SET value=? WHERE id=1", (json.dumps(workspace),))
+        run["chat_route"]["published"] = True
+        run["chat_route"]["memory_ids"] = list(memory_ids)
+        run["permissions"]["memory_derived"] |= bool(memory_ids)
+
+    @staticmethod
+    def _chat_usage(db, run_id, receipt=None):
+        entries = db.execute("SELECT json_extract(l.value,'$.id'),json_extract(l.value,'$.model'),"
+            "json_extract(l.value,'$.status'),json_extract(l.value,'$.input_tokens'),json_extract(l.value,'$.output_tokens'),"
+            "coalesce(json_extract(l.value,'$.local_unknown'),0) OR coalesce(json_extract(l.value,'$.background_unknown'),0) "
+            "OR coalesce(json_extract(l.value,'$.local_recovered'),0),json_extract(l.value,'$.model_calls') "
+            "FROM provider_state p,json_each(p.value,'$.ledger') l WHERE p.id=1 "
+            "AND json_extract(l.value,'$.research_run_id')=?", (run_id,)).fetchall()
+        status, inputs, outputs = "known", 0, 0
+        for entry_id, _, state, input_tokens, output_tokens, unknown, calls in entries:
+            if receipt is not None and receipt[0] == entry_id:
+                input_tokens, output_tokens = receipt[1:]
+                current = "known" if input_tokens is not None else "unknown"
+            elif state in ("reserved", "uncertain"):
+                current = "unknown" if unknown or state == "uncertain" else "pending"
+            elif all(type(value) is int and value >= 0 for value in (input_tokens, output_tokens)):
+                current = "known"
+            else:
+                current = "unknown" if unknown or state != "failed" or calls else "known"
+                input_tokens, output_tokens = 0, 0
+            if current == "unknown" or current == "pending" and status == "known":
+                status = current
+            if current == "known":
+                inputs, outputs = inputs + input_tokens, outputs + output_tokens
+        return {"model": entries[-1][1] if entries else "", "usage_status": status,
+                "input_tokens": inputs if status == "known" else None, "output_tokens": outputs if status == "known" else None}
+
+    def _refresh_chat_usage(self, db, run, receipt):
+        if not (run.get("chat_route") or {}).get("published"):
+            return
+        row = db.execute("SELECT '$.chats['||CAST(c.key AS INTEGER)||'].messages['||CAST(m.key AS INTEGER)||']' "
+            "FROM workspace w,json_each(w.value,'$.chats') c,json_each(c.value,'$.messages') m "
+            "WHERE w.id=1 AND json_extract(c.value,'$.id')=? AND json_extract(m.value,'$.research_run_id')=? "
+            "AND json_extract(m.value,'$.role')='assistant' LIMIT 1", (run["chat_id"], run["id"])).fetchone()
+        if row is not None:
+            usage = self._chat_usage(db, run["id"], receipt)
+            # Change only accounting; do not reload or validate unrelated workspace content.
+            db.execute("UPDATE workspace SET value=json_set(value,?,?,?,?,?,?) WHERE id=1",
+                       (row[0] + ".usage_status", usage["usage_status"], row[0] + ".input_tokens", usage["input_tokens"],
+                        row[0] + ".output_tokens", usage["output_tokens"]))
+
+    def finish_chat_stage(self, run_id, token, stage, *, memory_ids=(), secrets=()):
+        from backend.chat_routing import validate_route, validate_direct
+        from backend.research_stages import _row, _states, _hash, safe_stage_content, release_finishing
+        with self._transaction() as db:
+            row = self._row(db, run_id)
+            if row is None or row[4] != "running" or row[7] != token:
+                return False
+            run, record = self._public(db, row), _row(db, stage)
+            workspace, provider = _states(db)
+            workspace = json.loads(db.execute("SELECT value FROM workspace WHERE id=1").fetchone()[0])
+            spec = json.loads(record[5])
+            if (stage.run_id != run_id or stage.claim_token != token or record[2] not in ("route", "direct")
+                    or record[3] != "completed" or record[10] is None or run.get("chat_route") is None
+                    or (_hash(provider["config"]), _hash(workspace["limits"])) != (record[6], record[7])
+                    or spec["model"] not in provider["models"] or self.clock() >= _date(run["budget"]["deadline"]).timestamp()):
+                raise ValueError("The completed chat stage or its settings are unavailable.")
+            raw = json.loads(record[10])
+            safe_stage_content([raw, run], provider["config"], secrets=secrets)
+            if record[2] == "route":
+                if run["chat_route"]["decision"] is not None:
+                    raise ValueError("This chat route is already recorded.")
+                selected = validate_route(raw, run["request"])
+                run["chat_route"]["decision"], run["assessment"] = selected["route"], selected["assessment"]
+                run["chat_route"]["route_stage_id"] = stage.stage_id
+                if selected["route"] == "clarify":
+                    reply = " ".join(item["question"] for item in selected["assessment"]["clarifications"])
+                    self._publish_chat(db, run, reply)
+                    self._terminal(db, run, "clarification", "clarification_needed")
+                    return True
+                if selected["route"] == "direct":
+                    release_finishing(self, db, run)
+                    db.execute("INSERT INTO research_finishing VALUES(?,?)", (run_id, "{}"))
+                self._event(db, run_id, "direct_started" if selected["route"] == "direct" else "evidence_started")
+            else:
+                if run["chat_route"]["decision"] != "direct":
+                    raise ValueError("A direct reply requires its recorded direct decision.")
+                from backend.work_config import config_value
+                current = config_value(workspace)
+                if run["chat_route"]["memory_policy"] != {name: current[name] for name in ("memory_recall_count", "memory_recall_characters")}:
+                    raise ValueError("Direct-memory settings changed before publication.")
+                reply = validate_direct(raw, run["request"])["reply"]
+                safe_stage_content([run, reply], provider["config"], secrets=secrets)
+                self._publish_chat(db, run, reply, memory_ids=memory_ids, direct=True)
+                run["chat_route"]["direct_stage_id"] = stage.stage_id
+                self._terminal(db, run, "answered", "chat_answered")
+                return True
+            safe_stage_content(run, provider["config"], secrets=secrets)
+            self._save(db, run, "running", token=token)
+            return True
 
     def _purge(self, db, run_id):
         from backend.research_stages import purge
