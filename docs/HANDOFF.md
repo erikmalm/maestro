@@ -20,14 +20,14 @@ Checkpoint: 2026-11-28, Europe/Stockholm. Check live GitHub before acting.
   build, disposable real-backend filters/pins/withdrawal, and desktop/mobile checks.
 - **Candidate #29:** `feat/targeted-research-acquisition` adds an explicit,
   default-off research mode, one gap-driven acquisition, capture, reassessment,
-  writing and review. All 922 backend tests pass in 174.357 seconds; 26 Research
+  writing and review. All 923 backend tests pass in 203.159 seconds; 26 Research
   browser tests/build and independent frontend/backend reviews pass. The review
-  reproduced and fixed capacity-preflight and terminal/capture races; 17 new test
+  reproduced and fixed capacity-preflight and terminal/capture races; 18 new test
   methods cover the acquisition seams. All 127 browser tests and the production
   build pass after #58 integration. Copilot's capacity finding is fixed by shared
   stage-input construction. The failing-before boundary now spends zero searches;
   a roomier control completes four stages/one search. All 137 focused checks and
-  independent follow-up review pass. Full backend and fresh GitHub review remain.
+  independent follow-up review pass. Fresh GitHub review remains required.
   The first
   deliberate live attempt at `a8e925f` stopped during cold model loading after
   45 seconds: one local transport, zero hosted searches, unknown completion.
@@ -38,11 +38,11 @@ Checkpoint: 2026-11-28, Europe/Stockholm. Check live GitHub before acting.
 - **Candidate #30:** `feat/research-review-triage` permits one justified rewrite
   or evidence-gap correction in the existing run. New answers capture the
   user-approved seven calls/180 seconds; old runs keep their original policy.
-  No token/spend/search cap increases. All 941 tests loaded before dependency
-  integration passed (198.635s); all final 17 continuation tests passed (8.820s).
-  After integrating #29's capacity fix, all 35 continuation/acquisition checks and
-  the build pass; independent integration review is clear. Full final validation,
-  GitHub review and a bounded local triage trial remain. Improved live-model
+  No token/spend/search cap increases. All 943 backend tests pass (212.206s),
+  including all 17 continuation cases. All 26 Research browser tests, the build
+  and desktop/mobile inspection pass; #29 supplies the full 127-browser baseline.
+  Independent correctness/simplicity and integration reviews are clear. GitHub
+  review and a bounded local triage trial remain. Improved live-model
   classification is not yet measured. No new service, dependency or datastore.
 
 ## Autonomous pilot
